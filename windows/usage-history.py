@@ -1743,10 +1743,13 @@ def newest_codex(rec, hist, new=()):
     cur = rec.get("codex")
     if not isinstance(cur, dict):
         return rec
+
+    def measured(v):                        # a real reading: rollout_records carries every seat forward, an earlier note too (stamped with a ts but no window)
+        return isinstance(v, dict) and bool(v.get("ts")) and v.get("ok") is not False and (v.get("w") is not None or v.get("s") is not None)
     best = {}
     for h in new:                           # only a measurement: rollout_records carries every seat forward, an earlier note too (stamped with a ts but no window)
         for seat, v in (h.get("codex") or {}).items():
-            if isinstance(v, dict) and v.get("ts") and v.get("ok") is not False and (v.get("w") is not None or v.get("s") is not None)                     and v["ts"] > (best.get(seat) or {}).get("ts", 0):
+            if measured(v) and v["ts"] > (best.get(seat) or {}).get("ts", 0):
                 best[seat] = v
     for seat, v in best.items():
         c = cur.get(seat)
@@ -1755,7 +1758,7 @@ def newest_codex(rec, hist, new=()):
     for h in list(new) + list(hist):        # every record, not the first one met: an older record can hold a newer measurement
         for seat, v in (h.get("codex") or {}).items():
             c = cur.get(seat)
-            if isinstance(c, dict) and isinstance(v, dict) and c.get("ts") and (v.get("ts") or 0) > c["ts"]:
+            if isinstance(c, dict) and measured(v) and c.get("ts") and v["ts"] > c["ts"]:      # a carried note, however new its ts, never replaces a reading
                 cur[seat] = dict({k: x for k, x in c.items() if k not in CODEX_WINDOW_KEYS}, **{k: x for k, x in v.items() if k in CODEX_WINDOW_KEYS})
     return rec
 
@@ -3293,6 +3296,9 @@ def selftest():
         cd_ = [{"t": N - 10, "codex": {"D": {"ok": False, "note": "no saved login on this PC", "ts": N - 10}}}, {"t": N - 5, "codex": {"D": {"ts": N - 5}}}]
         assert newest_codex(json.loads(json.dumps(rec_)), hist_, cd_)["codex"]["D"] == rec_["codex"]["D"]       # a note carried forward into `new` (or a bare ts) is not a measurement: D keeps its note
         assert newest_codex(json.loads(json.dumps(rec_)), hist_, nn_[::-1])["codex"]["C"]["w"] == 0.8             # the newest of `new`, whatever its order
+        mr_ = {"t": N + 9, "codex": {"C": {"ts": N - 60, "w": 0.3, "wr": N + 99, "wp": WEEK, "banked": 2}}}
+        nt_ = [{"t": N - 1, "codex": {"C": {"ok": False, "note": "no usage cached yet", "ts": N - 1}}}]
+        assert newest_codex(json.loads(json.dumps(mr_)), nt_, nt_)["codex"]["C"] == mr_["codex"]["C"]          # a carried note with a newer ts (in `new` or in history) does not wipe a reading
         cn_ = build([dict(rec_, codex={"C": got_["C"]})], N + 9, {}, False, {})["providers"][0]["accounts"]
         assert cn_[0]["ok"] and cn_[0]["note"] == "" and cn_[0]["windows"], cn_       # the reading shows on the page
         # the desktop app's page does not carry the meta refresh (removing the tag in script does not cancel the reload the browser already scheduled)
