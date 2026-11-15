@@ -428,6 +428,19 @@ foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'network' }
 Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS + 3 * 86400))
 $rc = Invoke-CheckRotate 0 $false $true 'test'
 Check 'fallback passes over a seat whose stale Fable cap is still in force (C)' ((Get-ActiveLabel) -eq 'C') (Get-ActiveLabel)
+# a headerless Fable probe (ok, http 500, no Fable window) must not overwrite a cap still in force; a real reading does
+Reset-Case
+Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS + 3 * 86400))
+$script:plan['A'] = 'fable-500'
+$null = Get-UsageCached 'A' $true 'fable' '-fable'
+Check 'a headerless Fable probe leaves a cap in force on disk' (Test-FableCapCached 'A')
+$script:plan['A'] = 'ok'
+$null = Get-UsageCached 'A' $true 'fable' '-fable'
+Check 'a Fable probe that reads the window replaces the cap' (-not (Test-FableCapCached 'A'))
+Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS - 60))
+$script:plan['A'] = 'fable-500'
+$null = Get-UsageCached 'A' $true 'fable' '-fable'
+Check 'a headerless Fable probe still replaces a cap that has reset' ((Get-Content (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -Raw | ConvertFrom-Json).data.http -eq 500)
 
 # --- quota 429 is not an access refusal ---
 Reset-Case

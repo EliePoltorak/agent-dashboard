@@ -435,7 +435,10 @@ function Get-UsageCached {
     $proved = ([int]$d.http -ge 200 -and [int]$d.http -lt 300 -and ($d.status -or $d.s5_util -or $d.oi7_util))
     if ($Model -like '*fable*' -and $proved) { Clear-AccessDisabled $Label }
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
-    try { @{ ts=$now; data=$d } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {}
+    # A Fable probe that read no Fable window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not
+    # overwrite a cached cap still in force: the fallback reads that file until the cap's own reset (Test-FableCapCached).
+    $keepCap = ($Model -like '*fable*' -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-FableCapCached $Label))
+    if (-not $keepCap) { try { @{ ts=$now; data=$d } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {} }
   } elseif ($HonorAccessCooldown -and $d.access -eq 'unknown') {
     $script:UnknownProbeMemo[$memoKey] = $d
   }
@@ -457,7 +460,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-FableCapCached','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(foreach ($l in $Labels) { foreach ($mm in $models) { @{ l=$l; m=$mm.m; s=$mm.s } } })
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
