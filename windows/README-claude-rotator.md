@@ -531,7 +531,7 @@ seats changed opposite ways. A record the sync has not seen before (the app made
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
 can't be written, or a record the sync knew from its last run can't be read, the sync warns (naming the file) and that session keeps its last saved state, so
 the next run tries again from it. Until it succeeds, changing that session back to how it was (archiving or
-un-archiving, pinning or unpinning) may not stick; an unreadable record (including an empty one) holds its
+un-archiving, pinning or unpinning) may not stick (the same holds after a run whose state save failed); an unreadable record (including an empty one) holds its
 session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or
 deleted). One exception: a state file from before this version has no record-to-session map, so until its first
 good save an unreadable record stops the whole save. The first run, and any session never seen before, use

@@ -71,6 +71,7 @@
   - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
     changed records are backed up to ~/.claude-app-seats\.flag-sync-backups\<ts>\ (newest 10 kept).
     Sidebar groups and the pin list are not synced (claude-rotator issue #10).
+  - One run at a time: a second run while ~/.claude-app-seats\.sync-history.lock is held skips.
   - Classification is cached in ~/.claude-app-seats\.sync-classify-cache.json keyed by file
     size+mtime, so repeated runs don't re-read every transcript.
 #>
@@ -84,7 +85,7 @@ param(
   [switch]$NoPrune,
   [switch]$Quiet,
   [switch]$AssumeAppRunning,  # for the test: behave as if the desktop app were running
-  [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); wins over nothing else
+  [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); -AssumeAppRunning wins if both are given
 )
 $ErrorActionPreference = 'Stop'
 
@@ -103,7 +104,10 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
 try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
-catch { if (-not $Quiet) { 'another history sync is running; skipped' }; return }
+catch [IO.IOException] {
+  if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
+  Write-Warning 'another history sync is running; this one is skipped'; return
+}
 try {
 $backupRoot = Join-Path $env:USERPROFILE ".claude-app-seats\.pruned-history-backups\$stamp"
 $cachePath  = Join-Path $env:USERPROFILE '.claude-app-seats\.sync-classify-cache.json'
@@ -309,8 +313,7 @@ if (-not $Quiet) {
 }
 
 # Is the desktop app running? Checked BEFORE any record is read, so a record the app writes as it quits
-# can't be read stale and written back by pass 1.4. ($ccs must be the REAL app's index; a sandbox under a
-# redirected %APPDATA% is never live.)
+# can't be read stale and written back by pass 1.4. Always checked; only the test passes -AssumeAppClosed.
 function Test-AppUp {
   if ($AssumeAppRunning) { return $true }
   if ($AssumeAppClosed) { return $false }   # only ever passed by the test, for its sandbox; otherwise always check
