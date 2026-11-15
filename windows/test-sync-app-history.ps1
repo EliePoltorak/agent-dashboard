@@ -7,7 +7,8 @@
   session's last baseline (the rest is saved), so its stale value does not spread next run; a deleted record
   does not stop the save; with the app running (-AssumeAppRunning) nothing is changed or saved and a record
   it creates is neutral; a state file without the record->session map stops the whole save on an unreadable
-  record; a record truncated to 0 bytes counts as unreadable; archived-sessions.idx follows archive and
+  record; a held session's new record is neutral and set by the next good run; a record truncated to 0
+  bytes counts as unreadable; archived-sessions.idx follows archive and
   un-archive; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
@@ -129,18 +130,32 @@ $st = state; check 'retried: the session baseline moves on' ($st['isArchived'][(
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
 $keep1 = Get-Content -LiteralPath $g1.f -Raw
 if ($H) { setRec $H.Group[0].f 'isStarred' $true }                                     # another session changed in the same run
+$x0 = (ofSession $X)[0]; setRec $x0.f 'isStarred' $true                               # a change the save must record
 $stHash = (Get-FileHash $statePath).Hash
 setRec $g0.f 'isArchived' $false; Set-Content -LiteralPath $g1.f 'not json' -NoNewline; run   # un-archive on seat 0; seat 1 unreadable
 check 'unreadable record warns' ($out -match 'could not read')
 $st = state
 check 'unreadable record: its session keeps its last baseline' ($st['isArchived'][(key $g0.f)] -eq $true -and $st['isArchived'][(key $g1.f)] -eq $true)
-check 'unreadable record: the rest of the state is saved (not the whole-save stop)' ((-not ($out -match 'is not saved this run')) -and ((Get-FileHash $statePath).Hash -ne $stHash) -and $st['cli'] -and $st['cli'][(key $g1.f)] -eq $G.Name)
+check 'unreadable record: the rest of the state is saved (not the whole-save stop)' ((-not ($out -match 'is not saved this run')) -and ((Get-FileHash $statePath).Hash -ne $stHash) -and $st['isStarred'][(key $x0.f)] -eq $true -and $st['cli'] -and $st['cli'][(key $g1.f)] -eq $G.Name)
 if ($H) {
   check 'unreadable record: another session changed in the same run is saved' (@(ofSession $H.Name | Where-Object { $st['isStarred'][(key $_.f)] -ne $true }).Count -eq 0)
   foreach ($r in (ofSession $H.Name)) { setRec $r.f 'isStarred' $false }
 }
+foreach ($r in (ofSession $X)) { setRec $r.f 'isStarred' $false }                      # put the synthetic session back (all known -> off)
 Set-Content -LiteralPath $g1.f $keep1 -NoNewline; run                                # seat 1 readable again, still archived
 check 'readable again: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+
+"--- a held session's new record is neutral (off) and not in the state; the next good run sets it"
+foreach ($r in (ofSession $X)) { setRec $r.f 'isArchived' $true }; run              # archived everywhere, all known
+$xs = @(ofSession $X); $keepX = Get-Content -LiteralPath $xs[1].f -Raw; $before = @(ofSession $X | ForEach-Object f)
+Remove-Item -LiteralPath $xs[0].f; Set-Content -LiteralPath $xs[1].f 'not json' -NoNewline; run   # one seat lacks it, one unreadable
+$new = @(ofSession $X | Where-Object { $before -notcontains $_.f })
+check "held: a record was recreated ($($new.Count))" ($new.Count -ge 1)
+check 'held: the recreated record is neither archived nor pinned' (@($new | Where-Object { $_.arch -or $_.star }).Count -eq 0)
+$st = state; check 'held: the recreated record is not in the saved state' (@($new | Where-Object { $st['isArchived'].ContainsKey((key $_.f)) }).Count -eq 0)
+Set-Content -LiteralPath $xs[1].f $keepX -NoNewline; run
+check 'held, next good run: every record of the session is archived' (@(ofSession $X | Where-Object { -not $_.arch }).Count -eq 0)
+foreach ($r in (ofSession $X)) { setRec $r.f 'isArchived' $false }; run
 
 "--- a record truncated to 0 bytes counts as unreadable too"
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run

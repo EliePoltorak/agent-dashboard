@@ -534,12 +534,12 @@ the next run tries again from it. Until it succeeds, changing that session back 
 un-archiving, pinning or unpinning) may not stick; an unreadable record (including an empty one) holds its
 session back until the file is restored or deleted. The first run, and any session never seen before, use
 "on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
-are made while the app is open, the state file is unreadable, or their session is held back). The app also lists each folder's archived
+are made while the app is open, the state file is unreadable, their session is held back, or no state is saved that run). The app also lists each folder's archived
 records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the
-app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
+app is closed** (checked before reading and again before writing; opening the app while the sync is writing can still undo a change) (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, when it is enabled, or a manual
 `claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
-under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 backup folders are kept). If the state
+under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 timestamp-named backup folders are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
 as a first run; delete it to start again (the next run counts a flag set on any seat as set on all).
 

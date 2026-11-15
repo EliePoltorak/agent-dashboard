@@ -362,6 +362,7 @@ $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
 $flagBackupRoot = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-sync-backups'
 $flagSkip = $false      # pass 1.4 did not run: leave records AND the state file alone
 $flagPrevAll = $null    # $null = first run (no state file yet)
+if (-not $appUp) { $appUp = Test-AppUp }   # again, just before the first write (pass 1 took a while)
 if ($appUp) {
   $flagSkip = $true
   if (-not $Quiet) { 'archive/pin flags not synced: the desktop app is running (they sync at the next seat switch)' }
@@ -464,11 +465,6 @@ if (-not $flagSkip) {
           Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
           [void]$flagFailCli.Add("$flag|$cli")
         }
-      }
-      # clones made in pass 2 for seats lacking the session must carry the same flag
-      if (-not $DryRun -and $recIndex.ContainsKey($cli)) {
-        $o = $recIndex[$cli].raw | ConvertFrom-Json
-        if ([bool]$o.$flag -ne $want) { $o | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force; $recIndex[$cli].raw = $o | ConvertTo-Json -Compress -Depth 100 }
       }
     }
     $flagNextAll[$flag] = $next
