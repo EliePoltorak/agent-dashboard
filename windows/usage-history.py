@@ -1273,8 +1273,8 @@ def build_provider(hist, pid, emails, now, extra):
             w = {"id": wid, "label": wlabel, "used": u, "reset": None if s.get(wid + "r") is None else int(_roll(s[wid + "r"], period, now))}
             if isinstance(s.get(wid + "t"), str) and not (s.get(wid + "r") and now >= s[wid + "r"]):
                 w["stat"] = s[wid + "t"]            # a status read before the window reset says nothing about the new one
-            if s.get(wid + "r") and now >= s[wid + "r"] > (s.get("ts") or 0):
-                w["assumed"] = True         # the reset passed and nothing has been read since: 0 is rolled forward, not measured
+            if s.get(wid + "r") and now >= s[wid + "r"] > ((s.get("fts") if wid == "f" else None) or s.get("ts") or 0):
+                w["assumed"] = True         # the reset passed and nothing has been read since (Fable: since its own read, fts): 0 is rolled forward, not measured
             if wid == "f" and s.get("fts"):
                 w["readAt"] = int(s["fts"])         # Fable's own read time: it can be days older than the seat's readAt, which follows the session/weekly row
             a["windows"].append(w)
@@ -4022,6 +4022,9 @@ def selftest():
     # 6: the API status per window travels with the seat into the blob, and not past the window's reset
     sa = build([{"t": L, "s": {"A": {"w": 0.9, "wr": L + 10, "ts": L - 5, "wt": "allowed_warning", "st": "rejected", "ft": None}, "B": {"w": 0.3, "wr": L - 10, "ts": L - 99, "wt": "rejected"}}}], L, {}, False)["providers"][0]["accounts"]
     assert sa[0]["windows"][0]["stat"] == "allowed_warning" and "stat" not in sa[1]["windows"][0]
+    # a Fable reset that passed after Fable's own (older) read is assumed, even though the session/weekly row was read after it
+    fz = build([{"t": L, "s": {"A": {"w": 0.3, "wr": L + 10, "ts": L - 5, "f": 0.9, "fr": L - 60, "fts": L - 3 * 86400}}}], L, {}, False)["providers"][0]["accounts"][0]["windows"]
+    assert [x.get("assumed") for x in fz if x["id"] == "f"] == [True], fz
     # a Fable value read days before the seat's session/weekly row carries its own readAt; a seat without fts (or the other windows) gets none
     fa = build([{"t": L, "s": {"A": {"w": 0.9, "wr": L + 10, "ts": L - 5, "f": 0.2, "fr": L + 10, "fts": L - 5 * 86400}, "B": {"w": 0.3, "wr": L + 10, "ts": L - 5, "f": 0.1, "fr": L + 10}}}], L, {}, False)["providers"][0]["accounts"]
     assert fa[0]["readAt"] == L - 5 and [w.get("readAt") for w in fa[0]["windows"]] == [None, L - 5 * 86400] and all("readAt" not in w for w in fa[1]["windows"]), fa
