@@ -115,8 +115,8 @@ def write_state(state, data):
 
 @contextlib.contextmanager
 def state_lock(state, wait=30):
-    """An OS lock on <state>.lock (msvcrt.locking / fcntl.flock), released when its holder exits: the dashboard's --check can overlap a
-    --pull, and neither may write the state from a stale read. Waits up to `wait` s, then TimeoutError."""
+    """An OS lock on <path>.lock (msvcrt.locking / fcntl.flock), released when its holder exits. Two uses: the drift state file (the dashboard's --check
+    can overlap a --pull, and neither may write the state from a stale read), and a pull's journal, journal_path(live) (one pull per live folder). Waits up to `wait` s, then TimeoutError."""
     os.makedirs(os.path.dirname(state) or ".", exist_ok=True)
     fh = open(state + ".lock", "a+b")
     try:

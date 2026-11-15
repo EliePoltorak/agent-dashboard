@@ -1235,10 +1235,11 @@ def build_limit(hist, latest, pid, wid, label, now, dflt):
             last[h["t"] // BUCKET] = [h["t"], round(r, 1), 1 if h.get("b") else 0]
     # the graph holds only records that measure this window, but rates and the profile run over every record where the provider exists: one where no seat measures
     # this window (every read failed past carry_good's limit) is a break there, so use across it is unplaced rather than bridged; before the provider existed there is no
-    # record, so a young provider still reads null
-    seq = [h for h in hist if seats_of(h, pid)]
-    p = prep(seq, wid, pid)
+    # record; and the sequence starts at the first record that measures this window, so failed reads before any measurement do not dilute the burn (no use
+    # can be placed in them, and counting their time would lower every rate until they leave its span)
     first = rows[0]["t"]
+    seq = [h for h in hist if seats_of(h, pid) and h["t"] >= first]
+    p = prep(seq, wid, pid)
     lim = {"id": wid, "label": label, "cap": round(sum(w for _, w in seats) * 100, 2), "now": round(rem, 1), "hist": [last[k] for k in sorted(last)],
            "burn": {}, "drain": {}, "seats": []}
     prof = hour_profile(seq, wid, pid)
@@ -1382,7 +1383,7 @@ def backtest(hist, targets=BT_TARGETS, every=6 * 3600, ahead=DAY, fresh=6 * 3600
         rows = [h for h in cg if remaining(h, wid, pid=pid)[1]]      # origins and recorded points are real readings
         if len(rows) < 2:
             continue
-        seq = [h for h in cg if seats_of(h, pid)]                     # burn and profile keep a failed-read gap as a break, as build_limit does
+        seq = [h for h in cg if seats_of(h, pid) and h["t"] >= rows[0]["t"]]     # burn and profile keep a failed-read gap as a break, from the first measurement on, as build_limit does
         sts = [h["t"] for h in seq]
         ts, dflt = [h["t"] for h in rows], {w: p for w, _, p in PROVIDERS[pid][1]}
         p, lefts = prep(seq, wid, pid), [remaining(h, wid, pid=pid)[0] for h in rows]
@@ -3021,6 +3022,10 @@ def selftest():
     # ... and the gap is a break for the rates the dashboard shows, not only for burn() on the raw history: records where every seat failed stay in the sequence the
     # builder runs rate and profile over, so the recovery reading is not joined to the last good one 47.5 h earlier (that read 1.1 %/h as the 3 h burn)
     lo_lim = build(lo_, lo_[-1]["t"], {}, False)["providers"][0]["limits"][0]
+    # ... but only from the first measurement on: failed reads BEFORE any measurement are not a break, they are no history (else 3.3 h of them under 1 h at 1 %/h read 0.3 %/h)
+    li_ = [{"t": T + i * 1200, "s": {"A": {"ok": False, "note": "x"}}} for i in range(10)] + [{"t": T + 12000 + i * 300, "s": {"A": gs(T + 12000 + i * 300, 0.1 + i * 300 / 3600 * 0.01)}} for i in range(13)]
+    li_lim = build(li_, li_[-1]["t"], {}, False)["providers"][0]["limits"][0]
+    assert li_lim["burn"]["3"] == 1.0 and li_lim["burn"]["24"] == 1.0, li_lim["burn"]
     assert lo_lim["burn"]["3"] == 0.0, lo_lim["burn"]                      # the 3 h span ends in the gap: its use is unplaced, so 0 (not 0.5 of a seat over 47.5 h)
     assert lo_lim["hist"][-1][1] == 40.0 and not any(T + 47000 < x[0] < T + 215000 for x in lo_lim["hist"]), lo_lim["hist"][-3:]       # the graph still holds only real (or carried) readings
     # profile: 20 h good at 1 %/h, 15 h failed (past carry), 10 h good at 1 %/h. Outage time is not covered time, and the 0.3 -> 0.6 jump is not spread over it
