@@ -392,11 +392,6 @@ if ($flagPrevAll -and $flagPrevAll['cli']) { foreach ($k in $flagPrevAll['cli'].
 $flagPrevCi = @{}
 $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 if (-not $flagSkip) {
-  if (-not $DryRun) {   # temp files left by a run killed mid-replace (never read as records: the scan reads *.json)
-    foreach ($t in @(Get-ChildItem -LiteralPath $ccs -Recurse -File -Filter 'local_*.json.tmp' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddMinutes(-10) })) {
-      try { Remove-Item -LiteralPath $t.FullName -Force } catch { Write-Warning "could not remove leftover $($t.FullName): $($_.Exception.Message)" }
-    }
-  }
   foreach ($kv in $bucketRecs.GetEnumerator()) {
     foreach ($r in $kv.Value) {
       $r.key = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
