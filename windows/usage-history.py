@@ -760,10 +760,14 @@ CREDITS_PENDING_TRIES = 4            # ... for this many consecutive pending rea
 
 
 def cred_sig(label):
-    """A short string that changes when the seat's credential sources change: the existence and st_mtime_ns of the app seat's config.json and of the CLI seat's
-    token.txt ("0" for a missing file). Only the files' metadata is read, never their contents."""
+    """A short string that changes when the seat's credential sources change: the existence and st_mtime_ns of every file that decides which token app_login
+    and seat_token use (the app seat's config.json, owner-uuid.txt, meta.txt and email.txt; the CLI seat's token.txt and email.txt), "0" for a missing file. Only the
+    files' metadata is read, never their contents. A capture writes owner-uuid.txt last, so a read that lands mid-capture is held against an incomplete login and
+    lapses again when it completes."""
     out = []
-    for path in (os.path.join(APP_SEATS, label, "config.json"), os.path.join(ROOT, label, "token.txt")):
+    app, cli = os.path.join(APP_SEATS, label), os.path.join(ROOT, label)
+    for path in (os.path.join(app, "config.json"), os.path.join(app, "owner-uuid.txt"), os.path.join(app, "meta.txt"), os.path.join(app, "email.txt"),
+                 os.path.join(cli, "token.txt"), os.path.join(cli, "email.txt")):
         try:
             out.append(str(os.stat(path).st_mtime_ns))
         except OSError:
@@ -2459,7 +2463,7 @@ class Store:
         return True
 
     def credits_read(self, label, now, fetch=http_json, force=False, ver=None, login=app_login):
-        """Read one Claude seat's reset credits into the provider cache (`credits`: {seat: {ts, eligible, grants, next, hold, note}}). `next` is claimed before the
+        """Read one Claude seat's reset credits into the provider cache (`credits`: {seat: {ts, eligible, grants, next, hold, sig, note}}; `sig` only with a scope hold). `next` is claimed before the
         call, so a crash is not retried every sample; `hold` (429 and 401/403) is respected even by a forced read; "pending" (an app login whose organization is
         not known yet) sets no hold but a short `next` (CREDITS_PENDING_RETRY, for the first CREDITS_PENDING_TRIES - 1 reads in a row, then the ordinary interval) and a note;
         the run is counted in the entry's `pend`, which any other result clears. credits_tick reads a seat with that note early (forced, whatever is left of `next`) once its
@@ -4550,6 +4554,8 @@ def selftest():
             os.utime(tok_, ns=(tok_st_.st_atime_ns, tok_st_.st_mtime_ns + 5_000_000_000))                                    # token.txt rewritten
             assert st.credits_tick(t_sig_ + 2, sc, "no-such-config.json", labels=["A"]) == ("A", "scope") and len(calls) == nc_ + 2   # due straight away
             assert st.credits_tick(t_sig_ + 3, sc, "no-such-config.json", labels=["A"]) is None and len(calls) == nc_ + 2
+            open(os.path.join(APP_SEATS, "A", "owner-uuid.txt"), "w").write("u")                                              # a capture writes this last
+            assert st.credits_tick(t_sig_ + 4, sc, "no-such-config.json", labels=["A"]) == ("A", "scope") and len(calls) == nc_ + 3   # the completed login lifts it again
         finally:
             globals()["APP_SEATS"] = keep_as_
             os.utime(tok_, ns=(tok_st_.st_atime_ns, tok_st_.st_mtime_ns))
