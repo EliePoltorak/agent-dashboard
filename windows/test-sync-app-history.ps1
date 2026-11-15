@@ -7,7 +7,8 @@
   session's last baseline (the rest is saved), so its stale value does not spread next run; a deleted record
   does not stop the save; with the app running (-AssumeAppRunning) nothing is changed or saved and a record
   it creates is neutral; a state file without the record->session map stops the whole save on an unreadable
-  record; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
+  record; a record truncated to 0 bytes counts as unreadable; archived-sessions.idx follows archive and
+  un-archive; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
@@ -44,6 +45,8 @@ function recHash { (Get-ChildItem $ccs -Recurse -Filter local_*.json | Sort-Obje
 function state { Get-Content $statePath -Raw | ConvertFrom-Json -AsHashtable }
 function mixed($R, $p) { @($R | Group-Object cli | Where-Object { ($_.Group.$p -contains $true) -and ($_.Group.$p -contains $false) }).Count }
 function ofSession($cli) { @(recs | Where-Object { $_.cli -eq $cli }) }
+# is this record's sessionId in its folder's archived-sessions.idx?
+function inIdx($r) { $p = Join-Path (Split-Path $r.f) 'archived-sessions.idx'; (Test-Path $p) -and (@((Get-Content $p -Raw | ConvertFrom-Json).archived) -contains $r.id) }
 
 # The live index already agrees across seats, so plant a disagreement for the first run to resolve.
 $U = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Select-Object -First 1
@@ -75,9 +78,11 @@ check 'unstarred on every seat' (@(ofSession $G.Name | Where-Object star).Count 
 "--- archive on one seat"
 setRec $g0.f 'isArchived' $true; run
 check 'archived on every seat' (@(ofSession $G.Name | Where-Object { -not $_.arch }).Count -eq 0)
+check "archived: listed in every folder's archived-sessions.idx" (@(ofSession $G.Name | Where-Object { -not (inIdx $_) }).Count -eq 0)
 "--- un-archive on a different seat"
 setRec $g1.f 'isArchived' $false; run
 check 'un-archived on every seat' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+check "un-archived: removed from every folder's archived-sessions.idx" (@(ofSession $G.Name | Where-Object { inIdx $_ }).Count -eq 0)
 
 "--- opposite changes on two seats in the same run -> on wins"
 # After a run every record of a session agrees, so opposite changes can only come from a state file where two
@@ -135,6 +140,15 @@ if ($H) {
 }
 Set-Content -LiteralPath $g1.f $keep1 -NoNewline; run                                # seat 1 readable again, still archived
 check 'readable again: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+
+"--- a record truncated to 0 bytes counts as unreadable too"
+foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run
+$keep1 = Get-Content -LiteralPath $g1.f -Raw
+setRec $g0.f 'isArchived' $false; Set-Content -LiteralPath $g1.f '' -NoNewline; run
+check 'empty record warns' ($out -match 'could not read')
+$st = state; check 'empty record: its session keeps its last baseline' ($st['isArchived'][(key $g1.f)] -eq $true)
+Set-Content -LiteralPath $g1.f $keep1 -NoNewline; run
+check 'empty record, restored: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
 
 "--- the desktop app is running: no record is changed and the state is not saved"
 setRec $g0.f 'isArchived' $true

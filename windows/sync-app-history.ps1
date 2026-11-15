@@ -314,6 +314,7 @@ foreach ($acct in $accts) {
     foreach ($f in Get-ChildItem -LiteralPath $sub.FullName -File -Filter '*.json') {
       $rawRec = $null; $j = $null
       try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json } catch { continue }
+      if ($j -isnot [pscustomobject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
       if ($j.cwd -eq $Cwd) {
         $cnt++
@@ -340,13 +341,20 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # only if it is on. A session with a record that can't be written or read keeps its last baseline
 # (below; with a state file that predates its record->session map, an unreadable record stops the save). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
-# cliSessionId, whatever their cwd. The sidebar pin LIST and groups are NOT synced: the app keeps
+# cliSessionId, whatever their cwd. Each folder's archived-sessions.idx is kept in step with its records
+# (after pass 2). The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
 # Runs only while the app is closed: the live app holds its records in memory and rewrites them,
 # so a flag we set under it would be lost and then read back as the user's own change.
 # ($ccs must be the REAL app's index; a sandbox under a redirected %APPDATA% is never live.)
 $liveCcs = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude-code-sessions'
-$appUp = $AssumeAppRunning -or (($ccs -eq $liveCcs) -and @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0)
+function Test-AppUp {
+  if ($AssumeAppRunning) { return $true }
+  # compare full paths, so a trailing backslash or relative form can't make the real index look like a sandbox
+  if ([IO.Path]::GetFullPath($ccs).TrimEnd('\') -ne [IO.Path]::GetFullPath($liveCcs).TrimEnd('\')) { return $false }
+  return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
+}
+$appUp = Test-AppUp
 $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
 $flagBackupRoot = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-sync-backups'
 $flagSkip = $false      # pass 1.4 did not run: leave records AND the state file alone
@@ -384,6 +392,11 @@ if ($flagPrevAll -and $flagPrevAll['cli']) { foreach ($k in $flagPrevAll['cli'].
 $flagPrevCi = @{}
 $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 if (-not $flagSkip) {
+  if (-not $DryRun) {   # temp files left by a run killed mid-replace (never read as records: the scan reads *.json)
+    foreach ($t in @(Get-ChildItem -LiteralPath $ccs -Recurse -File -Filter 'local_*.json.tmp' -ErrorAction SilentlyContinue | Where-Object { $_.LastWriteTime -lt (Get-Date).AddMinutes(-10) })) {
+      try { Remove-Item -LiteralPath $t.FullName -Force } catch { Write-Warning "could not remove leftover $($t.FullName): $($_.Exception.Message)" }
+    }
+  }
   foreach ($kv in $bucketRecs.GetEnumerator()) {
     foreach ($r in $kv.Value) {
       $r.key = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
@@ -472,6 +485,7 @@ if (-not $flagSkip) {
 }
 $madeRecs = New-Object System.Collections.Generic.List[object]   # records pass 2 creates, for the saved baseline
 
+try {   # the archive list and flag state below are saved even if pass 1.5 or pass 2 stops the run
 # ---- pass 1.5: reconcile stale records of the SAME session across buckets -----
 # Each account bucket holds its own record per session, cloned/created ONCE and never refreshed.
 # The app resumes a session from record.lastAssistantUuid, so a bucket whose record froze at an
@@ -617,11 +631,59 @@ foreach ($acct in $accts) {
     }
   }
 }
+} finally {
+# If the app started while we ran, it may already hold records from before our writes and save them back:
+# then save nothing, and the next run compares with the previous state (where its rewrite reads as unchanged).
+$appStarted = (-not $DryRun -and -not $flagSkip) -and (Test-AppUp)
+if ($appStarted) { Write-Warning 'the desktop app started during the sync: the archive list and flag state are not saved this run' }
+
+# The app also lists each folder's archived records in archived-sessions.idx. Keep it in step with the records'
+# isArchived (which pass 1.4 set), so the two never disagree, whichever one the app reads. Entries for records
+# that aren't in the folder, or can't be read, are left as they are.
+if (-not $DryRun -and -not $flagSkip -and -not $appStarted) {
+  $idxChanged = 0
+  foreach ($dir in @(Get-ChildItem -LiteralPath $ccs -Directory | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory })) {
+    $idxPath = Join-Path $dir.FullName 'archived-sessions.idx'
+    try {
+      $idx = $null
+      if (Test-Path -LiteralPath $idxPath) {
+        $idx = Get-Content -LiteralPath $idxPath -Raw | ConvertFrom-Json
+        if ($idx -isnot [pscustomobject] -or $null -eq $idx.PSObject.Properties['archived']) { Write-Warning "unexpected format in $idxPath; left as it is"; continue }
+      }
+      $have = New-Object System.Collections.Generic.List[string]
+      if ($idx) { foreach ($sid in @($idx.archived)) { if ($sid) { $have.Add([string]$sid) } } }
+      $seen = @{}; $on = New-Object System.Collections.Generic.List[string]
+      foreach ($f in Get-ChildItem -LiteralPath $dir.FullName -File -Filter 'local_*.json') {
+        try { $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { continue }
+        if ($j -isnot [pscustomobject] -or -not $j.sessionId) { continue }
+        $seen[[string]$j.sessionId] = $true
+        if ([bool]$j.isArchived) { $on.Add([string]$j.sessionId) }
+      }
+      $want = New-Object System.Collections.Generic.List[string]
+      foreach ($sid in $have) { if ((-not $seen.ContainsKey($sid) -or $on.Contains($sid)) -and -not $want.Contains($sid)) { $want.Add($sid) } }
+      foreach ($sid in $on) { if (-not $want.Contains($sid)) { $want.Add($sid) } }
+      if ($want.Count -eq $have.Count -and @($want | Where-Object { -not $have.Contains($_) }).Count -eq 0) { continue }
+      if ($idx) {
+        $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $idxPath.Substring($ccs.Length).TrimStart('\')
+        New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
+        Copy-Item -LiteralPath $idxPath -Destination $dest -Force
+      } else { $idx = [pscustomobject]@{ v = 1 } }
+      $idx | Add-Member -NotePropertyName archived -NotePropertyValue ([object[]]$want.ToArray()) -Force
+      ($idx | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$idxPath.tmp" -Encoding UTF8 -NoNewline
+      [System.IO.File]::Move("$idxPath.tmp", $idxPath, $true)
+      $idxChanged++
+    } catch {
+      Remove-Item -LiteralPath "$idxPath.tmp" -Force -ErrorAction SilentlyContinue
+      Write-Warning "could not update $($idxPath): $($_.Exception.Message)"
+    }
+  }
+  if (-not $Quiet -and $idxChanged) { "updated the archived list (archived-sessions.idx) in $idxChanged folder(s)" }
+}
 
 # Save the flag baseline AFTER pass 2, so the records it created (clone or fabricated) are in it
 # with the flags they were written with -- else the next run reads them as brand-new and unions.
 # (A session whose write failed keeps last run's values for that flag instead: pass 1.4.)
-if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
+if (-not $DryRun -and -not $flagSkip -and -not $flagFail -and -not $appStarted) {
   foreach ($mr in $madeRecs) {
     $mk = $mr.path.Substring($ccs.Length).TrimStart('\')
     foreach ($flag in 'isArchived', 'isStarred') {
@@ -656,6 +718,7 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
     Remove-Item -LiteralPath "$flagStatePath.tmp" -Force -ErrorAction SilentlyContinue
     Write-Warning "could not save the flag state $flagStatePath ($($_.Exception.Message)); the next run compares with the previous one"
   }
+}
 }
 
 if (-not $Quiet) {

@@ -530,10 +530,12 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
 can't be written or read, the sync warns (naming the file) and that session keeps its last saved state, so
-the next run tries again from it. Until it succeeds, un-archiving or unpinning that session back to how it
-was may not stick; an unreadable record holds its session back until the file is restored or deleted. The
-first run, and any session never seen before, use "on for any seat → on for all"; records the sync itself
-creates carry the session's flags (or none, if they are made while the app is open). **This step runs only while the
+the next run tries again from it. Until it succeeds, changing that session back to how it was (archiving or
+un-archiving, pinning or unpinning) may not stick; an unreadable record (including an empty one) holds its
+session back until the file is restored or deleted. The first run, and any session never seen before, use
+"on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
+are made while the app is open or the state file is unreadable). The app also lists each folder's archived
+records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, when it is enabled, or a manual
 `claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
@@ -546,7 +548,8 @@ storage, so a pin flag copied to a seat's record may not show as pinned there.
 Tracked in Hameishiv/claude-rotator#10 (issue #10).
 
 The script itself lives at `C:\Users\User\.grok\bin\sync-app-history.ps1` (the scheduled task and
-`claude-app-rotator.ps1` point there); `windows/sync-app-history.ps1` in this repo is its copy.
+`claude-app-rotator.ps1` point there); `windows/sync-app-history.ps1` in this repo is its source: copy it
+there to deploy a change.
 
 **The app reads its index at launch** — after a sync, new records appear when the app is
 restarted (or the workspace reopened), not in an already-open window.
