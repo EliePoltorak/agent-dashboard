@@ -99,22 +99,25 @@ check 'unseen off record -> still archived on every seat' (@(ofSession $G.Name |
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $false }; run
 check 'reset again: nothing archived on that session' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
 
-"--- a record whose write fails is retried, and its stale ON value does not spread"
+"--- a record whose write fails: the state is not saved, so its stale ON value does not spread next run"
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
 setRec $g0.f 'isArchived' $false                                                       # un-archive on seat 0
+$stBefore = Get-Content $statePath -Raw
 Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $true; run                 # seat 1's record can't be written
 check 'failed write warns' ($out -match 'could not set isArchived')
 check 'failed write: the other seats are un-archived' (@(ofSession $G.Name | Where-Object { $_.f -ne $g1.f -and $_.arch }).Count -eq 0)
-$st = state; check 'failed write: the record is on the retry list' ($null -ne $st['retry'] -and $st['retry']['isArchived'].ContainsKey((key $g1.f)))
+check 'failed write: the state file is not saved' ((Get-Content $statePath -Raw) -eq $stBefore)
 Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $false; run
 check 'retried: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
-$st = state; check 'retried: off the retry list' ($null -ne $st['retry'] -and -not $st['retry']['isArchived'].ContainsKey((key $g1.f)))
+check 'retried: the state file is saved again' ((Get-Content $statePath -Raw) -ne $stBefore)
 
-"--- a record that can't be read for a run is carried on the retry list, and its stale ON value does not spread"
+"--- a record that can't be read for a run: the state is not saved, so its stale ON value does not spread"
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
 $keep1 = Get-Content -LiteralPath $g1.f -Raw
+$stBefore = Get-Content $statePath -Raw
 setRec $g0.f 'isArchived' $false; Set-Content -LiteralPath $g1.f 'not json' -NoNewline; run   # un-archive on seat 0; seat 1 unreadable
-$st = state; check 'unreadable record carried on the retry list' ($null -ne $st['retry'] -and $st['retry']['isArchived'].ContainsKey((key $g1.f)))
+check 'unreadable record warns' ($out -match 'could not read')
+check 'unreadable record: the state file is not saved' ((Get-Content $statePath -Raw) -eq $stBefore)
 Set-Content -LiteralPath $g1.f $keep1 -NoNewline; run                                # seat 1 readable again, still archived
 check 'carried record: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
 

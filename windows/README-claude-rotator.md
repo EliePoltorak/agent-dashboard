@@ -528,9 +528,9 @@ per session, with its own `isArchived` and `isStarred` (the record's pin flag). 
 record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`): a changed flag
 (archive/un-archive, pin/unpin) is copied to every seat's record of that session, and "on" wins if two
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
-used seat) counts as a change only if it is on, since a record the app creates starts off. A record the
-sync could not write (or read) goes on a retry list in the state file: next run it is set to the session's
-value without a vote, so its old value can't spread (and a change made on that record in between is lost). The first run,
+used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
+can't be written (or read), the sync warns and does not save its state that run, so the next run tries again
+from the last good state; while a record keeps failing, un-archiving or unpinning may not stick. The first run,
 and any session never seen before, use "on for any seat → on for all"; records the sync itself creates carry the session's flags. **This step runs only while the
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task when it is enabled -- it has been disabled on this machine since 2026-07-20 -- or a manual
