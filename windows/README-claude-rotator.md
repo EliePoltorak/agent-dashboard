@@ -524,7 +524,7 @@ turn. Originals are copied to `~/.claude-app-seats\.reconcile-backups\<timestamp
 whose uuid isn't in the transcript, and sessions touched in the last 10 minutes, are left alone.
 
 **Archive and pin flags follow you across seats (2026-11-03).** Each seat keeps its own record
-per session, with its own `isArchived` and `isStarred` (a sidebar pin). Every sync compares each
+per session, with its own `isArchived` and `isStarred` (the record's pin flag). Every sync compares each
 record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`): a changed flag
 (archive/un-archive, pin/unpin) is copied to every seat's record of that session, and "on" wins if two
 seats changed opposite ways. The first run, and any session never seen before, use "on for any seat →
@@ -532,11 +532,12 @@ on for all"; records the sync itself creates carry the session's flags. **This s
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, or a manual
 `claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
-under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 runs are kept). If the state
+under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 backup folders are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
-as a first run.
+as a first run; delete it to start again (the next run counts a flag set on any seat as set on all).
 
-Sidebar groups and the pin list are not synced: the app keeps them in each seat's own storage.
+Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own
+storage, so a pin flag copied to a seat's record may not show as pinned there.
 Tracked in Hameishiv/claude-rotator#10 (issue #10).
 
 The script itself lives at `C:\Users\User\.grok\bin\sync-app-history.ps1` (the scheduled task and

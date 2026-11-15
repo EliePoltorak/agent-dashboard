@@ -66,6 +66,9 @@
     preserving their path, so a prune is fully reversible. Transcripts are never touched.
   - Only records whose transcript we can actually read + classify are eligible to prune;
     records with no local transcript are left alone.
+  - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
+    changed records are backed up to ~/.claude-app-seats\.flag-sync-backups\<ts>\ (newest 10 kept).
+    Sidebar groups and the pin list are not synced (claude-rotator issue #10).
   - Classification is cached in ~/.claude-app-seats\.sync-classify-cache.json keyed by file
     size+mtime, so the 30-min scheduled runs don't re-read every transcript.
 #>
@@ -328,7 +331,7 @@ foreach ($acct in $accts) {
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
 
 # ---- pass 1.4: archive and pin flags follow you across seats -------------------
-# isArchived and isStarred (a sidebar pin) live in each seat's own record, with no time of change.
+# isArchived and isStarred (the record's pin flag) live in each seat's own record, with no time of change.
 # So we remember every record's flags from the last run (.flag-state.json): a record whose flag
 # differs from that is the one you changed, and its value goes to every seat's record of the
 # session (true wins if two seats changed opposite ways). First run, or a session no record was
@@ -353,9 +356,10 @@ if ($appUp) {
   try {
     $flagPrevAll = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable
     if ($flagPrevAll -isnot [hashtable]) { throw 'not a JSON object' }
+    foreach ($fk in 'isArchived', 'isStarred') { if ($flagPrevAll[$fk] -isnot [hashtable]) { throw "'$fk' is not an object" } }
   } catch {
     $flagSkip = $true
-    Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run"
+    Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. Delete it to start again (the next run then counts a flag set on any seat as set on all)"
   }
 }
 $flagNextAll = @{}
