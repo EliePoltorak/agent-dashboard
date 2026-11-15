@@ -14,11 +14,12 @@ function quotaProject(seats, ratePerHour, now, horizonSec = 14 * 86400, stepSec 
     const left = ss.reduce((a, s) => a + s.w * (1 - s.used), 0) * 100;
     pts.push([t, Math.round(left * 10) / 10]);
     if (empty === null && anyRate && left < 0.05) empty = t;
-    const r = prof ? ratePerHour[new Date(t * 1000).getHours()] : ratePerHour;
     // The step is split at every reset inside it, and the pool's first run-out is recorded where it happens: one before a reset is not hidden
-    // by the refill, and none is reported when a reset comes first.
+    // by the refill, and none is reported when a reset comes first. A profile is split the same way at every local-hour boundary, each piece taking the rate of the hour it starts in.
     for (let a = t, b; a < t + stepSec; a = b) {
       b = Math.min(t + stepSec, ...ss.filter(s => s.reset && s.period && s.reset > a).map(s => s.reset));
+      let r = ratePerHour;
+      if (prof) { const d = new Date(a * 1000); b = Math.min(b, a + 3600 - d.getMinutes() * 60 - d.getSeconds()); r = ratePerHour[d.getHours()]; }
       let drain = r > 0 ? r / 100 * (b - a) / 3600 : 0;
       const l = ss.reduce((n, s) => n + s.w * (1 - s.used), 0);
       if (empty === null && drain > 0 && drain >= l - 0.0005) empty = a + Math.round((b - a) * Math.min(1, l / drain));

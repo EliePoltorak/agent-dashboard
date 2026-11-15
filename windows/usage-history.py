@@ -1143,10 +1143,13 @@ def project(seats, rate, now, horizon=14 * DAY, step=600):
         pts.append((t, round(left, 1)))
         if empty is None and anyrate and left < 0.05:
             empty = t
-        r = rate[time.localtime(t).tm_hour] if isinstance(rate, list) else rate
         a = t
         while a < t + step:         # split at every reset inside the step: a run-out before a reset is recorded, none is when the reset comes first
             b = min([t + step] + [s["reset"] for s in ss if s["reset"] and s["period"] and s["reset"] > a])
+            r = rate
+            if isinstance(rate, list):          # a profile is split the same way at every local-hour boundary, each piece taking the rate of the hour it starts in
+                lt = time.localtime(a)
+                b, r = min(b, a + 3600 - lt.tm_min * 60 - lt.tm_sec), rate[lt.tm_hour]
             drain = r / 100 * (b - a) / 3600 if r > 0 else 0
             lf = sum(s["w"] * (1 - s["used"]) for s in ss)
             if empty is None and drain > 0 and drain >= lf - 0.0005:
@@ -3975,6 +3978,11 @@ def selftest():
     flat, only0 = project(two(), 50, mid, 5 * 3600), project(two(), [100] + [0] * 23, mid, 5 * 3600)         # twins of the node test cases
     assert flat[1] == mid + 14400 and project(two(), [50] * 24, mid, 5 * 3600) == flat and only0[1] is None and dict(only0[0])[mid + 3600] == 100.0 and only0[0][-1][1] == 100.0
     assert project(two(), [100, 50] + [0] * 22, mid, 7200)[0][-1] == (mid + 7200, 50.0)
+    t0, pf = time.mktime((2026, 1, 5, 12, 59, 0, 0, 0, -1)), [0] * 24            # twin of the node case: a step across a local-hour boundary takes each part's own hour rate
+    pf[12] = 60
+    assert project([{"used": 0.95, "reset": t0 + 600, "period": WEEK}], pf, t0, 3600)[1] is None          # 1 % used by the 13:09 reset, not a run-out at 13:04
+    pj = project([{"used": 0.95, "reset": t0 + 30 * DAY, "period": WEEK}], pf, t0, 1200)
+    assert pj[1] is None and dict(pj[0])[t0 + 600] == 4.0 and project([{"used": 0.95, "reset": t0 + 30 * DAY, "period": WEEK}], 60, t0, 1200)[1] == t0 + 300      # a scalar rate is unaffected
     bt = backtest(syn, (("claude", "w", "x"),))["x"]
     assert bt["n"] >= 40 and bt["typical"] < 1 and bt["typical"] * 5 < min(bt["3h"], bt["24h"]), bt          # the profile follows the day, a flat burn cannot
     table, best = backtest_table({"x": bt})

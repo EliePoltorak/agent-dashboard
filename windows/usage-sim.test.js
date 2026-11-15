@@ -60,6 +60,17 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   const p2 = Array(24).fill(0); p2[0] = 100; p2[1] = 50;
   assert.strictEqual(quotaProject(two(), p2, mid, 7200).pts.find(p => p[0] === mid + 7200)[1], 50);
 }
+// a step that crosses a local-hour boundary takes each part's own hour rate: from 12:59 with 5 % left, 60 %/h in hour 12 and 0 in hour 13 is 1 % used by 13:09, not run-out at 13:04
+{
+  const t0 = new Date(2026, 0, 5, 12, 59, 0).getTime() / 1000;     // a local 12:59, so the test holds in any timezone
+  const prof = Array(24).fill(0); prof[12] = 60;
+  let r = quotaProject([{ used: 0.95, reset: t0 + 600, period: W }], prof, t0, 3600);      // reset at 13:09
+  assert.strictEqual(r.empty, null);
+  r = quotaProject([{ used: 0.95, reset: t0 + 30 * 86400, period: W }], prof, t0, 1200);
+  assert.strictEqual(r.empty, null);
+  assert.ok(Math.abs(r.pts.find(p => p[0] === t0 + 600)[1] - 4) < 1e-9);                   // 5 % - 1 % (the one minute left in hour 12)
+  assert.strictEqual(quotaProject([{ used: 0.95, reset: t0 + 30 * 86400, period: W }], 60, t0, 1200).empty, t0 + 300);      // a scalar rate is unaffected: still 60 %/h over the whole step
+}
 // weighted pool: a x5 seat B and a regular seat A, far resets. Pool 600; 100 %/h is one regular seat an hour, so it is empty after 6 h
 {
   const two = () => [{ used: 0, reset: far, period: W }, { used: 0, reset: far, period: W, w: 5 }];
