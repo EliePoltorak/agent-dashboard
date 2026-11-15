@@ -529,6 +529,12 @@ def parse_gemini(j, now):
             seat["plan"] = plan
     except (KeyError, TypeError):
         pass
+    try:
+        email = j["userStatus"].get("email")        # the account the quota belongs to: the same answer, so never another application's idea of who is signed in
+        if isinstance(email, str) and email:
+            seat["email"] = email                   # sample() takes it out again: it is the provider cache's, never the history's
+    except (KeyError, TypeError, AttributeError):
+        pass
     return seat
 
 
@@ -543,15 +549,6 @@ def read_gemini(now, probe=ls_probe, query=query_ls):
             if seat:
                 return seat, ""
     return None, LS_ADMIN if hidden else LS_AGY if bare else LS_OFF
-
-
-def gemini_email():
-    try:
-        with open(os.path.join(HOME, ".gemini", "google_accounts.json"), encoding="utf-8-sig") as fh:
-            e = json.load(fh).get("active")
-        return e if isinstance(e, str) and e else None
-    except (OSError, ValueError, AttributeError):
-        return None
 
 
 class PcacheError(Exception):
@@ -1037,6 +1034,11 @@ def sample(now, force=False):
         applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
         seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
     if seat:
+        email = seat.pop("email", None)             # before the seat is recorded: no address lands in the usage history
+        if isinstance(email, str) and email:
+            cache.setdefault("emails", {}).setdefault("gemini", {})["antigravity"] = email
+        elif isinstance((cache.get("emails") or {}).get("gemini"), dict):
+            cache["emails"]["gemini"].pop("antigravity", None)      # an identity this read did not establish is shown as unknown, never a stale or foreign one
         cache.setdefault("notes", {})["gemini"] = {}
         rec["gemini"] = {"antigravity": seat}
         if seat.get("plan"):
@@ -1044,13 +1046,6 @@ def sample(now, force=False):
     else:                               # not readable: recorded as a failed read, so the history marks the outage (carry_good, the rates and the profile need the failure
         cache.setdefault("notes", {})["gemini"] = {"antigravity": why}      # records to bridge a short one and break at a long one); the last good reading stays on show (latest_of), its age the Read column
         rec["gemini"] = {"antigravity": {"ok": False, "note": why}}
-    try:
-        email = gemini_email()
-    except Exception as e:
-        applog("sample: gemini email read failed: %s: %s" % (type(e).__name__, e))
-        email = None
-    if email:
-        cache.setdefault("emails", {}).setdefault("gemini", {})["antigravity"] = email
     try:
         pcache_merge(before, cache)
     except PcacheError as e:                    # the provider cache is unreadable and was left alone: this sample's Claude reading is still worth recording
@@ -3332,6 +3327,11 @@ def selftest():
     gj["userStatus"]["cascadeModelConfigData"]["clientModelConfigs"][2]["quotaInfo"]["resetTime"] = "2026-11-12T21:00:00Z"
     assert len(parse_gemini(gj, 1)["n"]) == 4                                 # a different reset is its own limit
     assert parse_gemini({"userStatus": {}}, 1) is None and parse_gemini(None, 1) is None and parse_gemini({"userStatus": {"cascadeModelConfigData": {"clientModelConfigs": []}}}, 1) is None
+    # the account's address comes from the same GetUserStatus answer as the quota (never another application's idea of who is signed in)
+    assert "email" not in g and "email" not in parse_gemini(gj, 1)
+    assert parse_gemini(dict(gj, userStatus=dict(gj["userStatus"], email="ag@x.example")), 1)["email"] == "ag@x.example"
+    for bad_ in ("", None, 5, ["a@b.c"]):
+        assert "email" not in parse_gemini(dict(gj, userStatus=dict(gj["userStatus"], email=bad_)), 1), bad_
     procs = '[{"ProcessId":1,"CommandLine":"x.exe --a b --csrf_token tok1 --c","Ports":[4000,4001]},{"ProcessId":2,"CommandLine":"x.exe","Ports":[5]},{"ProcessId":3,"CommandLine":"--csrf_token t3","Ports":9},{"ProcessId":4,"CommandLine":"--csrf_token=t4","Ports":[7]}]'
     assert parse_ls_procs(procs) == [("tok1", [4000, 4001]), ("t3", [9]), ("t4", [7]), ("", [])] and parse_ls_procs("") == [] and parse_ls_procs("null") == []
     tried = []
@@ -4013,10 +4013,10 @@ def selftest():
             assert cst.codex_reset_clear("A", new2)["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
             r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(b"?", 1) if "--confirm" in argv else Proc(json.dumps(dict(rd, rate_limits_before=dict(rd["rate_limits_before"], banked_reset_credits=1))).encode()))
             assert "unconfirmed" in r_["text"] and "A" in load_pcache()["codex_pending"]                              # the read showed 3 -> 1: still marked
-            stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini", "gemini_email")}
+            stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini")}
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({"A": {"ts": int(time.time()) + 5, "w": 0.1, "banked": 0}}, {}),
-                                 fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"), gemini_email=lambda: None)
+                                 fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"))
                 sample(time.time(), True)
             finally:
                 globals().update(stub)
@@ -4025,7 +4025,7 @@ def selftest():
             def boom_(*a_, **k_):
                 raise RuntimeError("boom")
             try:
-                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini=boom_, gemini_email=boom_)
+                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini=boom_)
                 rs_ = sample(time.time(), True)
             finally:
                 globals().update(stub)
@@ -4033,7 +4033,7 @@ def selftest():
             assert rs_["gemini"]["antigravity"] == {"ok": False, "note": "Antigravity usage unavailable (RuntimeError)"} and "gemini read failed: RuntimeError" in open(APPLOG).read(), rs_
             # a failed Gemini read AFTER a good one is recorded too (ok False): the history shows the outage, which carry_good and the rates need
             try:
-                globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), gemini_email=lambda: None,
+                globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
                                  read_gemini=lambda now_: ({"ts": int(now_), "plan": "Pro"}, None))
                 assert sample(time.time(), True)["gemini"]["antigravity"]["ts"] > 0
                 globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
@@ -4041,6 +4041,21 @@ def selftest():
             finally:
                 globals().update(stub)
             assert rg_["gemini"] == {"antigravity": {"ok": False, "note": "Antigravity isn't running"}}, rg_
+            # the address in Antigravity's own answer is cached for the page and never recorded in the history; a good read naming none removes it; a failed read keeps it
+            try:
+                globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
+                                 read_gemini=lambda now_: ({"ts": int(now_), "email": "ag@x.example"}, None))
+                rg_ = sample(time.time(), True)
+                assert load_pcache()["emails"]["gemini"] == {"antigravity": "ag@x.example"}, load_pcache().get("emails")
+                assert "email" not in rg_["gemini"]["antigravity"] and "ag@x" not in json.dumps(rg_), rg_
+                globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
+                sample(time.time(), True)
+                assert load_pcache()["emails"]["gemini"] == {"antigravity": "ag@x.example"}                           # not read: the cached address stays
+                globals().update(read_gemini=lambda now_: ({"ts": int(now_)}, None))
+                sample(time.time(), True)
+                assert "antigravity" not in load_pcache()["emails"].get("gemini", {}), load_pcache().get("emails")      # read, no address: unknown, not a stale one
+            finally:
+                globals().update(stub)
             assert cst.codex_reset_clear("A", load_pcache()["codex_pending"]["A"]["id"])["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
             assert cst.codex_reset_clear("A", "")["outcome"] == "error" and "cleared by hand" in open(APPLOG).read()
             r_ = cst.codex_reset("A", "/x", fake)                                                                   # a clear answer: no mark left
@@ -4062,7 +4077,7 @@ def selftest():
             try:
                 for ts_, kept_ in ((m_["at"] - 5, True), (m_["at"] + 5, False)):
                     globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({"A": {"ts": ts_, "w": 0.1, "banked": 3}}, {}),
-                                     fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"), gemini_email=lambda: None)
+                                     fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"))
                     sample(time.time(), True)
                     assert ("A" in load_pcache()["codex_pending"]) is kept_, (ts_, load_pcache()["codex_pending"])
                 assert "seat A reading after the reset arrived; Apply back on" in open(APPLOG).read()
@@ -5019,7 +5034,7 @@ def selftest():
         assert not load_pcache().get("credits_claims")                                           # a seat that cannot send saves no claim
         # B: provider-cache writers never drop what another process saved meanwhile (a pending reset claim): a sample merges only its own
         # changes after its slow provider reads, and a transaction waits for the lock and starts from the file as it then is
-        stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini", "gemini_email")}
+        stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini")}
 
         def mid_sample(now_):           # the server saves a claim while this sample is still reading providers
             o_ = load_pcache()
@@ -5027,8 +5042,7 @@ def selftest():
             save_pcache(o_)
             return None, "not readable"
         try:
-            globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), read_gemini=mid_sample,
-                             gemini_email=lambda: None)
+            globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), read_gemini=mid_sample)
             save_pcache({"credits": {"A": dict(ke)}})
             sample(KN, True)
             pc = load_pcache()

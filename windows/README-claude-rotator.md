@@ -755,7 +755,7 @@ for another reason (a credit expiring, one used elsewhere) or before the claim l
 codex-usage shows the reset was not used. The reset column stays on show while any seat has a reset action or a pending
 state, even with nothing banked (selftest, `usage-sim.test.js`). Gemini is readable only while the Antigravity app is open (the `agy` CLI keeps its token to itself). Gemini's limits are
 shown one per quota group: a group shared by several models is "Pool 1", "Pool 2"... (no model is named), and only a group
-of exactly one model carries that model's name (`parse_gemini`, selftest).
+of exactly one model carries that model's name (`parse_gemini`, selftest). The Gemini address shown with "Show emails" is the one Antigravity's own answer (`GetUserStatus`) gives for the account the limits belong to, not the Gemini CLI's `~/.gemini` login (a different account is possible); when a good read names none, the address is shown as unknown rather than a stale one, and a failed read leaves the last one.
 A reading over 1 h old is shown in a muted warning colour in the `Read` column, over 3 h in a stronger one. A Fable value read earlier than the seat's session and weekly readings shows its own "Read X ago" line in its cell, with the same two thresholds. A provider with nothing readable (Gemini with the Antigravity app closed) shows just its note.
 Limit: a seat used elsewhere (the app, the VM) only updates when something probes it, so its line moves in steps.
 
