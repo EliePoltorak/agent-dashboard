@@ -412,7 +412,8 @@ errors, so this usually shows up as a pause, not a failure.
   failing.
 - **Capture guards.** `--capture`/`--import` refuse a token already stored under another label,
   and refuse to overwrite a label holding a different token unless `--replace` (the old token is
-  kept as `token.txt.bak-<stamp>`).
+  kept as `token.txt.bak-<stamp>`). Storing a different token drops the seat's refusal marker
+  (`access-disabled.json`) and its cached readings (`usage-cache[-fable].json`), which belonged to the old one.
 
 ## Commands — PowerShell profile shortcuts
 

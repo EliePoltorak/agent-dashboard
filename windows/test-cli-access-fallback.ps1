@@ -550,8 +550,12 @@ Reset-Case
 Write-AccessDisabled -Label 'B'
 Save-ProfileToken 'B' (TokenOf 'B') $false
 Check 'storing the same token keeps the refusal marker' ($null -ne (Read-AccessDisabled 'B'))
+foreach ($c in 'usage-cache.json', 'usage-cache-fable.json') { Set-Content -LiteralPath (Join-Path (Join-Path $Root 'B') $c) -Value '{"ts":1,"data":{"ok":true,"status":"rejected"}}' }
+Save-ProfileToken 'B' (TokenOf 'B') $false
+Check 'storing the same token keeps the cached readings' ((Test-Path (Join-Path (Join-Path $Root 'B') 'usage-cache.json')) -and (Test-Path (Join-Path (Join-Path $Root 'B') 'usage-cache-fable.json')))
 Save-ProfileToken 'B' 'sk-ant-oat01-SEATB-REPLACEDVALUE' $true
 Check 'a replaced token clears the refusal marker' (($null -eq (Read-AccessDisabled 'B')) -and (TokenOf 'B') -eq 'sk-ant-oat01-SEATB-REPLACEDVALUE')
+Check 'a replaced token drops the old token''s cached readings (a cap among them)' (-not (Test-Path (Join-Path (Join-Path $Root 'B') 'usage-cache.json')) -and -not (Test-Path (Join-Path (Join-Path $Root 'B') 'usage-cache-fable.json')))
 Write-AccessDisabled -Label 'G'
 Save-ProfileToken 'G' 'sk-ant-oat01-SEATG-NEWVALUE' $false
 Check 'a first token on a seat with a stale marker clears it' ($null -eq (Read-AccessDisabled 'G'))

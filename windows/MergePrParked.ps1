@@ -3,7 +3,7 @@ MergePrParked.ps1 — dot-source for the "skip parked merge-pr reviews" logic us
 claude-resume-sessions.ps1 (owner ruling 2026-10-20, option A).
 
 A merge-pr review that is PARKED is waiting on an owner decision. A rotation's "usage reset"
-nudge wakes it for nothing: a wasted turn, an empty reply, and the pending question scrolls away.
+(or "subscription access was refused") nudge wakes it for nothing: a wasted turn, an empty reply, and the pending question scrolls away.
 
 Two functions, deliberately separate:
 

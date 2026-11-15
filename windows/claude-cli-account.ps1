@@ -1215,7 +1215,10 @@ function Save-ProfileToken {
   New-Item -ItemType Directory -Path $dst -Force | Out-Null
   $tmp = "$tf.tmp-$PID"; Write-OwnerOnly $tmp $Tok   # LINUX-PORT: token files are owner-only from creation
   [IO.File]::Move($tmp, $tf, $true)
-  if ($changed) { Clear-AccessDisabled $Label }      # a refusal marker belongs to the token it was earned by; the new one has not been refused
+  if ($changed) {      # the refusal marker and the cached readings (caps included) belong to the old token; the next probe reads the new one
+    Clear-AccessDisabled $Label
+    foreach ($c in 'usage-cache.json', 'usage-cache-fable.json') { Remove-Item -LiteralPath (Join-Path $dst $c) -Force -ErrorAction SilentlyContinue }
+  }
 }
 
 function Resolve-Target {
