@@ -536,7 +536,7 @@ session back until it can be read again (a file only in use clears by itself; a 
 deleted). One exception: a state file from before this version has no record-to-session map, so until its first
 good save an unreadable record stops the whole save. The first run, and any session never seen before, use
 "on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
-are made while the app is open, the state file is unreadable, their session is held back, or no state is saved that run). The app also lists each folder's archived
+are made while the app is open, the state file is unreadable, their session is held back, or the state file predates the record-to-session map and a record can't be read). The app also lists each folder's archived
 records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the
 app is closed** (checked before reading and again before writing; opening the app while the sync is writing can still undo a change) (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, when it is enabled, or a manual

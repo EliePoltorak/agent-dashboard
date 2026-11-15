@@ -103,10 +103,17 @@ $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # One run at a time: two runs share temp-file names and the flag baseline. Held until the script ends.
 $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
-try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
-catch [IO.IOException] {
-  if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
-  Write-Warning 'another history sync is running; this one is skipped'; return
+# Interactive runs (a seat switch, claude-sync-history) wait up to 3 min for a run already in progress, so the
+# user isn't told to reopen the app while it is still writing; -Quiet (the scheduled task) skips at once.
+$runLock = $null; $lockUntil = (Get-Date).AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
+while (-not $runLock) {
+  try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+  catch [IO.IOException] {
+    if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
+    if ((Get-Date) -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped (wait for it to finish before reopening the app)'; return }
+    if (-not $lockSaid) { 'another history sync is running; waiting for it (up to 3 min)...'; $lockSaid = $true }
+    Start-Sleep -Seconds 2
+  }
 }
 try {
 $backupRoot = Join-Path $env:USERPROFILE ".claude-app-seats\.pruned-history-backups\$stamp"
@@ -317,7 +324,12 @@ if (-not $Quiet) {
 function Test-AppUp {
   if ($AssumeAppRunning) { return $true }
   if ($AssumeAppClosed) { return $false }   # only ever passed by the test, for its sandbox; otherwise always check
-  return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
+  # A process named like the app whose path can't be read counts as the app (fail closed). The CLI's claude.exe
+  # has a readable path, so it is matched by path only and never counted here.
+  return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+    $pp = $null; try { $pp = $_.Path } catch { }
+    if (-not $pp) { $_.ProcessName -eq 'claude' } else { $pp -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $pp -like '*\AnthropicClaude\*\claude.exe' }
+  }).Count -gt 0
 }
 $appUp = Test-AppUp
 
@@ -466,11 +478,11 @@ if (-not $flagSkip) {
           }
           $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force
           # temp file + replace: a run killed mid-write must not leave a truncated (unreadable) record
-          ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath "$($r.file.FullName).tmp" -Encoding UTF8 -NoNewline
-          [System.IO.File]::Move("$($r.file.FullName).tmp", $r.file.FullName, $true)
+          ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath "$($r.file.FullName).sync-tmp" -Encoding UTF8 -NoNewline
+          [System.IO.File]::Move("$($r.file.FullName).sync-tmp", $r.file.FullName, $true)
           $flipped++; $next[$r.key] = $want
         } catch {
-          Remove-Item -LiteralPath "$($r.file.FullName).tmp" -Force -ErrorAction SilentlyContinue   # don't leave it in the app's index
+          Remove-Item -LiteralPath "$($r.file.FullName).sync-tmp" -Force -ErrorAction SilentlyContinue   # don't leave it in the app's index
           Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
           [void]$flagFailCli.Add("$flag|$cli")
         }
@@ -672,11 +684,11 @@ if (-not $DryRun -and -not $flagSkip) {
         Copy-Item -LiteralPath $idxPath -Destination $dest -Force
       } else { $idx = [pscustomobject]@{ v = 1 } }
       $idx | Add-Member -NotePropertyName archived -NotePropertyValue ([object[]]$want.ToArray()) -Force
-      ($idx | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$idxPath.tmp" -Encoding UTF8 -NoNewline
-      [System.IO.File]::Move("$idxPath.tmp", $idxPath, $true)
+      ($idx | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$idxPath.sync-tmp" -Encoding UTF8 -NoNewline
+      [System.IO.File]::Move("$idxPath.sync-tmp", $idxPath, $true)
       $idxChanged++
     } catch {
-      Remove-Item -LiteralPath "$idxPath.tmp" -Force -ErrorAction SilentlyContinue
+      Remove-Item -LiteralPath "$idxPath.sync-tmp" -Force -ErrorAction SilentlyContinue
       Write-Warning "could not update $($idxPath): $($_.Exception.Message)"
     }
   }
