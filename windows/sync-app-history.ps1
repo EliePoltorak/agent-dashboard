@@ -565,7 +565,7 @@ foreach ($acct in $accts) {
 # with the flags they were written with -- else the next run reads them as brand-new and unions.
 if (-not $DryRun -and -not $flagSkip) {
   foreach ($mr in $madeRecs) {
-    $mk = $mr.path.Substring($ccs.Length).TrimStart('')
+    $mk = $mr.path.Substring($ccs.Length).TrimStart('\')
     foreach ($flag in 'isArchived', 'isStarred') { $flagNextAll[$flag][$mk] = $mr[$flag] }
   }
   $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
