@@ -529,12 +529,13 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 (archive/un-archive, pin/unpin) is copied to every seat's record of that session, and "on" wins if two
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
-can't be written, the sync warns and that session keeps its last saved state, so the next run tries again
-from it (a record that can't be read stops the whole save that run). Until it succeeds, un-archiving or
-unpinning that session back to how it was may not stick. The first run,
-and any session never seen before, use "on for any seat → on for all"; records the sync itself creates carry the session's flags. **This step runs only while the
+can't be written or read, the sync warns (naming the file) and that session keeps its last saved state, so
+the next run tries again from it. Until it succeeds, un-archiving or unpinning that session back to how it
+was may not stick; an unreadable record holds its session back until the file is restored or deleted. The
+first run, and any session never seen before, use "on for any seat → on for all"; records the sync itself
+creates carry the session's flags (or none, if they are made while the app is open). **This step runs only while the
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
-`claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task when it is enabled -- it has been disabled on this machine since 2026-07-20 -- or a manual
+`claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, when it is enabled, or a manual
 `claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
 under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 backup folders are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
@@ -565,8 +566,8 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
   `~/.claude-app-seats\.pruned-history-backups\<timestamp>\` — restore by copying them back
   into `%APPDATA%\Claude\claude-code-sessions`. Tune what's "substantive" via `-MinAssistant`
   and the `$AutoSignature` list at the top of the script; `-NoPrune` adds without removing.
-- Runs automatically after every `claude-account --switch`/`--rotate`, **and every 30 minutes**
-  via the Windows scheduled task `Claude app-history sync` (hidden window, via
+- Runs automatically after every `claude-account --switch`/`--rotate`, **and every 30 minutes
+  when enabled** via the Windows scheduled task `Claude app-history sync` (hidden window, via
   `sync-app-history-hidden.vbs`; classification cached in
   `~/.claude-app-seats\.sync-classify-cache.json` so periodic runs only re-read changed
   transcripts). Manage: `Disable-ScheduledTask` / `Enable-ScheduledTask -TaskName 'Claude app-history sync'`.

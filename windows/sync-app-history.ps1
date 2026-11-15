@@ -80,7 +80,8 @@ param(
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
   [switch]$DryRun,
   [switch]$NoPrune,
-  [switch]$Quiet
+  [switch]$Quiet,
+  [switch]$AssumeAppRunning   # for the test: behave as if the desktop app were running
 )
 $ErrorActionPreference = 'Stop'
 
@@ -344,7 +345,7 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # so a flag we set under it would be lost and then read back as the user's own change.
 # ($ccs must be the REAL app's index; a sandbox under a redirected %APPDATA% is never live.)
 $liveCcs = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude-code-sessions'
-$appUp = ($ccs -eq $liveCcs) -and @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
+$appUp = $AssumeAppRunning -or (($ccs -eq $liveCcs) -and @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0)
 $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
 $flagBackupRoot = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-sync-backups'
 $flagSkip = $false      # pass 1.4 did not run: leave records AND the state file alone
@@ -359,6 +360,7 @@ if ($appUp) {
     $flagPrevAll = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable
     if ($flagPrevAll -isnot [hashtable]) { throw 'not a JSON object' }
     foreach ($fk in 'isArchived', 'isStarred') { if ($flagPrevAll[$fk] -isnot [hashtable]) { throw "'$fk' is not an object" } }
+    if ($flagPrevAll.ContainsKey('cli') -and $flagPrevAll['cli'] -isnot [hashtable]) { throw "'cli' is not an object" }
   } catch {
     $flagSkip = $true
     Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. Delete it to start again (the next run then counts a flag set on any seat as set on all)"
@@ -371,9 +373,12 @@ $flagByCli = @{}
 # happened for it), and its new clones are left out. The next run then compares it with that baseline: the
 # records we did write read as changed (where they differ) and the failed one as unchanged, so its stale
 # value can't outvote the change. Saving the new values instead would let it vote as "known" and undo it.
-# A record known last run that can't be read can't be tied to a session, so then NO state is saved.
+# A record known last run that can't be read holds back its session the same way (see below).
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
+$flagHeld = New-Object 'System.Collections.Generic.HashSet[string]'   # "flag|cli|key" of unreadable known records
+$flagPrevCli = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)   # key -> cliSessionId, last run
+if ($flagPrevAll -and $flagPrevAll['cli']) { foreach ($k in $flagPrevAll['cli'].Keys) { $flagPrevCli[$k] = [string]$flagPrevAll['cli'][$k] } }
 $flagPrevCi = @{}
 $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 if (-not $flagSkip) {
@@ -392,11 +397,19 @@ if (-not $flagSkip) {
       $prev = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
       foreach ($k in $flagPrevAll[$flag].Keys) { $prev[$k] = $flagPrevAll[$flag][$k] }
     }
-    # a record known last run that was not read this run but still exists (unreadable): don't save the state
+    # A record known last run that was not read this run but still exists (unreadable): its session keeps
+    # last run's baseline, like a failed write. The state file says which session each record belongs to;
+    # a state file from before that map can't say, so then NO state is saved this run.
     if ($prev) { foreach ($k in @($prev.Keys)) {
       if (-not $seenKeys.Contains($k) -and (Test-Path -LiteralPath (Join-Path $ccs $k))) {
-        if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run" }
-        $flagFail = $true
+        $hc = $flagPrevCli[$k]
+        if ($hc) {
+          [void]$flagFailCli.Add("$flag|$hc"); [void]$flagHeld.Add("$flag|$hc|$k")
+          if ($flag -eq 'isArchived') { Write-Warning "could not read $(Join-Path $ccs $k); that session's archive/pin flags keep their last synced state until it can be read. Restore or delete that file to clear this" }
+        } else {
+          if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run. Restore or delete that file to clear this" }
+          $flagFail = $true
+        }
       }
     } }
     $flagPrevCi[$flag] = $prev           # for the save below
@@ -429,7 +442,9 @@ if (-not $flagSkip) {
             Copy-Item -LiteralPath $r.file.FullName -Destination $dest -Force
           }
           $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force
-          ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $r.file.FullName -Encoding UTF8 -NoNewline
+          # temp file + replace: a run killed mid-write must not leave a truncated (unreadable) record
+          ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath "$($r.file.FullName).tmp" -Encoding UTF8 -NoNewline
+          [System.IO.File]::Move("$($r.file.FullName).tmp", $r.file.FullName, $true)
           $flipped++; $next[$r.key] = $want
         } catch {
           Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
@@ -584,6 +599,10 @@ foreach ($acct in $accts) {
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
+          elseif ($flagSkip) {   # flags not resolved this run: write a neutral (off) record, which the next run
+            $cj | Add-Member -NotePropertyName isArchived -NotePropertyValue $false -Force   # treats as not a change
+            $cj.PSObject.Properties.Remove('isStarred')
+          }
           $cpath = Join-Path $bestSub "$($cj.sessionId).json"
           ($cj | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $cpath -Encoding UTF8 -NoNewline
           $madeRecs.Add(@{ cli = $m.BaseName; path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
@@ -607,17 +626,27 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
       $flagNextAll[$flag][$mk] = $mr[$flag]
     }
   }
-  # a session whose record could not be written keeps last run's baseline for that flag, for all its records
+  # a session whose record could not be written or read keeps last run's baseline for that flag, for all its
+  # records (the unreadable ones included, so they are still "known" when they can be read again)
   foreach ($fc in $flagFailCli) {
     $flag, $cli = $fc -split '\|', 2; $p = $flagPrevCi[$flag]
-    foreach ($r in $flagByCli[$cli]) {
-      if ($p -and $p.ContainsKey($r.key)) { $flagNextAll[$flag][$r.key] = [bool]$p[$r.key] } else { $flagNextAll[$flag].Remove($r.key) }
+    $ks = @(if ($flagByCli.ContainsKey($cli)) { $flagByCli[$cli] | ForEach-Object { $_.key } })
+    $ks += @($flagHeld | Where-Object { $_.StartsWith("$fc|") } | ForEach-Object { ($_ -split '\|', 3)[2] })
+    foreach ($k in $ks) {
+      if ($p -and $p.ContainsKey($k)) { $flagNextAll[$flag][$k] = [bool]$p[$k] } else { $flagNextAll[$flag].Remove($k) }
     }
   }
+  # which session each record belongs to, so a record that later can't be read holds back only its session
+  $cliMap = @{}
+  foreach ($cli in $flagByCli.Keys) { foreach ($r in $flagByCli[$cli]) { $cliMap[$r.key] = $cli } }
+  foreach ($mr in $madeRecs) { $cliMap[$mr.path.Substring($ccs.Length).TrimStart('\')] = $mr.cli }
+  foreach ($h in $flagHeld) { $null, $hc, $hk = $h -split '\|', 3; $cliMap[$hk] = $hc }
+  $flagNextAll['cli'] = $cliMap
   $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
-  # atomic: a crash mid-write must not leave a truncated file (which the next run would refuse to read)
+  # Temp file, then an atomic replace: a crash mid-write must not leave a truncated file, and a failed
+  # replace must not lose the old one ([IO.File]::Move keeps the destination; Move-Item -Force deletes it first).
   ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8
-  Move-Item -LiteralPath "$flagStatePath.tmp" -Destination $flagStatePath -Force
+  [System.IO.File]::Move("$flagStatePath.tmp", $flagStatePath, $true)
 }
 
 if (-not $Quiet) {
