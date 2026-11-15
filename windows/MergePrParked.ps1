@@ -96,7 +96,7 @@ function Get-MergePrTarget {
 #    Known gap: a resubmission keeps no trace of its first origin, so if cache-keeper ever resubmits
 #    a SCHEDULED prompt (cold-cache path) it would count -- one wrong wake, the cheap direction.
 #    None observed; a marker from cache-keeper would close it.
-#  - the rotator's own ping ("Usage reset: ..." or the default "resume") is typed into the window
+#  - the rotator's own ping ("Usage reset: ...", "Claude subscription access was refused on the previous seat, ...", or the default "resume") is typed into the window
 #    with WriteConsoleInput, so the CLI stamps it `human`/`typed`; it is excluded by its text.
 #  - an owner answer relayed from another session counts when it is for this lock's PR: either
 #    deliver_ruling.py's "Owner ruling for #<N>" at the start of a line (any case, "for" or "on",
@@ -118,7 +118,7 @@ function Get-Prop($o, [string]$n) { if ($null -ne $o -and $o.PSObject.Properties
 # The harness can put <system-reminder> blocks in front of the injected ping; they are not part of it.
 function Test-RotatorPing([string]$t) {
   $t = ($t -replace '^(?s)(\s*<system-reminder>.*?</system-reminder>)+\s*', '').Trim()
-  return ($t.StartsWith('Usage reset:') -or $t -ceq 'resume')
+  return ($t.StartsWith('Usage reset:') -or $t.StartsWith('Claude subscription access was refused on the previous seat') -or $t -ceq 'resume')     # claude-cli-account.ps1's two cap pings
 }
 function Test-CacheKeeperPrompt([string]$t) {
   $t = $t.Trim()

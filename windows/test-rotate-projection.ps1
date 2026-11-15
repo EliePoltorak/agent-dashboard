@@ -397,6 +397,13 @@ stuff' 1787 $ts0 @{ origin = @{ kind = 'plugin'; name = 'cache-keeper'; asUser =
   Check 'CLI usage-reset continuation resubmitted by cache-keeper => still parked' (-not (Test-ParkedLockAnswered -LockPath $lk))
   WriteTranscript ($noise + @((UserLine @(@{ type = 'tool_result'; tool_use_id = 'q'; content = 'The user answered: "Ship it?"="Usage reset: the 5-hour limit capped this window"' }) 4000 $ts0)))
   Check 'rotator ping typed into an open AskUserQuestion => still parked' (-not (Test-ParkedLockAnswered -LockPath $lk))
+  # the access-refusal ping (claude-cli-account.ps1) is the rotator's too: typed, queued, and typed into an open question
+  WriteTranscript ($noise + @((UserLine 'Claude subscription access was refused on the previous seat, so the CLI account was rotated to D. Continue where you left off.' 4000 $ts0 @{ origin = @{ kind = 'human' }; promptSource = 'typed' })))
+  Check 'access-refusal ping typed => still parked' (-not (Test-ParkedLockAnswered -LockPath $lk))
+  WriteTranscript ($noise + @('{"type":"attachment","attachment":{"type":"queued_command","prompt":"Claude subscription access was refused on the previous seat, so the CLI account was rotated to D. Continue where you left off.","origin":{"kind":"human"}},"timestamp":"' + (Stamp 4000 $ts0) + '"}'))
+  Check 'access-refusal ping queued => still parked' (-not (Test-ParkedLockAnswered -LockPath $lk))
+  WriteTranscript ($noise + @((UserLine @(@{ type = 'tool_result'; tool_use_id = 'q'; content = 'The user answered: "Ship it?"="Claude subscription access was refused on the previous seat, so the CLI account was rotated to D. Continue where you left off."' }) 4000 $ts0)))
+  Check 'access-refusal ping typed into an open AskUserQuestion => still parked' (-not (Test-ParkedLockAnswered -LockPath $lk))
   WriteTranscript ($noise + @((UserLine @(@{ type = 'tool_result'; tool_use_id = 'q'; content = 'Your questions have been answered: "Ship it?"="[User dismissed the question]"' }) 4000 $ts0)))
   Check 'every question dismissed => still parked' (-not (Test-ParkedLockAnswered -LockPath $lk))
   WriteTranscript ($noise + @((UserLine @(@{ type = 'tool_result'; tool_use_id = 'q'; content = 'Your questions have been answered: "Ship it?"="resume", "Also?"="Yes"' }) 4000 $ts0)))

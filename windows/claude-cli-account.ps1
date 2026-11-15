@@ -1207,6 +1207,7 @@ function Save-ProfileToken {
     }
   }
   $dst = Join-Path $Root $Label; $tf = Join-Path $dst 'token.txt'
+  $changed = -not (Test-Path $tf) -or ((Get-Content $tf -Raw).Trim()) -ne $Tok
   if ((Test-Path $tf) -and ((Get-Content $tf -Raw).Trim()) -ne $Tok) {
     if (-not $Replace) { Write-Host "Refusing: '$Label' already holds a different token (fingerprint $(Profile-TokenHash $Label)). Pass --replace to overwrite it (the old one is backed up)." -ForegroundColor Red; exit 1 }
     Copy-Item $tf (Join-Path $dst ("token.txt.bak-{0}" -f (Get-Date -Format 'yyyyMMdd-HHmmss'))) -Force
@@ -1214,6 +1215,7 @@ function Save-ProfileToken {
   New-Item -ItemType Directory -Path $dst -Force | Out-Null
   $tmp = "$tf.tmp-$PID"; Write-OwnerOnly $tmp $Tok   # LINUX-PORT: token files are owner-only from creation
   [IO.File]::Move($tmp, $tf, $true)
+  if ($changed) { Clear-AccessDisabled $Label }      # a refusal marker belongs to the token it was earned by; the new one has not been refused
 }
 
 function Resolve-Target {

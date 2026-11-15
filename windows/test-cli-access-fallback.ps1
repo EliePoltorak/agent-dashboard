@@ -545,6 +545,18 @@ foreach ($fn in 'Set-DiskCredential', 'Save-ProfileToken') {
   Check "$fn writes its temp secret through Write-OwnerOnly, no write-then-chmod" ($d -match 'Write-OwnerOnly \$tmp' -and $d -notmatch 'chmod')
 }
 
+# --- a replaced token drops the seat's refusal marker; storing the same token again keeps it ---
+Reset-Case
+Write-AccessDisabled -Label 'B'
+Save-ProfileToken 'B' (TokenOf 'B') $false
+Check 'storing the same token keeps the refusal marker' ($null -ne (Read-AccessDisabled 'B'))
+Save-ProfileToken 'B' 'sk-ant-oat01-SEATB-REPLACEDVALUE' $true
+Check 'a replaced token clears the refusal marker' (($null -eq (Read-AccessDisabled 'B')) -and (TokenOf 'B') -eq 'sk-ant-oat01-SEATB-REPLACEDVALUE')
+Write-AccessDisabled -Label 'G'
+Save-ProfileToken 'G' 'sk-ant-oat01-SEATG-NEWVALUE' $false
+Check 'a first token on a seat with a stale marker clears it' ($null -eq (Read-AccessDisabled 'G'))
+Reset-Case
+
 # --- the claude wrapper's seat gate never blocks a credential command (every seat refused, the user adds a token) ---
 $gd = Join-Path $root 'gate'; $gh = Join-Path $gd 'home'; $ga = Join-Path $gh '.claude-cli-accounts'
 New-Item -ItemType Directory -Force -Path (Join-Path $ga 'B') | Out-Null
