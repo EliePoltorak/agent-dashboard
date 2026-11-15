@@ -433,7 +433,7 @@ if (-not $flagSkip) {
           $flipped++; $next[$r.key] = $want
         } catch {
           Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
-          [void]$flagFailCli.Add($cli)
+          [void]$flagFailCli.Add("$flag|$cli")
         }
       }
       # clones made in pass 2 for seats lacking the session must carry the same flag
@@ -598,17 +598,22 @@ foreach ($acct in $accts) {
 
 # Save the flag baseline AFTER pass 2, so the records it created (clone or fabricated) are in it
 # with the flags they were written with -- else the next run reads them as brand-new and unions.
+# (A session whose write failed keeps last run's values for that flag instead: pass 1.4.)
 if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
   foreach ($mr in $madeRecs) {
-    if ($flagFailCli.Contains([string]$mr.cli)) { continue }   # a failed session's clones stay out (see pass 1.4)
     $mk = $mr.path.Substring($ccs.Length).TrimStart('\')
-    foreach ($flag in 'isArchived', 'isStarred') { $flagNextAll[$flag][$mk] = $mr[$flag] }
+    foreach ($flag in 'isArchived', 'isStarred') {
+      if ($flagFailCli.Contains("$flag|$($mr.cli)")) { continue }   # a failed session's clones stay out (pass 1.4)
+      $flagNextAll[$flag][$mk] = $mr[$flag]
+    }
   }
-  # a session whose record could not be written keeps last run's baseline for all its records
-  foreach ($cli in $flagFailCli) { foreach ($r in $flagByCli[$cli]) { foreach ($flag in 'isArchived', 'isStarred') {
-    $p = $flagPrevCi[$flag]
-    if ($p -and $p.ContainsKey($r.key)) { $flagNextAll[$flag][$r.key] = [bool]$p[$r.key] } else { $flagNextAll[$flag].Remove($r.key) }
-  } } }
+  # a session whose record could not be written keeps last run's baseline for that flag, for all its records
+  foreach ($fc in $flagFailCli) {
+    $flag, $cli = $fc -split '\|', 2; $p = $flagPrevCi[$flag]
+    foreach ($r in $flagByCli[$cli]) {
+      if ($p -and $p.ContainsKey($r.key)) { $flagNextAll[$flag][$r.key] = [bool]$p[$r.key] } else { $flagNextAll[$flag].Remove($r.key) }
+    }
+  }
   $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
   # atomic: a crash mid-write must not leave a truncated file (which the next run would refuse to read)
   ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8

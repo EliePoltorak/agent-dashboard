@@ -100,14 +100,20 @@ check 'unseen off record -> still archived on every seat' (@(ofSession $G.Name |
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $false }; run
 check 'reset again: nothing archived on that session' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
 
-"--- a record whose write fails: the state is not saved, so its stale ON value does not spread next run"
+"--- a record whose write fails: its session keeps its last baseline, so its stale ON value does not spread next run"
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
 setRec $g0.f 'isArchived' $false                                                       # un-archive on seat 0
-$stBefore = Get-Content $statePath -Raw
+# a second session changed in the same run must still be saved (only the failed session holds back)
+$H = recs | Where-Object { $_.cli -ne $X -and $_.cli -ne $G.Name } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) } | Select-Object -First 1
+if ($H) { setRec $H.Group[0].f 'isStarred' $true }
 Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $true; run                 # seat 1's record can't be written
 check 'failed write warns' ($out -match 'could not set isArchived')
 check 'failed write: the other seats are un-archived' (@(ofSession $G.Name | Where-Object { $_.f -ne $g1.f -and $_.arch }).Count -eq 0)
 $st = state; check 'failed write: the session keeps its last baseline' ($st['isArchived'][(key $g0.f)] -eq $true -and $st['isArchived'][(key $g1.f)] -eq $true)
+if ($H) {
+  check 'failed write: another session changed in the same run is saved' (@(ofSession $H.Name | Where-Object { $st['isStarred'][(key $_.f)] -ne $true }).Count -eq 0)
+  foreach ($r in (ofSession $H.Name)) { setRec $r.f 'isStarred' $false }               # put it back (all known -> off)
+} else { "(no second unpinned multi-seat session; skipped the other-session check)" }
 Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $false; run
 check 'retried: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
 $st = state; check 'retried: the session baseline moves on' ($st['isArchived'][(key $g0.f)] -eq $false -and $st['isArchived'][(key $g1.f)] -eq $false)

@@ -531,8 +531,7 @@ seats changed opposite ways. A record the sync has not seen before (the app made
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
 can't be written, the sync warns and that session keeps its last saved state, so the next run tries again
 from it (a record that can't be read stops the whole save that run). Until it succeeds, un-archiving or
-unpinning that session back to how it was may not stick, and after a failed first run the next run is a
-first run again. The first run,
+unpinning that session back to how it was may not stick. The first run,
 and any session never seen before, use "on for any seat → on for all"; records the sync itself creates carry the session's flags. **This step runs only while the
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task when it is enabled -- it has been disabled on this machine since 2026-07-20 -- or a manual
