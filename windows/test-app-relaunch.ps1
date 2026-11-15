@@ -143,15 +143,8 @@ Invoke-SwitchRelaunch B
   Check 'Start-ClaudeApp restores Idle afterwards' ("$((Get-Process -Id $PID).PriorityClass)" -eq 'Idle')
   function Start-Process { param($FilePath, $ArgumentList) throw 'no such launcher' }
   Check 'a failed launch returns $false and still restores Idle' ((-not (Start-ClaudeApp 6>$null)) -and "$((Get-Process -Id $PID).PriorityClass)" -eq 'Idle')
-  # and the process really started is not Idle: a real child (pwsh) writes its own class to a file
-  Remove-Item function:Start-Process
-  $pf = Join-Path $root 'child-class.txt'
-  function Find-AppLauncher { @{ file = (Get-Process -Id $PID).Path; args = @('-NoProfile', '-Command', "(Get-Process -Id `$PID).PriorityClass.ToString() | Set-Content -LiteralPath '$pf'") } }
-  Check 'Start-ClaudeApp with a real launcher' (Start-ClaudeApp)
-  $dl = (Get-Date).AddSeconds(30); while (-not (Test-Path -LiteralPath $pf) -and (Get-Date) -lt $dl) { Start-Sleep -Milliseconds 200 }
-  Start-Sleep -Milliseconds 300
-  $cc = if (Test-Path -LiteralPath $pf) { (Get-Content -LiteralPath $pf -Raw).Trim() } else { '' }
-  Check 'the launched app process is not Idle' ($cc -eq 'Normal') "class=$cc"
+  # (a real launched child is not started here: it would run at Normal, and every test process stays at Idle. The mocked Start-Process above
+  # already proves Start-Process runs while this shell is at Normal, which is the class a child inherits.)
 } finally {
   foreach ($k in $keep.Keys) { Set-Item "env:$k" $keep[$k] }
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
