@@ -153,7 +153,9 @@ $new = @(ofSession $X | Where-Object { $before -notcontains $_.f })
 check "held: a record was recreated ($($new.Count))" ($new.Count -ge 1)
 check 'held: the recreated record is neither archived nor pinned' (@($new | Where-Object { $_.arch -or $_.star }).Count -eq 0)
 $st = state; check 'held: the recreated record is not in the saved state' (@($new | Where-Object { $st['isArchived'].ContainsKey((key $_.f)) }).Count -eq 0)
-Set-Content -LiteralPath $xs[1].f $keepX -NoNewline; run
+Set-Content -LiteralPath $xs[1].f $keepX -NoNewline
+$new | Where-Object { (Split-Path $_.f) -eq (Split-Path $xs[1].f) } | ForEach-Object { Remove-Item -LiteralPath $_.f }   # the duplicate next to the unreadable record (issue #12)
+run
 check 'held, next good run: every record of the session is archived' (@(ofSession $X | Where-Object { -not $_.arch }).Count -eq 0)
 foreach ($r in (ofSession $X)) { setRec $r.f 'isArchived' $false }; run
 
