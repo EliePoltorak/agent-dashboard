@@ -1111,11 +1111,15 @@ def util_at(seat, key, t):
     return min(max(u, 0.0), 1.0)
 
 
+def _counted(rec, key, t, pid):
+    """[(weight, used fraction)] of the seats one history record counts for window `key` at time `t`: a seat of weight 0, or one with no reading, is left out."""
+    return [(w, u) for label, s in seats_of(rec, pid).items() if (w := wt(pid, label)[0]) > 0 and (u := util_at(s, key, t)) is not None]
+
+
 def remaining(rec, key, t=None, pid="claude"):
     """(pooled % left, seat count) for one history record; a seat counts as its weight (wt) x 100 %, so the pool's cap is 100 x the sum of the weights.
     A seat of weight 0 is left out."""
-    t = rec["t"] if t is None else t
-    us = [(w, u) for label, s in seats_of(rec, pid).items() if (w := wt(pid, label)[0]) > 0 and (u := util_at(s, key, t)) is not None]
+    us = _counted(rec, key, rec["t"] if t is None else t, pid)
     return sum(w * (1 - u) for w, u in us) * 100, len(us)
 
 
@@ -1298,7 +1302,9 @@ def build_limit(hist, latest, pid, wid, label, now, dflt):
         r, cnt = remaining(h, wid, pid=pid)
         if cnt:
             rows.append(h)
-            last[h["t"] // BUCKET] = [h["t"], round(r, 1), 1 if h.get("b") else 0]
+            # the 4th element is the capacity of the seats that record counted (the units of lim["cap"]): the page shows each point as a share of ITS OWN pool, so
+            # adding or removing a seat later does not rescale the past
+            last[h["t"] // BUCKET] = [h["t"], round(r, 1), 1 if h.get("b") else 0, round(sum(w for w, _ in _counted(h, wid, h["t"], pid)) * 100, 2)]
     # the graph holds only records that measure this window, but rates and the profile run over every record where the provider exists: one where no seat measures
     # this window (every read failed past carry_good's limit) is a break there, so use across it is unplaced rather than bridged; before the provider existed there is no
     # record; and the sequence starts at the first record that measures this window, so failed reads before any measurement do not dilute the burn (no use
@@ -4438,6 +4444,13 @@ def selftest():
     lm = wl["limits"][0]
     assert lm["cap"] == 600 and lm["now"] == 500.0 and [s.get("w") for s in lm["seats"]] == [None, 5.0] and lm["hist"][0][1] == 500.0, lm      # Z is out of the pool
     assert [a.get("w") for a in wl["accounts"]] == [None, 5.0, 0.0] and wl["accounts"][1]["wsrc"] == "seatWeights"
+    set_weights(None)
+    # each history point carries the capacity of the seats it counted, so a seat added or removed later does not rescale the past: two half-used seats (100 of 200), then one removed
+    # (50 of 100): the page reads 50 % for both, not 100 % for the first against today's cap of 100
+    pc = build([rec(T, A=(0.5, far), B=(0.5, far)), rec(T + 3600, A=(0.5, far))], T + 3600, {}, False, {})["providers"][0]["limits"][0]
+    assert pc["cap"] == 100 and [x[1:] for x in pc["hist"]] == [[100.0, 0, 200.0], [50.0, 0, 100.0]], pc["hist"]
+    assert [round(x[1] * 100 / x[3]) for x in pc["hist"]] == [50, 50]
+    assert pc["hist"][0][3] == 200.0 and wl["limits"][0]["hist"][0][3] == 600.0            # (the weighted pool above: 1 + 5 seats)
     set_weights(None)
     # H: measured ratio of a Codex seat's capacity: uncached tokens per 1 % of weekly use over the last 21 days, against the weight-1 seats
     def steps(t0, start, n, per, reset):

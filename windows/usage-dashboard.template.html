@@ -218,7 +218,7 @@ function chart(p, lim, W) {
   const X = t => L + (t - x0) / (x1 - x0) * pw;
   const drain = ui.view === 'drain';
   const mult = parseFloat(ui.mult), rf = rateFor(lim), rate = rf.rate, wk = winKey();
-  const sc = a => a.map(q => [q[0], sh(q[1], lim)].concat(q.slice(2)));          // pooled -> % of the whole pool, for display only
+  const sc = a => a.map(q => [q[0], quotaPointShare(q, lim.cap)].concat(q.slice(2)));          // pooled -> % of the whole pool (a recorded point: of the pool it was measured in), for display only
   const hist = drain ? [] : sc(lim.hist.filter(q => q[0] >= x0 && q[0] <= x1));
   const dr = drain ? sc(((lim.drain || {})[wk] || []).filter(q => q[0] >= x0 && q[0] <= x1)) : [];
   let pr = null;

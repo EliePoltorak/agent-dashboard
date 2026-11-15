@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn } = require('./usage-sim.js');
+const { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn } = require('./usage-sim.js');
 const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
 
 // two seats at 50% used, far resets, 50 %/h: 100% left, drains empty after 2 h
@@ -426,5 +426,18 @@ assert.strictEqual(quotaShare(600, 600), 100);
   assert.ok(other.rate === lim.profile && other.avg === 5 && other.why.startsWith('Typical week'), JSON.stringify(other));
   assert.strictEqual(mk({ view: 'drain', win: '6' })(lim).why, 'Last 6h');
   assert.ok(mk({ view: 'drain', win: 'typ' })({ burn: { '3': 2 } }).why === 'Last 3h' && mk({ view: 'rem', win: 'typ' })({ burn: { '3': 2 } }).why.startsWith('Last 3h (not enough'));
+}
+// a history point is a share of the pool it was measured in: two half-used seats (100 of 200) read 50 %, not 100 % against a cap of 100 after one seat is removed
+{
+  assert.strictEqual(quotaPointShare([1, 100, 0, 200], 100), 50);
+  assert.strictEqual(quotaPointShare([2, 50, 0, 100], 100), 50);
+  assert.strictEqual(quotaPointShare([1, 100, 0], 100), 100);        // no capacity of its own (an older blob): the pool's present cap
+  assert.strictEqual(quotaPointShare([1, 100], undefined), 100);
+  // and the page's chart scaling uses it (the template's `sc`), for history points only: a projection or drain point has no 4th element
+  const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
+  const line = tpl.split(/\r?\n/).find(l => l.includes('const sc = a =>'));
+  assert.ok(line, 'the chart no longer defines sc');
+  const sc = new Function('lim', 'quotaPointShare', 'sh', line.trim() + '\nreturn sc;')({ cap: 100 }, quotaPointShare, (v, lim) => quotaShare(v, lim.cap));      // sh: the page's own
+  assert.deepStrictEqual(sc([[1, 100, 0, 200], [2, 50, 1, 100], [3, 40]]), [[1, 50, 0, 200], [2, 50, 1, 100], [3, 40]]);
 }
 console.log('usage-sim tests passed');

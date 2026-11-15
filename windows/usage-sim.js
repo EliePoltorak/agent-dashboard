@@ -75,6 +75,9 @@ function quotaInUse(p, esc) {
 }
 // A pooled figure as a share of the provider's whole pool: 100 % is every seat full. `cap` is 100 per seat (the blob's limit.cap); pooled %/h rates scale the same way.
 const quotaShare = (v, cap) => v * 100 / (cap || 100);
+// A history point [t, pooled left, rebuilt flag, capacity of the seats it counted] as a share of ITS OWN pool, so a seat added or removed since does not rescale it; a point without
+// its own capacity (an older blob) falls back to `cap`, the pool's present one.
+const quotaPointShare = (q, cap) => quotaShare(q[1], q[3] || cap);
 // "17d 23h", "5h 12m", "12m": time left until an expiry.
 function quotaIn(sec) {
   const m = Math.max(0, Math.floor(sec / 60)), d = Math.floor(m / 1440), h = Math.floor(m % 1440 / 60);
@@ -131,4 +134,4 @@ function quotaBankedTotal(p) {
 }
 // Why a provider has no pooled chart when every seat is weighted 0 (weight 0 leaves a seat out of the pool only): '' otherwise.
 const quotaNoPool = p => p.accounts.length && p.accounts.every(a => a.w === 0) ? 'No seats counted in the pool (all weights are 0).' : '';
-if (typeof module !== 'undefined') module.exports = { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn, quotaNoPool };
+if (typeof module !== 'undefined') module.exports = { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn, quotaNoPool };
