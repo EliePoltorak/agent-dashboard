@@ -190,7 +190,10 @@ def read_seat(label):
     if not rows:
         return None
     rows.sort(key=lambda r: r[0])
-    ts, d = rows[-1]  # the newest read wins for the windows both files carry
+    # The newest read that MEASURED the session or weekly window wins for both. A probe that got a non-2xx with no usage headers
+    # (a Fable 500, say) is cached as ok, but it measured nothing, so it must not blank the Haiku reading; with no measurement at all,
+    # the newest read still supplies its statuses, as before.
+    ts, d = next((r for r in reversed(rows) if _f(r[1].get("s5_util")) is not None or _f(r[1].get("w7_util")) is not None), rows[-1])
     fab = next((r[1] for r in reversed(rows) if _f(r[1].get("oi7_util")) is not None), {})
     return {"ts": ts, "s": _f(d.get("s5_util")), "sr": _f(d.get("s5_reset")),
             "w": _f(d.get("w7_util")), "wr": _f(d.get("w7_reset")),
@@ -3988,6 +3991,10 @@ def selftest():
             json.dump({"ts": ts_, "data": dict(dd, ok=True, access="ok")}, open(os.path.join(rd, "A", fn), "w"))
         rs_ = read_seat("A")
         assert (rs_["st"], rs_["wt"], rs_["ft"], rs_["f"]) == ("allowed", "allowed_warning", "rejected", 0.2), rs_      # s/w from the newest read, Fable's from the one that carries it
+        for fts_ in (110, 100):     # a newer (or same-second) headerless Fable error leaves the Haiku reading in place
+            json.dump({"ts": fts_, "data": {"ok": True, "access": "ok", "http": 500, "note": "http 500: api_error: Overloaded"}}, open(os.path.join(rd, "A", "usage-cache-fable.json"), "w"))
+            rs_ = read_seat("A")
+            assert (rs_["ts"], rs_["s"], rs_["w"], rs_["st"]) == (100, .1, .5, "allowed"), rs_
     finally:
         globals()["ROOT"] = keep_root
         __import__("shutil").rmtree(rd, ignore_errors=True)

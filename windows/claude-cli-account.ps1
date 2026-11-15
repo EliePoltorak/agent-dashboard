@@ -132,8 +132,10 @@ function New-AccessDisabledResult {
   [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code=$Code; note=(ConvertTo-SanitizedNote $note) }
 }
 function New-ProbeUnknownResult {
-  param([string]$Label, [string]$Note)
-  [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; note=(ConvertTo-SanitizedNote $Note) }
+  # -Network marks a transport failure (timeout, DNS, reset): the one kind the access-refusal fallback may step onto.
+  # An HTTP error status (a dead token's 401, a 5xx), a missing token or an unreadable catalog is not.
+  param([string]$Label, [string]$Note, [switch]$Network)
+  [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=[bool]$Network; note=(ConvertTo-SanitizedNote $Note) }
 }
 function Write-SeatHealth {
   param([bool]$Ok, [string]$Active, [string]$Reason)
@@ -328,7 +330,7 @@ function Probe-Usage {
     if ($family -notin @('haiku','fable')) { throw 'Usage probes require a family selector' }
     $cat = Invoke-WebRequest -SkipHttpErrorCheck -Method Get -Uri 'https://api.anthropic.com/v1/models?limit=100' -Headers $hdr -TimeoutSec 12
   } catch {
-    return (New-ProbeUnknownResult $Label ("probe failed: network; not marking disabled (" + $_.Exception.Message + ")"))
+    return (New-ProbeUnknownResult $Label ("probe failed: network; not marking disabled (" + $_.Exception.Message + ")") -Network)
   }
   $catBody = [string]$cat.Content
   $catStatus = [int]$cat.StatusCode
@@ -354,7 +356,7 @@ function Probe-Usage {
     $r = Invoke-WebRequest -SkipHttpErrorCheck -Method Post -Uri 'https://api.anthropic.com/v1/messages' `
            -Headers $hdr -Body $body -ContentType 'application/json' -TimeoutSec 12
   } catch {
-    return (New-ProbeUnknownResult $Label ("probe failed: network; not marking disabled (" + $_.Exception.Message + ")"))
+    return (New-ProbeUnknownResult $Label ("probe failed: network; not marking disabled (" + $_.Exception.Message + ")") -Network)
   }
   if (Test-SubscriptionDisabled ([int]$r.StatusCode) ([string]$r.Content)) {
     return (New-AccessDisabledResult $Label (Get-AccessCode ([string]$r.Content)) (Get-ErrorMessage ([string]$r.Content)))
@@ -662,7 +664,7 @@ function Rank-Accounts {
           else { [pscustomobject]@{ ok = $false; note = 'not probed' } }
     if (-not $u.ok) {
       $whyAccess = if ($u.access) { [string]$u.access } else { 'unknown' }
-      [pscustomobject]@{ label=$l; usable=$false; why=$u.note; access=$whyAccess; score=9 }
+      [pscustomobject]@{ label=$l; usable=$false; why=$u.note; access=$whyAccess; net=[bool]$u.net; score=9 }
       continue
     }
     $s5 = [double]$u.s5_util; $w7 = [double]$u.w7_util
@@ -1085,10 +1087,11 @@ function Select-RotationTarget {
   if ($PSBoundParameters.ContainsKey('UnknownExcept')) {
     # The access-refusal fallback: usage unknown (network), so no session bar, but every other exclusion
     # still holds - the active seat, the desktop-app seat, a seat marked disabled, and a seat whose cached
-    # Fable reading says rejected (cache only: the network is what failed, so no probe).
+    # Fable reading says rejected (cache only: the network is what failed, so no probe). Only a seat whose probe failed on the
+    # network qualifies: a 401 (dead token), a 5xx, or a missing token is a seat the CLI cannot use, not an unknown one.
     $appSeat = Get-AppSeatLabel
     $unknown = @(Rank-Accounts $false $false | Where-Object {
-      $_.access -eq 'unknown' -and $_.label -ne $UnknownExcept -and -not ($appSeat -and ($_.label -ieq $appSeat)) -and -not (Read-AccessDisabled $_.label)
+      $_.access -eq 'unknown' -and $_.net -and $_.label -ne $UnknownExcept -and -not ($appSeat -and ($_.label -ieq $appSeat)) -and -not (Read-AccessDisabled $_.label)
     } | Sort-Object label)
     foreach ($c in $unknown) {
       $fu = Get-UsageCached $c.label $false 'fable' '-fable' $true

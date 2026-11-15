@@ -719,7 +719,7 @@ function Read-AccessDisabled { param($l) if ($script:fbDisabled -contains $l) { 
 function Get-UsageCached { param($Label, $Refresh, $Model, $CacheSuffix, $CacheOnly)
   $script:fbFableCalls += , @($Label, $Refresh, $CacheOnly)
   if ($script:fbFable.ContainsKey($Label)) { [pscustomobject]@{ ok = $true; oi7_stat = $script:fbFable[$Label] } } else { [pscustomobject]@{ ok = $false } } }
-function Row([string]$l, [string]$acc = 'unknown') { [pscustomobject]@{ label = $l; usable = $false; access = $acc } }
+function Row([string]$l, [string]$acc = 'unknown', [bool]$net = $true) { [pscustomobject]@{ label = $l; usable = $false; access = $acc; net = $net } }
 $script:fbRows = @((Row 'A'), (Row 'B'), (Row 'C'), (Row 'D'), (Row 'E' 'ok'))
 $script:fbApp = 'B'; $script:fbDisabled = @('C'); $script:fbFable = @{ D = 'rejected' }
 $w = Select-RotationTarget 85 -UnknownExcept 'A'
@@ -731,6 +731,9 @@ Check 'fallback reads Fable from the cache only (no probe on a failed network)' 
 $script:fbRows = @((Row 'F'), (Row 'D')); $script:fbFable = @{ D = 'rejected' }
 $w = Select-RotationTarget 85 -UnknownExcept 'A'
 Check 'fallback passes over a Fable-rejected seat to the next one' ($w.label -eq 'F') "picked '$($w.label)'"
+$script:fbRows = @((Row 'D' 'unknown' $false), (Row 'F')); $script:fbFable = @{}
+$w = Select-RotationTarget 85 -UnknownExcept 'A'
+Check 'fallback passes over a seat whose probe failed with an HTTP status' ($w.label -eq 'F') "picked '$($w.label)'"
 Check 'Invoke-CheckRotate routes the fallback through Select-RotationTarget' ($src -match 'Select-RotationTarget \$sessBar -UnknownExcept \$act') 'the fallback picks a seat itself again'
 
 Write-Host ""

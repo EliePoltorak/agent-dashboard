@@ -52,7 +52,10 @@ $global:ClaudeRotatorProbeOverride = {
     }
   }
   if ($plan -eq 'network') {
-    return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; note='probe failed: network; not marking disabled' }
+    return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network; not marking disabled' }
+  }
+  if ($plan -eq 'http401') {     # Probe-Usage's result for a dead token: an HTTP failure, not a network one
+    return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$false; note='probe failed: http 401: authentication_error: invalid token; not marking disabled' }
   }
   if ($plan -eq 'quota') {
     return [pscustomobject]@{
@@ -364,7 +367,7 @@ Check 'network failure is not reported as an access refusal' ($health.ok -eq $tr
 # Probe-Usage itself is replaced (the workers copy its definition), so nothing can reach the network.
 Reset-Case
 $origProbe = ${function:Probe-Usage}
-function Probe-Usage { param([string]$Label, [string]$Model) <# MOCK-NO-NETWORK #> [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; note='probe failed: network (mock)' } }
+function Probe-Usage { param([string]$Label, [string]$Model) <# MOCK-NO-NETWORK #> [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network (mock)' } }
 if ((Get-Command Probe-Usage -CommandType Function).Definition -notmatch 'MOCK-NO-NETWORK') { Write-Host 'ABORT: Probe-Usage is not the mock' -ForegroundColor Red; exit 2 }
 $env:CLAUDE_ROTATOR_SELFTEST = '0'
 try { Prefetch-Usage @('A','B') $true $true $true } finally { $env:CLAUDE_ROTATOR_SELFTEST = '1'; ${function:Probe-Usage} = $origProbe }
@@ -383,6 +386,24 @@ Check 'fallback picks the first unknown seat in label order (A)' ((Get-ActiveLab
 $marked = @(Get-ChildItem $Root -Recurse -Filter 'access-disabled.json' | ForEach-Object { $_.Directory.Name })
 Check 'only the refused seat is marked' (($marked.Count -eq 1) -and ($marked[0] -eq 'B')) ($marked -join ',')
 Check 'fallback did not hammer B' ($script:probes['B'] -eq 1) ("count=$($script:probes['B'])")
+
+# --- the fallback never steps onto a seat whose probe failed with an HTTP status (a dead token's 401) ---
+Reset-Case
+Clear-AppIdentity
+Set-Active 'B'
+$script:plan['B'] = 'disabled'
+$script:plan['A'] = 'http401'
+foreach ($l in @('C','D','E','F')) { $script:plan[$l] = 'network' }
+$rc = Invoke-CheckRotate 0 $false $true 'test'
+Check 'fallback passes over a 401 seat to the first network-unknown one (C)' ((Get-ActiveLabel) -eq 'C') (Get-ActiveLabel)
+Reset-Case
+Clear-AppIdentity
+Set-Active 'B'
+$script:plan['B'] = 'disabled'
+foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'http401' }
+$rc = Invoke-CheckRotate 0 $false $true 'test'
+Check 'every other seat a 401: no fallback, stays on B' ((Get-ActiveLabel) -eq 'B') (Get-ActiveLabel)
+Check 'every other seat a 401: not exit 0' ($rc -eq 3) "rc=$rc"
 
 # --- quota 429 is not an access refusal ---
 Reset-Case
