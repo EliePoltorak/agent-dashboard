@@ -1760,7 +1760,8 @@ def rollout_records(events, taken, rebuilt, hist=(), carry=False):
     """History records from attributed events: one per 5 minutes, each carrying every seat seen so far at its newest state;
     none in a 5-minute bucket listed in `taken` (a recorded point is never overwritten). `rebuilt` flags them b like the Claude backfill.
     A seat's state starts from (and is refreshed by) the latest earlier `hist` record when that reading is newer, so a seat idle in the logs
-    stays in records that build_limit reads as the whole pool.
+    stays in records that build_limit reads as the whole pool. An event older than the seat's state (a record's measurement can be newer than
+    the record's own time) is not applied to that seat; the other seats' events and the bucketing go on as usual.
     With `carry`, when the last event falls in a taken bucket (so no record holds it), one more record flagged "carry" is added with every
     seat's newest state: never saved (append_rollouts and take drop it), only for newest_codex, so the current sample still gets that reading."""
     prior = sorted((h for h in hist if isinstance(h.get("codex"), dict)), key=lambda h: h["t"])
@@ -1772,10 +1773,11 @@ def rollout_records(events, taken, rebuilt, hist=(), carry=False):
                     state[s] = dict(v, ts=v.get("ts") or prior[i]["t"])
             i += 1
         st = state.setdefault(seat, {})
-        st.pop("ok", None); st.pop("note", None)      # an event is a real measurement: a note this seat inherited from an earlier record (ok False) is not carried onto it
-        for w, (used, reset, period) in wins.items():
-            st[w], st[w + "r"], st[w + "p"] = used, reset, period
-        st["ts"] = t
+        if (st.get("ts") or -1) <= t:                 # an earlier record's measurement newer than this event (a coalesced record carries one) is not replaced by the older event
+            st.pop("ok", None); st.pop("note", None)  # an event is a real measurement: a note this seat inherited from an earlier record (ok False) is not carried onto it
+            for w, (used, reset, period) in wins.items():
+                st[w], st[w + "r"], st[w + "p"] = used, reset, period
+            st["ts"] = t
         k = t // BUCKET5
         if k in taken:
             continue
@@ -3379,6 +3381,11 @@ def selftest():
         pr = rollout_records([(N, "A", {"w": (0.2, N + 99, WEEK)}), (N + 400, "A", {"w": (0.3, N + 99, WEEK)})], set(), False, ph)
         assert [r["t"] for r in pr] == [N, N + 400] and [set(r["codex"]) for r in pr] == [{"A", "B"}] * 2
         assert [r["codex"]["B"]["w"] for r in pr] == [0.4, 0.5] and [r["codex"]["A"]["w"] for r in pr] == [0.2, 0.3]
+        # a coalesced record can carry a measurement newer than its own time: an event older than that never replaces it, and other seats' events still land
+        po = [{"t": N - 1000, "codex": {"A": {"w": 0.9, "wr": N + 99, "wp": WEEK, "ts": N + 500}}}]
+        pw = rollout_records([(N, "A", {"w": (0.2, N + 99, WEEK)}), (N + 10, "B", {"w": (0.4, N + 99, WEEK)})], set(), False, po)
+        assert pw and all(r["codex"]["A"]["w"] == 0.9 and r["codex"]["A"]["ts"] == N + 500 for r in pw), pw       # A's older event (ts N) never wins
+        assert pw[-1]["codex"]["B"]["w"] == 0.4 and pw[-1]["codex"]["B"]["ts"] == N + 10, pw                       # B is unaffected
         # the newest event lands in a bucket a sample already holds: no record for it, but with carry the current sample still gets it
         ev_ = [(N, "A", {"w": (0.1, N + 99, WEEK)}), (N + 120, "A", {"w": (0.2, N + 99, WEEK)})]
         tk_ = {(N + 120) // BUCKET5}
