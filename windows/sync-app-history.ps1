@@ -241,9 +241,15 @@ function Write-Record([string]$subDir, $file) {
   $model = Get-ModelFor $file
   $sid = "local_$([guid]::NewGuid().ToString())"
   $tj = $title | ConvertTo-Json -Compress
-  $json = '{"sessionId":"' + $sid + '","cliSessionId":"' + $file.BaseName + '","cwd":"' + $cwdJson + '","originCwd":"' + $cwdJson + '","lastFocusedAt":' + $act + ',"createdAt":' + $created + ',"lastActivityAt":' + $act + ',"model":"' + $model + '","effort":"xhigh","isArchived":false,"title":' + $tj + ',"titleSource":"auto","permissionMode":"default","remoteMcpServersConfig":[],"chromePermissionMode":"skip_all_permission_checks","completedTurns":1,"bridgeSessionIds":[],"alwaysAllowedReasons":[],"sessionPermissionUpdates":[],"classifierSummaryEnabled":true,"spawnSeed":{}}'
+  # carry the flags pass 1.4 resolved for this session (default: not archived, not starred)
+  $fw = $flagWant[$file.BaseName]
+  $arch = if ($fw -and $fw.isArchived) { 'true' } else { 'false' }
+  $starPart = if ($fw -and $fw.isStarred) { ',"isStarred":true' } else { '' }
+  $json = '{"sessionId":"' + $sid + '","cliSessionId":"' + $file.BaseName + '","cwd":"' + $cwdJson + '","originCwd":"' + $cwdJson + '","lastFocusedAt":' + $act + ',"createdAt":' + $created + ',"lastActivityAt":' + $act + ',"model":"' + $model + '","effort":"xhigh","isArchived":' + $arch + $starPart + ',"title":' + $tj + ',"titleSource":"auto","permissionMode":"default","remoteMcpServersConfig":[],"chromePermissionMode":"skip_all_permission_checks","completedTurns":1,"bridgeSessionIds":[],"alwaysAllowedReasons":[],"sessionPermissionUpdates":[],"classifierSummaryEnabled":true,"spawnSeed":{}}'
   try { $null = $json | ConvertFrom-Json } catch { return $false }
-  Set-Content -LiteralPath (Join-Path $subDir "$sid.json") -Value $json -Encoding UTF8 -NoNewline
+  $path = Join-Path $subDir "$sid.json"
+  Set-Content -LiteralPath $path -Value $json -Encoding UTF8 -NoNewline
+  $script:madeRecs.Add(@{ path = $path; isArchived = [bool]($fw -and $fw.isArchived); isStarred = [bool]($fw -and $fw.isStarred) })
   return $true
 }
 
@@ -327,56 +333,93 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # differs from that is the one you changed, and its value goes to every seat's record of the
 # session (true wins if two seats changed opposite ways). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
-# cliSessionId, whatever their cwd. The pin LIST in claude_desktop_config.json is pass 3's job.
+# cliSessionId, whatever their cwd. The sidebar pin LIST and groups are NOT synced: the app keeps
+# them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
+# Runs only while the app is closed: the live app holds its records in memory and rewrites them,
+# so a flag we set under it would be lost and then read back as the user's own change.
+# ($ccs must be the REAL app's index; a sandbox under a redirected %APPDATA% is never live.)
+$liveCcs = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude-code-sessions'
+$appUp = ($ccs -eq $liveCcs) -and @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
 $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
-$flagPrevAll = $null
-if (Test-Path -LiteralPath $flagStatePath) { try { $flagPrevAll = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable } catch { $flagPrevAll = $null } }
+$flagBackupRoot = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-sync-backups'
+$flagSkip = $false      # pass 1.4 did not run: leave records AND the state file alone
+$flagPrevAll = $null    # $null = first run (no state file yet)
+if ($appUp) {
+  $flagSkip = $true
+  if (-not $Quiet) { 'archive/pin flags not synced: the desktop app is running (they sync at the next seat switch)' }
+} elseif (Test-Path -LiteralPath $flagStatePath) {
+  # A present-but-unreadable state file is NOT a first run: a first run unions every flag, which
+  # would resurrect everything the user un-archived/unpinned since. Skip and say so.
+  try {
+    $flagPrevAll = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable
+    if ($flagPrevAll -isnot [hashtable]) { throw 'not a JSON object' }
+  } catch {
+    $flagSkip = $true
+    Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run"
+  }
+}
 $flagNextAll = @{}
+$flagWant = @{}         # cliSessionId -> @{ isArchived; isStarred }: the resolved values, for records pass 2 creates
 $flagByCli = @{}
-foreach ($kv in $bucketRecs.GetEnumerator()) {
-  foreach ($r in $kv.Value) {
-    $cli = [string]$r.j.cliSessionId; if (-not $cli) { continue }
-    $r.key = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
-    if (-not $flagByCli.ContainsKey($cli)) { $flagByCli[$cli] = New-Object System.Collections.Generic.List[object] }
-    $flagByCli[$cli].Add($r)
-  }
-}
-foreach ($flag in 'isArchived', 'isStarred') {
-  $prev = if ($flagPrevAll) { $flagPrevAll[$flag] } else { $null }
-  $next = @{}; $flipped = 0
-  foreach ($cli in @($flagByCli.Keys)) {
-    $rs = $flagByCli[$cli]
-    $known = @(); $changed = @()
-    foreach ($r in $rs) {
-      $r.v = [bool]$r.j.$flag
-      if ($prev -and $prev.ContainsKey($r.key)) { $known += $r; if ([bool]$prev[$r.key] -ne $r.v) { $changed += $r } }
+if (-not $flagSkip) {
+  foreach ($kv in $bucketRecs.GetEnumerator()) {
+    foreach ($r in $kv.Value) {
+      $cli = [string]$r.j.cliSessionId; if (-not $cli) { continue }
+      $r.key = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
+      if (-not $flagByCli.ContainsKey($cli)) { $flagByCli[$cli] = New-Object System.Collections.Generic.List[object] }
+      $flagByCli[$cli].Add($r)
     }
-    $want = if ($changed.Count) { [bool]($changed | Where-Object { $_.v }) }
-            elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
-            else { [bool]($rs | Where-Object { $_.v }) }
-    foreach ($r in $rs) {
-      $next[$r.key] = $want
-      if ($r.v -eq $want) { continue }
-      $flipped++
-      if ($DryRun) { continue }
-      $dest = Join-Path (Join-Path $env:USERPROFILE ".claude-app-seats\.flag-sync-backups\$stamp") $r.key
-      if (-not (Test-Path -LiteralPath $dest)) {
-        New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
-        Copy-Item -LiteralPath $r.file.FullName -Destination $dest -Force
+  }
+  foreach ($flag in 'isArchived', 'isStarred') {
+    $prev = if ($flagPrevAll) { $flagPrevAll[$flag] } else { $null }
+    $next = @{}; $flipped = 0
+    foreach ($cli in @($flagByCli.Keys)) {
+      $rs = $flagByCli[$cli]
+      $known = @(); $changed = @()
+      foreach ($r in $rs) {
+        $r.v = [bool]$r.j.$flag
+        if ($prev -and $prev.ContainsKey($r.key)) { $known += $r; if ([bool]$prev[$r.key] -ne $r.v) { $changed += $r } }
       }
-      $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force
-      ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $r.file.FullName -Encoding UTF8 -NoNewline
+      $want = if ($changed.Count) { [bool]($changed | Where-Object { $_.v }) }
+              elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
+              else { [bool]($rs | Where-Object { $_.v }) }
+      if (-not $flagWant.ContainsKey($cli)) { $flagWant[$cli] = @{ isArchived = $false; isStarred = $false } }
+      $flagWant[$cli][$flag] = $want
+      foreach ($r in $rs) {
+        if ($r.v -eq $want) { $next[$r.key] = $want; continue }
+        if ($DryRun) { $flipped++; $next[$r.key] = $want; continue }
+        # One unwritable record (locked, read-only, ...) must not abort the whole run ($ErrorActionPreference
+        # is Stop). Leave its key out of the saved state so the next run retries it.
+        try {
+          $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $r.key
+          if (-not (Test-Path -LiteralPath $dest)) {
+            New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
+            Copy-Item -LiteralPath $r.file.FullName -Destination $dest -Force
+          }
+          $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force
+          ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $r.file.FullName -Encoding UTF8 -NoNewline
+          $flipped++; $next[$r.key] = $want
+        } catch {
+          Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (will retry next run)"
+        }
+      }
+      # clones made in pass 2 for seats lacking the session must carry the same flag
+      if (-not $DryRun -and $recIndex.ContainsKey($cli)) {
+        $o = $recIndex[$cli].raw | ConvertFrom-Json
+        if ([bool]$o.$flag -ne $want) { $o | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force; $recIndex[$cli].raw = $o | ConvertTo-Json -Compress -Depth 100 }
+      }
     }
-    # clones made in pass 2 for seats lacking the session must carry the same flag
-    if (-not $DryRun -and $recIndex.ContainsKey($cli)) {
-      $o = $recIndex[$cli].raw | ConvertFrom-Json
-      if ([bool]$o.$flag -ne $want) { $o | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force; $recIndex[$cli].raw = $o | ConvertTo-Json -Compress -Depth 100 }
+    $flagNextAll[$flag] = $next
+    if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
+  }
+  # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
+  if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
+    foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Sort-Object Name -Descending | Select-Object -Skip 10)) {
+      try { Remove-Item -LiteralPath $old.FullName -Recurse -Force } catch { Write-Warning "could not remove old flag backup $($old.FullName): $($_.Exception.Message)" }
     }
   }
-  $flagNextAll[$flag] = $next
-  if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
 }
-if (-not $DryRun) { ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath $flagStatePath -Encoding UTF8 }
+$madeRecs = New-Object System.Collections.Generic.List[object]   # records pass 2 creates, for the saved baseline
 
 # ---- pass 1.5: reconcile stale records of the SAME session across buckets -----
 # Each account bucket holds its own record per session, cloned/created ONCE and never refreshed.
@@ -506,7 +549,9 @@ foreach ($acct in $accts) {
         try {
           $cj = $src.raw | ConvertFrom-Json
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
-          ($cj | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath (Join-Path $bestSub "$($cj.sessionId).json") -Encoding UTF8 -NoNewline
+          $cpath = Join-Path $bestSub "$($cj.sessionId).json"
+          ($cj | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $cpath -Encoding UTF8 -NoNewline
+          $madeRecs.Add(@{ path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
           $cloned++
         } catch { if (Write-Record $bestSub $m) { $made++ } }
       }
@@ -516,161 +561,22 @@ foreach ($acct in $accts) {
   }
 }
 
+# Save the flag baseline AFTER pass 2, so the records it created (clone or fabricated) are in it
+# with the flags they were written with -- else the next run reads them as brand-new and unions.
+if (-not $DryRun -and -not $flagSkip) {
+  foreach ($mr in $madeRecs) {
+    $mk = $mr.path.Substring($ccs.Length).TrimStart('')
+    foreach ($flag in 'isArchived', 'isStarred') { $flagNextAll[$flag][$mk] = $mr[$flag] }
+  }
+  $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
+  # atomic: a crash mid-write must not leave a truncated file (which the next run would refuse to read)
+  ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8
+  Move-Item -LiteralPath "$flagStatePath.tmp" -Destination $flagStatePath -Force
+}
+
 if (-not $Quiet) {
   $verb = if ($DryRun) { 'WOULD: ' } else { '' }
   "${verb}added $made, cloned $cloned, retitled $retitled, pruned $pruned record(s) for $Cwd"
   if ($pruned -gt 0 -and -not $DryRun) { "pruned records backed up (reversible) at: $backupRoot" }
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
-}
-
-# ---- pass 3: pin list + sidebar groups in claude_desktop_config.json ---------------
-# The app keeps the shared pin list and each seat's groups in claude_desktop_config.json, and both
-# name a seat's own record ids (local_...), which differ per seat. So: pin list = every seat's id
-# of every record pass 1.4 left starred; groups and their sessions are copied to every seat, with
-# a group's sessions matched across seats by cliSessionId. Like the flags, a change made on one
-# seat since the last run (.sidebar-state.json) wins; first run = union of all seats. The LIVE app
-# rewrites this file from memory, so this pass runs only while the app is closed (a seat switch).
-$cfgPath = Join-Path $env:APPDATA 'Claude\claude_desktop_config.json'
-# (the guard is for the app's REAL file; a sandbox copy under a redirected %APPDATA% is never live)
-$liveCfg = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude_desktop_config.json'
-$appUp = ($cfgPath -eq $liveCfg) -and @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
-if (-not (Test-Path -LiteralPath $cfgPath)) { }
-elseif ($appUp) { if (-not $Quiet) { 'sidebar pins/groups not synced: the desktop app is running (they sync at the next seat switch)' } }
-else {
-  $cfg = Get-Content -LiteralPath $cfgPath -Raw | ConvertFrom-Json -AsHashtable
-  if (-not $cfg['preferences']) { $cfg['preferences'] = [ordered]@{} }
-  if (-not $cfg['preferences']['epitaxyPrefs']) { $cfg['preferences']['epitaxyPrefs'] = [ordered]@{} }
-  $e = $cfg['preferences']['epitaxyPrefs']
-  # rescan after pass 2: it cloned new records with new ids
-  $recById = @{}; $idsByCli = @{}; $scopeIds = [ordered]@{}   # scope "acct/sub" -> cli -> id
-  foreach ($acct in Get-ChildItem -LiteralPath $ccs -Directory) {
-    foreach ($sub in Get-ChildItem -LiteralPath $acct.FullName -Directory) {
-      $scope = "$($acct.Name)/$($sub.Name)"; $m = @{}
-      foreach ($f in Get-ChildItem -LiteralPath $sub.FullName -File -Filter 'local_*.json') {
-        try { $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { continue }
-        $cli = [string]$j.cliSessionId; $id = [string]$j.sessionId
-        if (-not $cli -or -not $id) { continue }
-        $recById[$id] = @{ cli = $cli; scope = $scope; star = [bool]$j.isStarred }
-        if (-not $idsByCli.ContainsKey($cli)) { $idsByCli[$cli] = New-Object System.Collections.Generic.List[string] }
-        $idsByCli[$cli].Add($id); $m[$cli] = $id
-      }
-      if ($m.Count) { $scopeIds[$scope] = $m }
-    }
-  }
-  $sbStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.sidebar-state.json'
-  $sbPrev = $null
-  if (Test-Path -LiteralPath $sbStatePath) { try { $sbPrev = Get-Content -LiteralPath $sbStatePath -Raw | ConvertFrom-Json -AsHashtable } catch { $sbPrev = $null } }
-
-  # pins: keep ids we can't match to a record (not ours to judge), drop unstarred, add every seat's id
-  $oldStar = @($e['starred-local-code-sessions'])
-  $star = New-Object System.Collections.Generic.List[string]
-  foreach ($id in $oldStar) { if ($id -and (-not $recById.ContainsKey($id) -or $recById[$id].star) -and -not $star.Contains($id)) { $star.Add($id) } }
-  foreach ($id in @($recById.Keys)) { if ($recById[$id].star -and -not $star.Contains($id)) { $star.Add($id) } }
-  $slice = $e['dframe-local-slice']
-  $oldOrder = if ($slice) { @($slice['pinnedOrder']) } else { @() }
-  $order = New-Object System.Collections.Generic.List[string]
-  foreach ($k in $oldOrder) {
-    if (-not $k) { continue }
-    $id = $k -replace '^code:', ''
-    if ($k -notlike 'code:*' -or -not $recById.ContainsKey($id)) { if (-not $order.Contains($k)) { $order.Add($k) }; continue }
-    if (-not $recById[$id].star) { continue }
-    foreach ($sid in $idsByCli[$recById[$id].cli]) { if (-not $order.Contains("code:$sid")) { $order.Add("code:$sid") } }
-  }
-  $pinChanged = (($oldStar -join ',') -ne ($star -join ',')) -or (($oldOrder -join ',') -ne ($order -join ','))
-
-  # groups
-  $gsAll = $e['dframe-group-scopes']; if (-not $gsAll) { $gsAll = [ordered]@{} }
-  $secAll = $e['dframe-code-sections']; if (-not $secAll) { $secAll = [ordered]@{} }
-  $prevNames = if ($sbPrev) { $sbPrev['groups'] } else { $null }
-  $prevScopeG = if ($sbPrev) { $sbPrev['scopeGroups'] } else { $null }
-  $prevAssign = if ($sbPrev) { $sbPrev['assign'] } else { $null }
-  $defs = [ordered]@{}; $deleted = New-Object System.Collections.Generic.HashSet[string]
-  foreach ($scope in @($gsAll.Keys)) {
-    foreach ($g in @($gsAll[$scope]['groups'])) {
-      if (-not $g -or -not $g['id']) { continue }
-      $gid = $g['id']
-      $renamedHere = $prevNames -and $prevNames.ContainsKey($gid) -and $prevNames[$gid] -ne $g['name']
-      if (-not $defs.Contains($gid) -or $renamedHere) { $defs[$gid] = $g }
-    }
-  }
-  if ($prevScopeG) {   # a group this seat had last run and no longer has = you deleted it there
-    foreach ($scope in @($prevScopeG.Keys)) {
-      if (-not $gsAll.Contains($scope)) { continue }
-      $now = @($gsAll[$scope]['groups'] | ForEach-Object { $_['id'] })
-      foreach ($gid in @($prevScopeG[$scope])) { if ($now -notcontains $gid) { [void]$deleted.Add($gid) } }
-    }
-  }
-  foreach ($gid in @($deleted)) { $defs.Remove($gid) }
-  $assignNext = @{}; $want = @{}
-  foreach ($cli in @($idsByCli.Keys)) {
-    $known = @(); $changed = @(); $cur = @()
-    foreach ($scope in @($scopeIds.Keys)) {
-      $id = $scopeIds[$scope][$cli]; if (-not $id) { continue }
-      $a = if ($gsAll.Contains($scope) -and $gsAll[$scope]['assignments']) { [string]$gsAll[$scope]['assignments']["code:$id"] } else { '' }
-      $cur += $a
-      $pk = "$scope|$cli"
-      if ($prevAssign -and $prevAssign.ContainsKey($pk)) { $known += [string]$prevAssign[$pk]; if ([string]$prevAssign[$pk] -ne $a) { $changed += $a } }
-    }
-    $w = if ($changed.Count) { ($changed | Where-Object { $_ } | Select-Object -First 1) } elseif ($known.Count) { $known[0] } else { ($cur | Where-Object { $_ } | Select-Object -First 1) }
-    if ($w -and -not $defs.Contains($w)) { $w = '' }
-    $want[$cli] = [string]$w
-  }
-  $groupChanges = 0
-  if ($defs.Count -or $deleted.Count) {
-    foreach ($scope in @($scopeIds.Keys)) {
-      $old = if ($gsAll.Contains($scope)) { $gsAll[$scope] } else { $null }
-      $asg = [ordered]@{}
-      if ($old -and $old['assignments']) {   # keep keys we can't match to a record of this seat
-        foreach ($k in @($old['assignments'].Keys)) { $id = $k -replace '^code:', ''; if ((-not $recById.ContainsKey($id) -or $recById[$id].scope -ne $scope) -and $defs.Contains($old['assignments'][$k])) { $asg[$k] = $old['assignments'][$k] } }
-      }
-      # sorted: a plain hashtable's key order differs between processes, which made idle runs rewrite
-      foreach ($cli in @($scopeIds[$scope].Keys | Sort-Object)) { if ($want[$cli]) { $asg["code:$($scopeIds[$scope][$cli])"] = $want[$cli] } }
-      $newScope = if ($old) { $old } else { [ordered]@{} }   # keep any other keys the app stores here
-      $canon = { param($s) (@($s['groups']) | ConvertTo-Json -Compress -Depth 20) + '|' + ((@($s['assignments'].Keys) | Sort-Object | ForEach-Object { "$_=$($s['assignments'][$_])" }) -join ',') }
-      $before = if ($old -and $old['assignments']) { & $canon $old } else { '' }
-      $newScope['groups'] = @($defs.Values); $newScope['assignments'] = $asg
-      if ($before -ne (& $canon $newScope)) { $groupChanges++ }
-      $gsAll[$scope] = $newScope
-      # each group also needs a section in this seat's sidebar
-      $secBefore = if ($secAll.Contains($scope)) { $secAll[$scope] | ConvertTo-Json -Compress -Depth 20 } else { '' }
-      $tmpl = $null
-      foreach ($s2 in @($secAll.Keys)) { if ($secAll[$s2]['sections']) { $tmpl = $secAll[$s2]; break } }
-      if (-not $secAll.Contains($scope) -and $tmpl) { $secAll[$scope] = ($tmpl | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable) }
-      if ($secAll.Contains($scope)) {
-        $secs = [System.Collections.Generic.List[object]]::new()
-        foreach ($s in @($secAll[$scope]['sections'])) { if ($s['kind'] -eq 'manual' -and -not $defs.Contains($s['id'])) { continue }; if ($s['kind'] -eq 'manual') { $s['name'] = $defs[$s['id']]['name'] }; $secs.Add($s) }
-        foreach ($gid in @($defs.Keys)) {
-          if (@($secs | Where-Object { $_['id'] -eq $gid }).Count) { continue }
-          $src = $null; foreach ($s2 in @($secAll.Keys)) { $src = @($secAll[$s2]['sections']) | Where-Object { $_['id'] -eq $gid } | Select-Object -First 1; if ($src) { break } }
-          $s = if ($src) { $src | ConvertTo-Json -Depth 20 | ConvertFrom-Json -AsHashtable } else { [ordered]@{ id = $gid; kind = 'manual'; v = 2; name = $defs[$gid]['name']; sortBy = 'recency'; ascending = $false; collapsed = $false; shown = $true; members = @() } }
-          $s['order'] = (@($secs | ForEach-Object { [double]$_['order'] }) | Measure-Object -Maximum).Maximum + 1
-          $secs.Add($s)
-        }
-        $secAll[$scope]['sections'] = @($secs)
-        if ($secBefore -ne ($secAll[$scope] | ConvertTo-Json -Compress -Depth 20) -and $before -eq (& $canon $newScope)) { $groupChanges++ }
-      }
-    }
-  }
-  if ($pinChanged -or $groupChanges) {
-    if (-not $Quiet) { "$(if ($DryRun) { 'WOULD update' } else { 'updated' }) sidebar: pin list $($oldStar.Count) -> $($star.Count) id(s), groups rewritten for $groupChanges seat(s)$(if ($deleted.Count) { ", $($deleted.Count) deleted group(s) removed everywhere" })" }
-    if (-not $DryRun) {
-      $bk = Join-Path $env:USERPROFILE ".claude-app-seats\.sidebar-sync-backups\$stamp"
-      New-Item -ItemType Directory -Path $bk -Force | Out-Null
-      Copy-Item -LiteralPath $cfgPath -Destination $bk -Force
-      $e['starred-local-code-sessions'] = @($star)
-      if (-not $slice) { $slice = [ordered]@{}; $e['dframe-local-slice'] = $slice }
-      $slice['pinnedOrder'] = @($order)
-      if ($gsAll.Count) { $e['dframe-group-scopes'] = $gsAll }
-      if ($secAll.Count) { $e['dframe-code-sections'] = $secAll }
-      $json = $cfg | ConvertTo-Json -Depth 100
-      $null = $json | ConvertFrom-Json   # never write a file the app can't parse
-      Set-Content -LiteralPath $cfgPath -Value $json -Encoding UTF8 -NoNewline
-    }
-  }
-  if (-not $DryRun) {
-    $sg = @{}; foreach ($scope in @($gsAll.Keys)) { $sg[$scope] = @($gsAll[$scope]['groups'] | ForEach-Object { $_['id'] }) }
-    $an = @{}; foreach ($scope in @($scopeIds.Keys)) { foreach ($cli in @($scopeIds[$scope].Keys)) { $an["$scope|$cli"] = $want[$cli] } }
-    $gn = @{}; foreach ($gid in @($defs.Keys)) { $gn[$gid] = $defs[$gid]['name'] }
-    (@{ groups = $gn; scopeGroups = $sg; assign = $an } | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath $sbStatePath -Encoding UTF8
-  }
 }
