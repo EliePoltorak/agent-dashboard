@@ -972,10 +972,13 @@ def sample(now, force=False):
         if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
             codex[label] = fresh
     pend, cleared = settle_awaits(cache.get("codex_pending") or {}, codex)
-    for label in cleared:
-        applog("codex reset: seat %s reading after the reset arrived; Apply back on" % label)
-    if cleared:
-        cache["codex_pending"] = pend       # merged back below with the rest of this sample's changes
+    if cleared:                         # lifted in a transaction of its own, by id: a mark cleared and replaced by a newer reset during the slow reads above is
+        with pcache_txn() as c:         # not this one, and must stand (merging the removal back below would drop whatever sits under the seat's key)
+            now_pend = c.get("codex_pending") or {}
+            for label in cleared:
+                if (now_pend.get(label) or {}).get("id") == cache["codex_pending"][label]["id"]:
+                    now_pend.pop(label)
+                    applog("codex reset: seat %s reading after the reset arrived; Apply back on" % label)
     if codex:
         rec["codex"] = codex
         cache.setdefault("emails", {})["codex"] = cemails
@@ -2508,6 +2511,9 @@ class Store:
         with self.lock, pcache_txn() as c:
             pend = c.setdefault("codex_pending", {})
             if seat in pend:
+                if isinstance(pend[seat], dict) and pend[seat].get("await"):
+                    return {"outcome": "error", "text": "A reset on seat %s was just applied and its new reading has not arrived yet; Apply comes back when it "
+                                                        "does." % seat}
                 return {"outcome": "error", "text": "The last reset on seat %s is unconfirmed. Check codex-usage; if the reset was not used, use Clear on that "
                                                     "seat, then apply again." % seat}
             pend[seat] = {"at": int(time.time()), "id": secrets.token_urlsafe(16)}      # the id is what a Clear names: a mark replaced by a newer reset is not the one the page showed
@@ -3943,7 +3949,8 @@ def selftest():
             acc_ = build([{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1, "banked": 3}}}], 5, {}, False, ex_)["providers"][0]["accounts"][0]
             assert acc_["resetPending"] is True and acc_["resetAwait"] is True and acc_["resetPendingId"] == m_["id"]
             assert "resetAwait" not in build([{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1, "banked": 3}}}], 5, {}, False, dict(ex_, codexAwait=[]))["providers"][0]["accounts"][0]
-            assert cst.codex_reset("A", "/x", fake)["outcome"] == "error" and "A" in load_pcache()["codex_pending"]    # still refused while the mark stands
+            rr_ = cst.codex_reset("A", "/x", fake)
+            assert rr_["outcome"] == "error" and "just applied" in rr_["text"] and "A" in load_pcache()["codex_pending"]    # still refused while the mark stands, and says why
             with pcache_txn() as c_:
                 c_.pop("codex_fresh", None)                                                                             # an earlier case's fresh reading would stand in for the cache's own
             try:
@@ -3957,6 +3964,16 @@ def selftest():
                     c_["codex_pending"] = {"A": {"at": 1, "id": "u"}}                                                   # unconfirmed: no "await"
                 sample(time.time(), True)
                 assert "A" in load_pcache()["codex_pending"]                                                            # the same newer reading does not lift it
+                # a mark cleared and replaced by a newer reset while sample() reads: the newer mark stands, though the reading is newer than the old one
+                with pcache_txn() as c_:
+                    c_["codex_pending"] = {"A": {"at": 10, "id": "old", "await": True}}
+                def swap_(*a_, **k_):
+                    with pcache_txn() as c2_:
+                        c2_["codex_pending"] = {"A": {"at": 20, "id": "new"}}
+                    return {"A": {"ts": 15, "w": 0.1, "banked": 3}}, {}
+                globals().update(read_codex=swap_)
+                sample(time.time(), True)
+                assert load_pcache()["codex_pending"] == {"A": {"at": 20, "id": "new"}}, load_pcache()["codex_pending"]
             finally:
                 globals().update(stub)
             assert settle_awaits({"A": {"at": 5, "id": "i", "await": True}, "B": {"at": 5, "id": "j"}, "C": "x"}, {"A": {"ts": 5}, "B": {"ts": 9}, "C": {"ts": 9}}) ==                 ({"A": {"at": 5, "id": "i", "await": True}, "B": {"at": 5, "id": "j"}, "C": "x"}, [])                   # a reading at the mark's own time is not newer

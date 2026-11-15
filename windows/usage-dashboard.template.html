@@ -441,8 +441,9 @@ function openClear(label, pid, kind) {
   if (!cl && !(a && a.resetPending)) return;         // likewise Codex: its mark's id ("" for a mark from before ids existed) is what the clear names
   rs = { pid: cl ? 'claude' : 'codex', label, kind: cl ? kind : undefined, rid: cl ? r.rid : a.resetPendingId || '', clear: true, busy: false };
   const d = $('rsdlg');
-  d.innerHTML = `<h2 id="rsT">Clear the ${cl ? 'pending ' + esc(k.noun) : 'unconfirmed reset'} on seat ${esc(label)}?</h2>` +
+  d.innerHTML = `<h2 id="rsT">Clear the ${cl ? 'pending ' + esc(k.noun) : a.resetAwait ? 'applied reset' : 'unconfirmed reset'} on seat ${esc(label)}?</h2>` +
     `<p class="warn">${cl ? 'Only clear this after the seat shows the reset was not used (its limit has not been refilled). Clearing lets you apply a reset on this seat again, and that starts a new request.'
+      : a.resetAwait ? 'This reset was applied; Apply comes back by itself when the next reading of this seat arrives. Only clear this if codex-usage already shows the refilled limit.'
       : 'Only clear this after codex-usage shows the reset was not used. Clearing lets you apply a reset on this seat again.'}</p>` +
     `<div class="dact"><button data-a="rscancel" autofocus>Cancel</button><button class="primary" data-a="rsgo">Clear</button></div>`;
   d.showModal();
