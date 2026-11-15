@@ -3019,7 +3019,7 @@ def selftest():
     assert clo_[144]["s"]["A"]["w"] == 0.1 and clo_[160] is lo_[160], clo_[160]          # carried within the hour, not after it
     assert (burn(clo_, "w", 3, lo_[-1]["t"]) or 0) < 1, burn(clo_, "w", 3, lo_[-1]["t"])
     # ... and the gap is a break for the rates the dashboard shows, not only for burn() on the raw history: records where every seat failed stay in the sequence the
-    # builder runs rate and profile over, so the recovery reading is not joined to the last good one 47.5 h earlier (that read 1.05 %/h as the 3 h burn)
+    # builder runs rate and profile over, so the recovery reading is not joined to the last good one 47.5 h earlier (that read 1.1 %/h as the 3 h burn)
     lo_lim = build(lo_, lo_[-1]["t"], {}, False)["providers"][0]["limits"][0]
     assert lo_lim["burn"]["3"] == 0.0, lo_lim["burn"]                      # the 3 h span ends in the gap: its use is unplaced, so 0 (not 0.5 of a seat over 47.5 h)
     assert lo_lim["hist"][-1][1] == 40.0 and not any(T + 47000 < x[0] < T + 215000 for x in lo_lim["hist"]), lo_lim["hist"][-3:]       # the graph still holds only real (or carried) readings
