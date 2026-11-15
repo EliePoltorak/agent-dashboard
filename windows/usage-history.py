@@ -1819,7 +1819,7 @@ def rollout_records(events, taken, rebuilt, hist=(), carry=False):
     """History records from attributed events: one per 5 minutes, each carrying every seat seen so far at its newest state;
     none in a 5-minute bucket listed in `taken` (a recorded point is never overwritten). `rebuilt` flags them b like the Claude backfill.
     A seat's state starts from (and is refreshed by) the latest earlier `hist` record when that reading is newer, so a seat idle in the logs
-    stays in records that build_limit reads as the whole pool. An event older than the seat's state (a record's measurement can be newer than
+    stays in records that build_limit reads as the whole pool, and a seat a sampled record does not list (removed from Codex) is dropped from it there. An event older than the seat's state (a record's measurement can be newer than
     the record's own time) is not applied to that seat; the other seats' events and the bucketing go on as usual.
     With `carry`, when the last event falls in a taken bucket (so no record holds it), one more record flagged "carry" is added with every
     seat's newest state: never saved (append_rollouts and take drop it), only for newest_codex, so the current sample still gets that reading."""
@@ -1827,8 +1827,9 @@ def rollout_records(events, taken, rebuilt, hist=(), carry=False):
     state, recs, i = {}, [], 0
     for t, seat, wins in events:
         while i < len(prior) and prior[i]["t"] <= t:
-            if not prior[i]["codex"]:       # an empty snapshot (the last saved home removed): the seats before it are not carried past it
-                state = {}
+            if not prior[i].get("b"):       # a sampled record lists every seat that had a home then (an empty one: the last saved home removed), so a seat it lacks was removed and is not carried past it; an imported ("b") record lists only the seats the logs had shown
+                for s in [s for s in state if s not in prior[i]["codex"]]:
+                    del state[s]
             for s, v in prior[i]["codex"].items():
                 if isinstance(v, dict) and (v.get("ts") or prior[i]["t"]) > (state.get(s) or {}).get("ts", -1):
                     state[s] = dict(v, ts=v.get("ts") or prior[i]["t"])
@@ -3618,6 +3619,13 @@ def selftest():
         assert nb_[0]["codex"]["A"]["banked"] == 1, nb_                                       # the premise: the log record is built on the old sample
         got_ = newest_codex({"t": N, "codex": {"A": {"ts": F_, "w": 0.32, "wr": N + WK_, "wp": WK_, "banked": 0, "bankedList": []}}}, hb_, nb_)["codex"]["A"]
         assert got_["w"] == 0.35 and got_["ts"] == T_ and got_["banked"] == 0 and got_["bankedList"] == [], got_
+        # a seat removed from Codex (absent from a later sampled record) is not carried into the records imported after it; an imported ("b") record that lacks a seat does not drop it
+        rm_ = [{"t": N - 900, "codex": {"A": {"ts": N - 900, "w": 0.1, "wr": N + 99, "wp": WEEK}, "B": {"ts": N - 900, "w": 0.4, "wr": N + 99, "wp": WEEK}}},
+               {"t": N - 600, "codex": {"A": {"ts": N - 600, "w": 0.1, "wr": N + 99, "wp": WEEK}}}]
+        rm_r_ = rollout_records([(N - 300, "A", {"w": (0.2, N + 99, WEEK)})], set(), False, rm_)
+        assert rm_r_ and all(set(r["codex"]) == {"A"} for r in rm_r_), rm_r_
+        rm_r_ = rollout_records([(N - 300, "A", {"w": (0.2, N + 99, WEEK)})], set(), False, [rm_[0], dict(rm_[1], b=1)])
+        assert rm_r_ and set(rm_r_[0]["codex"]) == {"A", "B"}, rm_r_
         # a seat's state seeded from a note-only record (ok False + note, stamped with a ts) loses both when an event measures it: the record holds the
         # reading, and newest_codex (which ignores a failed read) seeds the sample from it
         hn_ = [{"t": N - 700, "codex": {"C": {"ok": False, "note": "no usage cached", "ts": N - 700}}}]
