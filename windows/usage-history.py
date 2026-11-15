@@ -2272,6 +2272,12 @@ def valid_seat(seat, homes):
     return isinstance(seat, str) and re.fullmatch(r"[A-Za-z]+", seat) is not None and seat in homes
 
 
+def valid_claude_seat(seat, seats):
+    """A Claude seat the reset may be applied to: any folder under ROOT holding token.txt (token_seats), so letters, digits, "_" and "-" (the same characters
+    app-login-token.ps1 accepts for a seat name; no dot, slash or space, so the label is safe in a path and a command line), and one of `seats` (exact match)."""
+    return isinstance(seat, str) and re.fullmatch(r"[A-Za-z0-9_-]+", seat) is not None and seat in seats
+
+
 def codex_seat_from_read(rl, now):
     """The redeem script's read-only `rate_limits_before` -> a codex seat dict, or None. Like the Codex rotator, with no window durations the
     secondary slot is the weekly window and the primary the 5-hour one; a lone primary is the weekly."""
@@ -3023,7 +3029,7 @@ def make_handler(store, port):
                 seat = kind = rid = None
             if not credits_enabled():
                 return self.js(404, {"outcome": "error", "text": "Claude resets are switched off on this PC (claudeResetCredits in rotator.local.json)."})
-            if not valid_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or (b.get("resend") is True and not isinstance(rid, str)):
+            if not valid_claude_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or (b.get("resend") is True and not isinstance(rid, str)):
                 return self.js(400, {"outcome": "error", "text": "Unknown Claude seat or reset kind."})
             if not store.refreshing.acquire(blocking=False):
                 return self.js(409, {"outcome": "error", "text": "A refresh or another reset is running; try again in a minute."})
@@ -3045,7 +3051,7 @@ def make_handler(store, port):
                 seat, kind, rid = b.get("seat"), b.get("kind"), b.get("requestId")
             except (ValueError, AttributeError):
                 seat = kind = rid = None
-            if not valid_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or not isinstance(rid, str):
+            if not valid_claude_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or not isinstance(rid, str):
                 return self.js(400, {"outcome": "error", "text": "Unknown Claude seat or reset kind."})
             if not store.refreshing.acquire(blocking=False):
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
@@ -3904,6 +3910,11 @@ def selftest():
     cb = [{"t": 1794500000, "codex": {"A": {"w": 0.3, "wr": 1794700000, "wp": WEEK, "ts": 1794500000, "banked": 1, "bankedList": []}}}]
     assert valid_seat("A", homes) and valid_seat("Cc", homes)
     assert not any(valid_seat(x, homes) for x in ("a", "AB", "", "A ", "A/../B", "D", None, 5, ["A"], "A\n", "..", "A;B"))
+    # a Claude seat is any folder holding token.txt: digits, "_" and "-" are fine, but never a path, a dot or a space
+    cs_ = ["A", "Work1", "work-1", "a_b"]
+    assert all(valid_claude_seat(x, cs_) for x in cs_) and not valid_claude_seat("Work2", cs_) and not valid_claude_seat("work-2", cs_)
+    odd_ = ["A/..", "..", "a b", "", "a.b", "a\tb"]
+    assert not any(valid_claude_seat(x, cs_ + odd_) for x in odd_ + [None, 5, ["A"]])
     with tempfile.TemporaryDirectory() as td:
         cfg, scr = os.path.join(td, "rotator.local.json"), os.path.join(td, "redeem.py")
         open(scr, "w").write("")
@@ -5502,6 +5513,23 @@ def selftest():
             while hs.refreshing.locked() and time.time() < end_:
                 time.sleep(0.02)
             assert st_ == 200 and json.loads(body_)["outcome"] == "ok" and hc[-1] == ("cclear", "A", "fable", "rid1") and not hs.refreshing.locked()
+            # a Claude seat label may hold digits, "_" and "-" (any folder with a token.txt): the reset and the clear take it; a Codex-style letters-only check would refuse every request
+            keep_ts_, keep_ce_ = token_seats, credits_enabled
+            globals()["token_seats"], globals()["credits_enabled"] = (lambda: ["A", "Work1", "work-1"]), (lambda cfg=None: True)
+            try:
+                for sd_ in ("Work1", "work-1"):
+                    for path_, body__, want in (("/api/claude-reset", {"seat": sd_, "kind": "fable"}, (sd_, "fable")), (cc_, {"seat": sd_, "kind": "fable", "requestId": "rid1"}, ("cclear", sd_, "fable", "rid1"))):
+                        st_, body_ = hp(body__, path=path_)
+                        end_ = time.time() + 5
+                        while hs.refreshing.locked() and time.time() < end_:
+                            time.sleep(0.02)
+                        assert st_ == 200 and hc[-1] == want, (path_, sd_, st_, body_)
+                n_ = len(hc)
+                for sd_ in ("Work2", "work-2", "a.b", "a b"):
+                    assert hp({"seat": sd_, "kind": "fable"})[0] == 400 and hp({"seat": sd_, "kind": "fable", "requestId": "rid1"}, path=cc_)[0] == 400
+                assert len(hc) == n_
+            finally:
+                globals()["token_seats"], globals()["credits_enabled"] = keep_ts_, keep_ce_
             # an unreadable provider cache: the reset and clear handlers answer 500 with the PcacheError's message (what to do), not just the exception type
             def boom_(*args, **kw):
                 raise PcacheError("MSG-FROM-PCACHE")
