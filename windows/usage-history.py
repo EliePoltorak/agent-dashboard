@@ -1678,16 +1678,17 @@ def append_lines(recs):
 def save(hist, rec, now):
     """Append rec; once a day, rewrite the file without lines older than KEEP_DAYS. Under the lock, a file another
     process changed since this one last read or wrote it (a --backfill) is re-read first, and the prune always re-reads,
-    so a rewrite never drops what someone else wrote. Returns the history now on disk."""
+    so a rewrite never drops what someone else wrote. Returns the history now on disk, in time order (the file itself may hold rec after a newer line;
+    _read_hist sorts on every read)."""
     with hist_lock():
         if hist_sig() != _SIG:
             hist = _read_hist()[0]
         if hist and hist[0]["t"] < now - (KEEP_DAYS + 1) * 86400:
-            keep = [h for h in _read_hist()[0] if h["t"] >= now - KEEP_DAYS * 86400] + [rec]
+            keep = sorted([h for h in _read_hist()[0] if h["t"] >= now - KEEP_DAYS * 86400] + [rec], key=lambda h: h["t"])
             write_all(keep)
             return keep
         append_lines([rec])
-    return hist + [rec]
+    return sorted(hist + [rec], key=lambda h: h["t"])   # rec's t was taken before the slow provider reads: a sample another process saved meanwhile can be newer
 
 
 def page_html(data):
@@ -2774,8 +2775,11 @@ class Store:
             self.take(force=True)
         except Exception as e:   # shortcut: same broad catch as the handlers; the reset itself succeeded
             applog("claude reset: sample after the reset failed: %s: %s" % (type(e).__name__, e))
-            with self.lock:
-                self.rebuild(time.time())
+            try:
+                with self.lock:
+                    self.rebuild(time.time())
+            except Exception as e:   # the page export can fail the same way (a read-only usage-dashboard.html): still not the reset's failure
+                applog("claude reset: page rebuild after the reset failed: %s: %s" % (type(e).__name__, e))
 
     def claude_reset_clear(self, seat, kind, rid):
         """Drop a pending Claude claim (seat + kind) by hand (the caller holds `refreshing`): a resend of it never got an answer Claude recognises, so it would stay
@@ -3304,6 +3308,12 @@ def selftest():
             raw([{"t": 0, "b": 1, "s": {}}] + mem)
             got = save(mem, {"t": 3}, 1000)
             assert [json.loads(x)["t"] for x in open(HIST, encoding="utf-8")] == [0, 1, 2, 3] and [h["t"] for h in got] == [0, 1, 2, 3]
+            # a one-shot sample that started later but saved first: this sample's older t still comes back in time order
+            mem = load()
+            raw(mem + [{"t": 9}])
+            got = save(mem, {"t": 5}, 1000)
+            assert [h["t"] for h in got] == [0, 1, 2, 3, 5, 9], [h["t"] for h in got]
+            assert [h["t"] for h in load()] == [0, 1, 2, 3, 5, 9]
             # the daily prune re-reads the file even when the signature looks unchanged, so backfilled lines survive it
             NOW = 100 * DAY
             mem = [{"t": NOW - 40 * DAY}, {"t": NOW - DAY}]
@@ -5018,6 +5028,11 @@ def selftest():
             rs_.take, rs_.lock, rs_.rebuild = bad_take, threading.RLock(), lambda now: rs_ord.append("rebuild")
             rs_ord.clear(), rs_.reread_usage()                                            # a landed reset is never reported as failed
             assert rs_ord == ["rebuild"] and "sample after the reset failed: PcacheError" in open(APPLOG).read(), rs_ord
+            def bad_rebuild(now):
+                raise PermissionError("usage-dashboard.html is read-only")
+            rs_.rebuild = bad_rebuild
+            rs_ord.clear(), rs_.reread_usage()                                            # the page export failing too still does not raise
+            assert "page rebuild after the reset failed: PermissionError" in open(APPLOG).read()
         finally:
             globals()["probe_claude"] = keep_pc
         assert b'"grant_id": "g2", "request_id": "rid2"' in kc[2][2] and not any(b'"g11"' in (c[2] or b"") for c in kc)
