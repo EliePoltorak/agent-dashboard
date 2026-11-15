@@ -16,7 +16,7 @@ from file:// with no server. The 'Claude usage dashboard' scheduled task runs --
   any of these [--state-dir DIR]           the state folder, as QUOTA_STATE_DIR (the logon task passes it: a task does not inherit a shell's environment)
 
 QUOTA_STATE_DIR, when set, redirects everything this script WRITES to that folder (seat caches are still
-read from their real places). --state-dir wins over it, and is copied into QUOTA_STATE_DIR so every child inherits it.
+read from their real places). --state-dir wins over it (it is also copied into QUOTA_STATE_DIR, though no child reads that today).
 
 shortcut: a seat that is used elsewhere (the desktop app, the VM) only updates when something
 probes it (a rotation, /seats, --status), so its line moves in steps; add probing only if the
@@ -5345,7 +5345,8 @@ def selftest():
     # the installer's quoting survives the Windows command-line parse a task's arguments go through: spaces, a trailing backslash, a drive root
     qfn_ = [ln for ln in ins_.splitlines() if ln.startswith("function Quote-Arg")]
     pwsh_ = shutil.which("pwsh")
-    if os.name == "nt" and pwsh_ and len(qfn_) == 1:
+    assert len(qfn_) == 1, "usage-app-install.ps1 must keep Quote-Arg on one line, or this check cannot run it"
+    if os.name == "nt" and pwsh_:
         qd_ = tempfile.mkdtemp()
         try:
             echo_ = os.path.join(qd_, "echo.py")

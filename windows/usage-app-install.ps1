@@ -44,10 +44,10 @@ function Quote-Arg([string]$s) { '"' + ($s -replace '(\\+)$', '$1$1') + '"' }
 
 # the state folder: a scheduled task does not inherit this shell's environment, so a QUOTA_STATE_DIR set here is passed to the server as
 # --state-dir, or the server would write its history and provider cache (pending-reset marks included) to the default folder instead. Resolved
-# once, against PowerShell's current folder (not the process's), and written back so --make-icons below uses the same folder.
+# once, against PowerShell's current FileSystem folder (not the process's, and not a registry location), and written back so --make-icons below uses the same folder.
 $stateArg = ''
 if ($env:QUOTA_STATE_DIR) {
-    $env:QUOTA_STATE_DIR = [IO.Path]::GetFullPath($env:QUOTA_STATE_DIR, $PWD.ProviderPath)
+    $env:QUOTA_STATE_DIR = [IO.Path]::GetFullPath($env:QUOTA_STATE_DIR, (Get-Location -PSProvider FileSystem).ProviderPath)
     $stateArg = ' --state-dir ' + (Quote-Arg $env:QUOTA_STATE_DIR)
 }
 $state = if ($env:QUOTA_STATE_DIR) { $env:QUOTA_STATE_DIR } else { Join-Path $HOME '.claude-cli-accounts' }
