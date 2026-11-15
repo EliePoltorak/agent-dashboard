@@ -485,7 +485,7 @@ a Claude session.
 |---|---|
 | `claude-account --status` | App state, live account + account UUID, captured profiles |
 | `claude-account --switch <label>` | Back up the current login, load profile `<label>` |
-| `claude-account --switch <label> --relaunch` | Close the running app first (asks its windows to close, waits up to 30 s, and aborts without force-closing if it is still running, telling you to quit it from the system tray if that is where it lives), switch, then reopen the installed app (the Squirrel `claude.exe` the Start-menu shortcut runs, else `Update.exe --processStart claude.exe`, else the MSIX package). A refused switch reopens the app on its old login. Tests: `test-app-relaunch.ps1` |
+| `claude-account --switch <label> --relaunch` | Close the running app first (asks its windows to close, waits up to 30 s, and aborts without force-closing if it is still running, telling you to quit it from the system tray if that is where it lives), switch, then reopen the installed app (the Squirrel `claude.exe` the Start-menu shortcut runs, else `Update.exe --processStart claude.exe`, else the MSIX package). A refused switch reopens the app on its old login. If the switch stood but the app could not be reopened it says so and exits 3. Tests: `test-app-relaunch.ps1` |
 | `claude-account --rotate [label]` | Cycle to the next profile (or switch straight to `<label>`) |
 | `claude-account --capture <label>` | Save the CURRENT app login as profile `<label>` |
 | `claude-account --list` / `--help` | List profiles / print help |

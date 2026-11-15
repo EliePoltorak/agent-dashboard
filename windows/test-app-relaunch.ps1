@@ -108,6 +108,19 @@ Invoke-SwitchRelaunch B
   $out = & pwsh -NoProfile -Command $child 2>&1 | Out-String
   Check 'switch ok, relaunch failed: exit 3, says the switch stood' ($LASTEXITCODE -eq 3 -and $out -match 'Switched to seat B, but the Claude app could not be reopened' -and $out -notmatch 'LAUNCHED') "rc=$LASTEXITCODE out=$out"
 
+  # switch refused AND the app cannot be reopened: the refusal's exit code, and a last line that still says the switch failed
+  $child = @"
+. '$script_'
+`$script:n = 0
+function Get-AppProcs { `$script:n++; if (`$script:n -eq 1) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Find-AppLauncher { `$null }
+function Invoke-Switch { Write-Host 'REFUSED: seat B'; exit 1 }
+Invoke-SwitchRelaunch B
+"@
+  $out = & pwsh -NoProfile -Command $child 2>&1 | Out-String
+  $last = @($out -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^\s' })[-1]
+  Check 'switch refused, reopen failed: exit 1, last line says the switch failed' ($LASTEXITCODE -eq 1 -and $last -match '^Switch failed') "rc=$LASTEXITCODE last=$last"
+
   # launcher: Squirrel stub first, then Update.exe --processStart, else none
   $sq = Join-Path $env:LOCALAPPDATA 'AnthropicClaude'
   New-Item -ItemType Directory -Path $sq -Force | Out-Null

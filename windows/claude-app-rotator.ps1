@@ -23,7 +23,8 @@ USAGE  (run in normal PowerShell, app CLOSED for capture/switch/rotate)
   claude-app-rotator.ps1 --switch <label>    # back up current login, load profile <label>
   claude-app-rotator.ps1 --switch <label> --relaunch
                                              # close the running app first (gracefully; aborts if it
-                                             # is still running after 30 s), switch, reopen the app
+                                             # is still running after 30 s), switch, reopen the app;
+                                             # exit 3 if the switch stood but the app could not be reopened
   claude-app-rotator.ps1 --rotate [label]    # cycle to the next profile (or switch to <label>)
   claude-app-rotator.ps1 --capture <label>   # save the CURRENT login as profile <label>
   claude-app-rotator.ps1 --usage [--refresh]  # per-account usage incl. Fable (app seats = the
@@ -194,6 +195,7 @@ function Invoke-SwitchRelaunch([string]$label) {
       }
     } elseif ($wasRunning) {
       if (Start-ClaudeApp) { Write-Host "Switch failed; relaunched the Claude app on its old login." -ForegroundColor Red }
+      else { Write-Host "Switch failed (the reason is above), and the Claude app could not be reopened; open it from the Start menu." -ForegroundColor Red }    # last line: a caller shows it, so it must say the switch failed
     }
   }
 }
