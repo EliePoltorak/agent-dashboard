@@ -963,6 +963,22 @@ def settle_awaits(pending, codex):
     return out, sorted(cleared)
 
 
+def lift_awaits(codex, seen):
+    """Lift each await mark that `codex` (seat readings) settles, in one pcache transaction over the marks as they are NOW, so a mark cleared and replaced
+    meanwhile is judged on its own `at` (a newer reset's mark is never lifted by a reading older than it). `seen` is the caller's earlier view of the marks: with
+    no await mark there, no transaction is taken. Called by sample() on the cache readings, and by Store.take() on the reading merged with the session logs,
+    which can be newer than any cache. -> the seats lifted."""
+    if not codex or not any(isinstance(m, dict) and m.get("await") for m in (seen or {}).values()):
+        return []
+    with pcache_txn() as c:
+        pend, cleared = settle_awaits(c.get("codex_pending") or {}, codex)
+        if cleared:
+            c["codex_pending"] = pend
+    for label in cleared:
+        applog("codex reset: seat %s reading after the reset arrived; Apply back on" % label)
+    return cleared
+
+
 def sample(now, force=False):
     rec = {"t": int(now), "s": read_claude()}
     cache = load_pcache()
@@ -971,14 +987,7 @@ def sample(now, force=False):
     for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
         if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
             codex[label] = fresh
-    cleared = settle_awaits(cache.get("codex_pending") or {}, codex)[1]
-    if cleared:                         # lifted in a transaction of its own, by id: a mark cleared and replaced by a newer reset during the slow reads above is
-        with pcache_txn() as c:         # not this one, and must stand (merging the removal back below would drop whatever sits under the seat's key)
-            now_pend = c.get("codex_pending") or {}
-            for label in cleared:
-                if (now_pend.get(label) or {}).get("id") == cache["codex_pending"][label]["id"]:
-                    now_pend.pop(label)
-                    applog("codex reset: seat %s reading after the reset arrived; Apply back on" % label)
+    lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
     if codex:
         rec["codex"] = codex
         cache.setdefault("emails", {})["codex"] = cemails
@@ -2494,7 +2503,9 @@ class Store:
             now = time.time()
             rec = sample(now, force)
             new = self.read_rollouts(now, mark=False)       # first, and every point of them, so the sample is merged with all the logs saw
-            self.hist = save(self.hist, newest_codex(rec, self.hist, new or []), now)
+            rec = newest_codex(rec, self.hist, new or [])
+            self.hist = save(self.hist, rec, now)
+            lift_awaits(rec.get("codex") or {}, load_pcache().get("codex_pending"))     # the session logs can carry a reading newer than any cache: it settles a wait too
             held = {h["t"] // BUCKET5 for h in self.hist if "codex" in h}     # as on disk after save: the sample's bucket, and any point a failed earlier append or a --backfill wrote
             self.append_rollouts([r for r in new or [] if r["t"] // BUCKET5 not in held])     # (carry records are dropped there)
             if new is not None:
@@ -2506,8 +2517,9 @@ class Store:
         is never killed: still running after RESET_TIMEOUT s, the outcome is "running", that thread keeps `refreshing` until the script ends (other actions get
         409 meanwhile), and the caller must NOT release the lock. Before it runs, the seat is marked unconfirmed; a seat still marked is refused, because a
         second run would mint a second claim. Only the script's own clear answer or the user's Clear (codex_reset_clear) lifts the mark: a reading proves
-        nothing (a count can drop for another reason, or before the claim lands). One exception: a reset the script confirmed (`redeemed`) whose follow-up
-        read failed leaves an "await" mark instead (see codex_reset_job), which the first reading taken after it lifts (settle_awaits, in sample())."""
+        nothing (a count can drop for another reason, or before the claim lands). One exception: a reset the script confirmed (`redeemed` or `alreadyRedeemed`)
+        whose follow-up read failed leaves an "await" mark instead (see codex_reset_job), which the first reading taken after it lifts (lift_awaits: in sample()
+        on the cache readings, and in take() on the reading merged with the session logs)."""
         with self.lock, pcache_txn() as c:
             pend = c.setdefault("codex_pending", {})
             if seat in pend:
@@ -2566,7 +2578,7 @@ class Store:
         with self.lock:
             now = time.time()
             with pcache_txn() as cache:
-                if settled and res.get("outcome") == "redeemed" and not new:
+                if settled and res.get("outcome") in ("redeemed", "alreadyRedeemed") and not new:      # either way the credit is spent and the page's reading predates it
                     cache.setdefault("codex_pending", {})[seat] = {"at": int(now), "id": secrets.token_urlsafe(16), "await": True}
                 elif settled:
                     cache.setdefault("codex_pending", {}).pop(seat, None)
@@ -3953,6 +3965,7 @@ def selftest():
             assert rr_["outcome"] == "error" and "just applied" in rr_["text"] and "A" in load_pcache()["codex_pending"]    # still refused while the mark stands, and says why
             with pcache_txn() as c_:
                 c_.pop("codex_fresh", None)                                                                             # an earlier case's fresh reading would stand in for the cache's own
+            keep_sample_ = sample
             try:
                 for ts_, kept_ in ((m_["at"] - 5, True), (m_["at"] + 5, False)):
                     globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({"A": {"ts": ts_, "w": 0.1, "banked": 3}}, {}),
@@ -3974,10 +3987,25 @@ def selftest():
                 globals().update(read_codex=swap_)
                 sample(time.time(), True)
                 assert load_pcache()["codex_pending"] == {"A": {"at": 20, "id": "new"}}, load_pcache()["codex_pending"]
+                # alreadyRedeemed (the claim landed on an earlier send) with a failed follow-up read: spent all the same, so the same await mark
+                with pcache_txn() as c_:
+                    c_["codex_pending"] = {}
+                ar_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(json.dumps({"status": "redeemed", "outcome": "already_redeemed"}).encode()) if "--confirm" in argv else Proc(b"?", 1))
+                assert ar_["outcome"] == "alreadyRedeemed" and load_pcache()["codex_pending"]["A"].get("await") is True, load_pcache()["codex_pending"]
+                # take(): a cache with no newer reading, but the session logs carry one: the merged reading lifts the mark
+                am_ = load_pcache()["codex_pending"]["A"]["at"]
+                globals()["sample"] = lambda now, force=False: {"t": int(now), "codex": {"A": {"ts": am_ - 50, "w": 0.1, "banked": 3}}}
+                cst.hist, cst.append_rollouts, cst.mark_import = [], lambda new_: None, lambda now_: None
+                cst.read_rollouts = lambda now_, cdir=None, rec=None, **kw: [{"t": am_ + 30, "codex": {"A": {"ts": am_ + 30, "w": 0.02}}}]
+                cst.take()
+                assert "A" not in load_pcache()["codex_pending"], load_pcache()["codex_pending"]
             finally:
                 globals().update(stub)
+                globals()["sample"] = keep_sample_
             assert settle_awaits({"A": {"at": 5, "id": "i", "await": True}, "B": {"at": 5, "id": "j"}, "C": "x"}, {"A": {"ts": 5}, "B": {"ts": 9}, "C": {"ts": 9}}) ==                 ({"A": {"at": 5, "id": "i", "await": True}, "B": {"at": 5, "id": "j"}, "C": "x"}, [])                   # a reading at the mark's own time is not newer
             assert settle_awaits({"A": {"at": 5, "id": "i", "await": True}, "D": {"at": 5, "id": "k", "await": True}}, {"A": {"ts": 6}}) == ({"D": {"at": 5, "id": "k", "await": True}}, ["A"])
+            with pcache_txn() as c_:
+                c_["codex_pending"] = {"A": {"at": 20, "id": "new"}}                                                     # the mark the race case left, which the take() case above has since lifted
             assert cst.codex_reset_clear("A", load_pcache()["codex_pending"]["A"]["id"])["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
         finally:
             globals().update(keep)
