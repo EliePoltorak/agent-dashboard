@@ -792,7 +792,7 @@ is the weight the seat already has. The suggestion's line and the copied fragmen
 dashboard's sampler (`Store.credits_tick` and `Store.credits_read` in `usage-history.py`, parsed by `parse_cedar`, selftest block J) reads one seat per
 5-minute tick and each seat at most once every **6 hours** (a seat whose app login is waiting for its organization, below, is asked again sooner: see there); a 429 or a sign-in error holds that seat for 6 hours, any other failure keeps the last good reading.
 A setup-token (`token.txt`) cannot read credits: the call answers 403 "scope requirement user:profile", the cell says "Reset credits need a full Claude
-login (not a setup-token)" and that seat is asked again only after **7 days**. So when the Claude desktop app has saved a full login for the **same
+login (not a setup-token)" and that seat is asked again only after **7 days**, unless the seat's credentials change first (a full app login is captured for it, or its `token.txt` is rewritten: the hold lapses and the seat is read at once). So when the Claude desktop app has saved a full login for the **same
 account** (`~/.claude-app-seats/<seat>/config.json`, kept by `claude-account`), the credit read and the Apply use it. "The same account" is
 checked three ways: the app seat's `email.txt` or `meta.txt` names the seat's `email.txt` address; the snapshot is pinned to the app seat's
 `owner-uuid.txt` (a snapshot of another account is refused, as `claude-app-seat-keepalive.ps1` does) and only that account's token entries are

@@ -752,7 +752,7 @@ def parse_usage(j, now):
 
 
 APP_SEATS = os.path.join(HOME, ".claude-app-seats")     # the desktop app's saved per-seat logins (claude-app-rotator.ps1)
-SCOPE_HOLD = 7 * DAY        # a seat whose only token cannot read credits (a setup-token) is asked again after a week, not every 6 h
+SCOPE_HOLD = 7 * DAY        # a seat whose only token cannot read credits (a setup-token) is asked again after a week, not every 6 h; the hold lapses sooner when the seat's app login or token.txt changes (cred_sig)
 NOTE_SCOPE = "Reset credits need a full Claude login (not a setup-token)"
 NOTE_APP_EXPIRED = "app login expired; open the app on this seat to refresh"
 NOTE_PENDING = "waiting for this seat's first usage probe"
@@ -760,6 +760,28 @@ NOTE_APP_ORG = "app login is for another organization; open the app on this seat
 NOTE_APP_UNREADABLE = "the app login on this seat could not be read; open the app on this seat to sign in again"
 CREDITS_PENDING_RETRY = 15 * 60      # an app login whose organization is not recorded yet is asked again in 15 min, not after the 6 h read interval
 CREDITS_PENDING_TRIES = 4            # ... for this many consecutive pending reads; after that (a seat that never gets probed) it is the 6 h read interval again, unless credits_tick sees its organization recorded
+
+
+def cred_sig(label):
+    """A short string that changes when the seat's credential sources change: the existence and st_mtime_ns of the app seat's config.json and of the CLI seat's
+    token.txt ("0" for a missing file). Only the files' metadata is read, never their contents."""
+    out = []
+    for path in (os.path.join(APP_SEATS, label, "config.json"), os.path.join(ROOT, label, "token.txt")):
+        try:
+            out.append(str(os.stat(path).st_mtime_ns))
+        except OSError:
+            out.append("0")
+    return ":".join(out)
+
+
+def scope_lapsed(e, label):
+    """True when the entry holds a scope refusal (NOTE_SCOPE with a hold) recorded against other credentials than the seat has now (no "sig" counts as other)."""
+    return e.get("note") == NOTE_SCOPE and (e.get("hold") or 0) > 0 and e.get("sig") != cred_sig(label)
+
+
+def hold_of(e, label):
+    """The entry's effective hold time: its `hold`, or 0 when it is a scope hold whose credentials have changed since (the seat is asked again now)."""
+    return 0 if scope_lapsed(e, label) else (e.get("hold") or 0)
 
 
 def app_login(label, run=run_bounded):
@@ -2446,12 +2468,15 @@ class Store:
         call, so a crash is not retried every sample; `hold` (429 and 401/403) is respected even by a forced read; "pending" (an app login whose organization is
         not known yet) sets no hold but a short `next` (CREDITS_PENDING_RETRY, for the first CREDITS_PENDING_TRIES - 1 reads in a row, then the ordinary interval) and a note;
         the run is counted in the entry's `pend`, which any other result clears. credits_tick reads a seat with that note early (forced, whatever is left of `next`) once its
-        organization is recorded. "org" (an app login with no entry for the seat's organization) sets only its note, "unreadable" (a saved app login the helper read but could not decrypt) sets only its own note, which a later "fail" leaves and an ok read clears, and "fail" (a failed call, or a helper
+        organization is recorded. A scope hold (NOTE_SCOPE) lapses as soon as the seat's app login or token.txt changes (`sig`, see cred_sig): the seat is then read at once, whatever is left of `next`. "org" (an app login with no entry for the seat's organization) sets only its note, "unreadable" (a saved app login the helper read but could not decrypt) sets only its own note, which a later "fail" leaves and an ok read clears, and "fail" (a failed call, or a helper
         that gave no answer) sets nothing and clears a pending or org note: none of them holds the seat, and all are asked again at the ordinary interval. Returns the read's state, "stale"
         when a later read owns the entry, or None when it was skipped."""
         with self.lock, pcache_txn() as cache:
             e = cache.setdefault("credits", {}).setdefault(label, {})
-            if now < (e.get("hold") or 0) or (not force and now < (e.get("next") or 0)):
+            sig = cred_sig(label)                       # taken before the call: a change made while it runs is seen by the next read
+            if scope_lapsed(e, label):
+                e.pop("hold", None), e.pop("sig", None)     # the credentials changed since the scope refusal: asked again now, ignoring `next`; the answer decides what is held
+            elif now < (e.get("hold") or 0) or (not force and now < (e.get("next") or 0)):
                 return None
             e["next"] = int(now + CREDITS_EVERY)
             e["gen"] = gen = (e.get("gen") or 0) + 1        # a later read of this seat (say a forced one after a reset) makes this one stale
@@ -2464,12 +2489,15 @@ class Store:
                 e.pop("pend", None)                     # the run of pending reads is over
             if state == "ok":
                 e.update(ts=rd["ts"], eligible=rd["eligible"], grants=rd["grants"])
-                e.pop("note", None), e.pop("hold", None), e.pop("nextId", None)
+                e.pop("note", None), e.pop("hold", None), e.pop("sig", None), e.pop("nextId", None)
                 if rd.get("nextId"):
                     e["nextId"] = rd["nextId"]
             elif state in ("rl", "auth", "scope"):
                 e["hold"] = int(now + (SCOPE_HOLD if state == "scope" else CREDITS_EVERY))
                 e["note"] = {"rl": "rate limited", "auth": "sign-in needed", "scope": NOTE_SCOPE}[state]
+                e.pop("sig", None)
+                if state == "scope":
+                    e["sig"] = sig
             elif state == "expired":
                 e["note"] = NOTE_APP_EXPIRED
             elif state == "unreadable":
@@ -2491,7 +2519,7 @@ class Store:
     def credits_tick(self, now, fetch=http_json, cfg=None, labels=None):
         """The sampler's share: at most ONE seat per tick, the one whose next read is oldest and due; seats without a token file are not read. A seat whose entry
         says it is waiting for its organization (NOTE_PENDING) is due as soon as that is recorded (a cheap file check), whatever is left of its back-off; only a hold
-        still holds it. Off with claudeResetCredits:false."""
+        still holds it, except a scope hold, which lapses (the seat is due at once) when the seat's app login or token.txt has changed since the refusal. Off with claudeResetCredits:false."""
         if not credits_enabled(cfg):
             return None
         with self.lock:
@@ -2499,9 +2527,11 @@ class Store:
 
         def due_at(l):
             e = cr.get(l) or {}
+            if scope_lapsed(e, l):
+                return 0, l, False
             if e.get("note") == NOTE_PENDING and claude_org(l):
-                return e.get("hold") or 0, l, True
-            return max(e.get("next") or 0, e.get("hold") or 0), l, False
+                return hold_of(e, l), l, True
+            return max(e.get("next") or 0, hold_of(e, l)), l, False
         due = sorted(due_at(l) for l in (token_seats() if labels is None else labels))
         if not due or due[0][0] > now:
             return None
@@ -4488,6 +4518,27 @@ def selftest():
         assert ea["note"] == "Reset credits need a full Claude login (not a setup-token)" and ea["hold"] == JN + 4 * CREDITS_EVERY + 7 * DAY and ea["grants"]
         assert st.credits_read("A", JN + 4 * CREDITS_EVERY + CREDITS_EVERY + 1, sc, force=True, login=lambda l: (None, None)) is None      # not asked again for a week
         assert st.credits_read("B", JN + 4 * CREDITS_EVERY, sc, force=True, login=lambda l: (None, None)) == "auth"                         # another 403 is still sign-in needed
+        # the scope hold lapses when the seat's credentials change (a captured app login, a rewritten token.txt): the seat is asked again at once
+        keep_as_, snap_ = APP_SEATS, load_pcache()["credits"]["A"]
+        tok_ = os.path.join(jd, "A", "token.txt")
+        tok_st_ = os.stat(tok_)
+        globals()["APP_SEATS"] = os.path.join(jd, "sig-app-seats")
+        try:
+            t_sig_, nc_ = JN + 5 * CREDITS_EVERY + 5, len(calls)
+            assert st.credits_read("A", t_sig_, sc, login=lambda l: (None, None)) is None and len(calls) == nc_                 # unchanged credentials: still held
+            assert st.credits_tick(t_sig_, sc, "no-such-config.json", labels=["A"]) is None and len(calls) == nc_
+            os.makedirs(os.path.join(APP_SEATS, "A"))
+            open(os.path.join(APP_SEATS, "A", "config.json"), "w").write("{}")                                               # the seat's full app login is captured
+            assert st.credits_read("A", t_sig_, sc, login=lambda l: (None, None)) == "scope" and len(calls) == nc_ + 1       # asked again, whatever is left of `next` and of the hold
+            assert st.credits_read("A", t_sig_ + 1, sc, login=lambda l: (None, None)) is None and len(calls) == nc_ + 1       # the new refusal is held against the new credentials
+            assert load_pcache()["credits"]["A"]["hold"] == t_sig_ + 7 * DAY and "secret-" not in open(PCACHE).read()
+            os.utime(tok_, ns=(tok_st_.st_atime_ns, tok_st_.st_mtime_ns + 5_000_000_000))                                    # token.txt rewritten
+            assert st.credits_tick(t_sig_ + 2, sc, "no-such-config.json", labels=["A"]) == ("A", "scope") and len(calls) == nc_ + 2   # due straight away
+            assert st.credits_tick(t_sig_ + 3, sc, "no-such-config.json", labels=["A"]) is None and len(calls) == nc_ + 2
+        finally:
+            globals()["APP_SEATS"] = keep_as_
+            os.utime(tok_, ns=(tok_st_.st_atime_ns, tok_st_.st_mtime_ns))
+            save_pcache(dict(load_pcache(), credits=dict(load_pcache()["credits"], A=snap_)))
         n_ = len(calls)
         assert st.credits_read("C", JN + 4 * CREDITS_EVERY, fx, force=True, login=lambda l: ("ok", "secret-appC")) == "ok" and calls[-1][1] == "Bearer secret-appC"
         assert st.credits_read("C", JN + 5 * CREDITS_EVERY, fx, force=True, login=lambda l: ("expired", None)) == "expired" and len(calls) == n_ + 1
