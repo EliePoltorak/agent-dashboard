@@ -57,7 +57,7 @@
     pwsh -File sync-app-history.ps1 -NoPrune        # only add/retitle; never remove
     pwsh -File sync-app-history.ps1 -Quiet          # for the launcher hook / scheduled task
 
-  SCHEDULED: Windows task 'Claude app-history sync' runs this every 30 min (hidden, via
+  SCHEDULED: Windows task 'Claude app-history sync' runs this every 30 min when enabled (hidden, via
   sync-app-history-hidden.vbs), so the app history stays fresh without a seat switch.
   Manage:  Disable-ScheduledTask / Enable-ScheduledTask -TaskName 'Claude app-history sync'
 
@@ -383,6 +383,10 @@ if (-not $flagSkip) {
       foreach ($r in $rs) {
         $r.v = [bool]$r.j.$flag
         if ($prev -and $prev.ContainsKey($r.key)) { $known += $r; if ([bool]$prev[$r.key] -ne $r.v) { $changed += $r } }
+        # A record not seen last run (the app made it since, e.g. on a newly used seat) that is ON counts as
+        # a change: it was archived/pinned there after the last sync. One that is OFF does not -- a record the
+        # app creates starts off, so counting it would un-archive/unpin the session everywhere.
+        elseif ($prev -and $r.v) { $changed += $r }
       }
       $want = if ($changed.Count) { [bool]($changed | Where-Object { $_.v }) }
               elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
@@ -553,6 +557,8 @@ foreach ($acct in $accts) {
         try {
           $cj = $src.raw | ConvertFrom-Json
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
+          # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
+          if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
           $cpath = Join-Path $bestSub "$($cj.sessionId).json"
           ($cj | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $cpath -Encoding UTF8 -NoNewline
           $madeRecs.Add(@{ path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })

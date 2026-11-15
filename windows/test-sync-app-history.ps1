@@ -2,7 +2,8 @@
 <#
   test-sync-app-history.ps1 -- scenario test for sync-app-history.ps1's pass 1.4: the isArchived / isStarred
   flags follow you across seats. (The sidebar pin LIST and groups are not synced -- see the script header.)
-  Covers: first-run union; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
+  Covers: first-run union (a planted disagreement, and again after the state folder is deleted); a record
+  not seen last run spreads only when it is on; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
@@ -40,7 +41,12 @@ function state { Get-Content $statePath -Raw | ConvertFrom-Json -AsHashtable }
 function mixed($R, $p) { @($R | Group-Object cli | Where-Object { ($_.Group.$p -contains $true) -and ($_.Group.$p -contains $false) }).Count }
 function ofSession($cli) { @(recs | Where-Object { $_.cli -eq $cli }) }
 
+# The live index already agrees across seats, so plant a disagreement for the first run to resolve.
+$U = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Select-Object -First 1
+if (-not $U) { "FAIL no unflagged multi-seat session in the index to test with"; exit 1 }
+setRec $U.Group[0].f 'isArchived' $true
 "--- run 1 (baseline: first run, no state file)"; run; $R = recs
+check "first run: archived on one seat -> archived on all $($U.Count)" (@(ofSession $U.Name | Where-Object { -not $_.arch }).Count -eq 0)
 check 'run 1 exits 0' ($rc -eq 0)
 check 'state file written' (Test-Path $statePath)
 check 'every record of a session with any archived record is archived' ((mixed $R 'arch') -eq 0)
@@ -81,6 +87,17 @@ check 'on wins: starred on every seat' (@($S | Where-Object { -not $_.star }).Co
 foreach ($r in $S) { setRec $r.f 'isArchived' $false; setRec $r.f 'isStarred' $false }; run   # reset, and let the state follow
 check 'reset: nothing flagged on that session' (@(ofSession $G.Name | Where-Object { $_.arch -or $_.star }).Count -eq 0)
 
+"--- a record not seen last run that is ON spreads (archived on a newly used seat)"
+$st = state; $st['isArchived'].Remove((key $g1.f)); Set-Content $statePath ($st | ConvertTo-Json -Compress -Depth 5)
+setRec $g1.f 'isArchived' $true; run
+check 'unseen archived record -> archived on every seat' (@(ofSession $G.Name | Where-Object { -not $_.arch }).Count -eq 0)
+"--- a record not seen last run that is OFF does not un-archive the others (a new app record starts off)"
+$st = state; $st['isArchived'].Remove((key $g0.f)); Set-Content $statePath ($st | ConvertTo-Json -Compress -Depth 5)
+setRec $g0.f 'isArchived' $false; run
+check 'unseen off record -> still archived on every seat' (@(ofSession $G.Name | Where-Object { -not $_.arch }).Count -eq 0)
+foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $false }; run
+check 'reset again: nothing archived on that session' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+
 "--- corrupt state file: warn, change nothing, leave the file as is"
 $good = Get-Content $statePath -Raw
 setRec $g0.f 'isArchived' $true          # a real change that a healthy run would spread to every seat
@@ -92,9 +109,11 @@ check 'state file left as is' ((Get-Content $statePath -Raw) -eq 'not json')
 check 'corrupt state does not fail the run' ($rc -eq 0)
 Set-Content $statePath $good -NoNewline; setRec $g0.f 'isArchived' $false
 
-"--- missing ~\.claude-app-seats directory"
+"--- missing ~\.claude-app-seats directory (a first run again: pinned on one seat -> pinned on all)"
+setRec $g0.f 'isStarred' $true
 Remove-Item -LiteralPath "$sb\home\.claude-app-seats" -Recurse -Force
 run
+check 'first run again: starred on every seat' (@(ofSession $G.Name | Where-Object { -not $_.star }).Count -eq 0)
 check 'run succeeds' ($rc -eq 0 -and -not ($out -match 'rror|xception'))
 check 'state file exists again' (Test-Path $statePath)
 
