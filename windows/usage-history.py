@@ -1988,7 +1988,7 @@ def codex_measure(cdir=None, now=None):
 # ---------------------------------------------------------------- backfill from .rotate-log.txt
 
 LOG_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s+(.*)$")
-LOG_EMAIL = re.compile(r"-> (\w) \(([^)\s]+@[^)\s]+)\)")
+LOG_EMAIL = re.compile(r"-> ([A-Za-z]+) \(([^)\s]+@[^)\s]+)\)")      # a seat label is letters of any length (SEAT_RE), not one character
 
 
 def _pct(m, i=1):
@@ -1997,15 +1997,15 @@ def _pct(m, i=1):
 
 def parse_log_line(msg):
     """-> {label: {"w": x, "f": y}} (fractions, only the keys this line carries)."""
-    m = re.match(r"ROTATED '\w' -> (\w) \(.*?\) session \d+%, weekly (\d+)%(?:, fable (\d+)%)?", msg)
+    m = re.match(r"ROTATED '[A-Za-z]+' -> ([A-Za-z]+) \(.*?\) session \d+%, weekly (\d+)%(?:, fable (\d+)%)?", msg)
     if m:
         v = {"w": _pct(m, 2)}
         if m.group(3) is not None:
             v["f"] = _pct(m, 3)
         return {m.group(1): v}
     if msg.startswith("NO USABLE TARGET"):
-        return {lab: {"w": min(int(w), 100) / 100} for lab, w in re.findall(r"\b(\w)=s\d+%/w(\d+)%", msg)}
-    m = re.match(r"TRIGGER: active account '(\w)'", msg)
+        return {lab: {"w": min(int(w), 100) / 100} for lab, w in re.findall(r"\b([A-Za-z]+)=s\d+%/w(\d+)%", msg)}
+    m = re.match(r"TRIGGER: active account '([A-Za-z]+)'", msg)
     if m:
         v = {}
         c = re.search(r"(FABLE|WEEKLY) window CAPPED at (\d+)%", msg)
@@ -4121,6 +4121,17 @@ def selftest():
     merged = sorted(real + recs, key=lambda h: h["t"])
     again = sorted([h for h in merged if not h.get("b")] + backfill_records(log, latest, L - 8 * 86400, L)[0], key=lambda h: h["t"])
     assert again == merged
+    # seat labels are letters of any length: every pattern of the log reads a multi-letter label (and still a one-letter one)
+    assert LOG_EMAIL.search("ROTATED 'Personal' -> Work (w@x.org) session 0%").groups() == ("Work", "w@x.org") and LOG_EMAIL.search("-> B (b@x.org)").group(1) == "B"
+    assert parse_log_line("ROTATED 'Personal' -> Work (w@x.org) session 0%, weekly 41%, fable 14%") == {"Work": {"w": 0.41, "f": 0.14}}
+    assert parse_log_line("ROTATED 'F' -> Work (w@x.org) session 0%, weekly 41%") == {"Work": {"w": 0.41}} and parse_log_line("ROTATED 'Personal' -> A (a@x.org) session 0%, weekly 7%") == {"A": {"w": 0.07}}
+    assert parse_log_line("NO USABLE TARGET - staying on 'Work'. Personal=s0%/w80% Work=s1%/w60% C=s0%/w5% (capped)") == {"Personal": {"w": 0.8}, "Work": {"w": 0.6}, "C": {"w": 0.05}}
+    assert parse_log_line("TRIGGER: active account 'Personal' WEEKLY window CAPPED at 100% (session 20%) [via proxy]") == {"Personal": {"w": 1.0}}
+    assert parse_log_line("TRIGGER: active account 'Work' at 49% (session 49%, weekly 49%) >= 1%") == {"Work": {"w": 0.49}}
+    mlog = "\n".join([ts(L - 4 * 86400) + "  ROTATED 'Personal' -> Work (w@x.org) session 0%, weekly 41%, fable 14%",
+                      ts(L - 3 * 86400) + "  DRY RUN: would rotate 'Work' -> Personal (p@x.org) worst 0%, fable 0%"])
+    mrecs, mem = backfill_records(mlog, {"Work": {"w": 0.5, "wr": wr}, "Personal": {"w": 0.2, "wr": wr}}, L - 8 * 86400, L)
+    assert mem == {"Work": "w@x.org", "Personal": "p@x.org"} and mrecs and mrecs[0]["s"]["Work"]["w"] == 0.41, (mem, mrecs)
 
     # 3: typical-day profile and the backtest, on two synthetic weeks (local midnight start) that use 1 %/h of one account in local hours 9-16 only
     base, u, syn = time.mktime((2026, 1, 5, 0, 0, 0, 0, 0, -1)), 0.0, []
