@@ -382,7 +382,7 @@ Set-Active 'B'
 $script:plan['B'] = 'disabled'
 foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'network' }
 $rc = Invoke-CheckRotate 0 $false $true 'test'
-Check 'fallback picks the first unknown seat in label order (A)' ((Get-ActiveLabel) -eq 'A') (Get-ActiveLabel)
+Check 'fallback picks the first network-unknown seat in label order (A)' ((Get-ActiveLabel) -eq 'A') (Get-ActiveLabel)
 $marked = @(Get-ChildItem $Root -Recurse -Filter 'access-disabled.json' | ForEach-Object { $_.Directory.Name })
 Check 'only the refused seat is marked' (($marked.Count -eq 1) -and ($marked[0] -eq 'B')) ($marked -join ',')
 Check 'fallback did not hammer B' ($script:probes['B'] -eq 1) ("count=$($script:probes['B'])")

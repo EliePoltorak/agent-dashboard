@@ -3776,6 +3776,7 @@ def selftest():
             while cst.refreshing.locked() and time.time() < end:
                 time.sleep(0.05)
             assert not cst.refreshing.locked() and "seat A -> redeemed" in open(APPLOG).read()
+            globals()["RESET_TIMEOUT"] = 30                                  # every call below must finish in time: 0.3 s was only for the "running" case, and a busy machine outran it
             cst.refreshing.acquire()                                         # in time: the result itself, and the caller keeps the lock
             assert cst.codex_reset("A", "/x", fake)["outcome"] == "redeemed" and cst.refreshing.locked()
             cst.refreshing.release()
@@ -3990,7 +3991,7 @@ def selftest():
                             ("usage-cache-fable.json", 90, {"oi7_util": .2, "oi7_reset": 9, "oi7_stat": "rejected", "s5_stat": "x", "w7_stat": "y"})):
             json.dump({"ts": ts_, "data": dict(dd, ok=True, access="ok")}, open(os.path.join(rd, "A", fn), "w"))
         rs_ = read_seat("A")
-        assert (rs_["st"], rs_["wt"], rs_["ft"], rs_["f"]) == ("allowed", "allowed_warning", "rejected", 0.2), rs_      # s/w from the newest read, Fable's from the one that carries it
+        assert (rs_["st"], rs_["wt"], rs_["ft"], rs_["f"]) == ("allowed", "allowed_warning", "rejected", 0.2), rs_      # s/w from the newest read that measured them, Fable's from the one that carries it
         for fts_ in (110, 100):     # a newer (or same-second) headerless Fable error leaves the Haiku reading in place
             json.dump({"ts": fts_, "data": {"ok": True, "access": "ok", "http": 500, "note": "http 500: api_error: Overloaded"}}, open(os.path.join(rd, "A", "usage-cache-fable.json"), "w"))
             rs_ = read_seat("A")
