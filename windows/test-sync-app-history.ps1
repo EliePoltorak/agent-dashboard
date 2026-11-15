@@ -129,11 +129,12 @@ $st = state; check 'retried: the session baseline moves on' ($st['isArchived'][(
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
 $keep1 = Get-Content -LiteralPath $g1.f -Raw
 if ($H) { setRec $H.Group[0].f 'isStarred' $true }                                     # another session changed in the same run
+$stHash = (Get-FileHash $statePath).Hash
 setRec $g0.f 'isArchived' $false; Set-Content -LiteralPath $g1.f 'not json' -NoNewline; run   # un-archive on seat 0; seat 1 unreadable
 check 'unreadable record warns' ($out -match 'could not read')
 $st = state
 check 'unreadable record: its session keeps its last baseline' ($st['isArchived'][(key $g0.f)] -eq $true -and $st['isArchived'][(key $g1.f)] -eq $true)
-check 'unreadable record: the rest of the state is saved (not the whole-save stop)' (($out -notmatch 'is not saved this run') -and $st['cli'] -and $st['cli'][(key $g1.f)] -eq $G.Name)
+check 'unreadable record: the rest of the state is saved (not the whole-save stop)' ((-not ($out -match 'is not saved this run')) -and ((Get-FileHash $statePath).Hash -ne $stHash) -and $st['cli'] -and $st['cli'][(key $g1.f)] -eq $G.Name)
 if ($H) {
   check 'unreadable record: another session changed in the same run is saved' (@(ofSession $H.Name | Where-Object { $st['isStarred'][(key $_.f)] -ne $true }).Count -eq 0)
   foreach ($r in (ofSession $H.Name)) { setRec $r.f 'isStarred' $false }
@@ -181,7 +182,7 @@ $gd = @(ofSession $G.Name | Where-Object { $_.f -ne $g0.f -and $_.f -ne $g1.f })
 if (-not $gd) { $gd = $g1 }
 $keepD = Get-Content -LiteralPath $gd.f -Raw; $kd = key $gd.f
 Remove-Item -LiteralPath $gd.f; run
-check 'deleted record: no read warning' ($out -notmatch 'could not read')
+check 'deleted record: no read warning' (-not ($out -match 'could not read'))
 check 'deleted record: dropped from the saved state' (-not (state)['isArchived'].ContainsKey($kd))
 Set-Content -LiteralPath $gd.f $keepD -NoNewline; run
 

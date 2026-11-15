@@ -300,6 +300,18 @@ if (-not $Quiet) {
   "classified $($transcripts.Count) transcripts for ${Cwd}: $($keep.Count) kept ($resNote), $($allT.Count - $keep.Count) pruned ($ageNote; MinAssistant=$MinAssistant)"
 }
 
+# Is the desktop app running? Checked BEFORE any record is read, so a record the app writes as it quits
+# can't be read stale and written back by pass 1.4. ($ccs must be the REAL app's index; a sandbox under a
+# redirected %APPDATA% is never live.)
+$liveCcs = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude-code-sessions'
+function Test-AppUp {
+  if ($AssumeAppRunning) { return $true }
+  # compare full paths, so a trailing backslash or relative form can't make the real index look like a sandbox
+  if ([IO.Path]::GetFullPath($ccs).TrimEnd('\') -ne [IO.Path]::GetFullPath($liveCcs).TrimEnd('\')) { return $false }
+  return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
+}
+$appUp = Test-AppUp
+
 # ---- pass 1: scan all account buckets once ------------------------------------
 $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
@@ -345,16 +357,7 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # (after pass 2). The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
 # Runs only while the app is closed: the live app holds its records in memory and rewrites them,
-# so a flag we set under it would be lost and then read back as the user's own change.
-# ($ccs must be the REAL app's index; a sandbox under a redirected %APPDATA% is never live.)
-$liveCcs = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude-code-sessions'
-function Test-AppUp {
-  if ($AssumeAppRunning) { return $true }
-  # compare full paths, so a trailing backslash or relative form can't make the real index look like a sandbox
-  if ([IO.Path]::GetFullPath($ccs).TrimEnd('\') -ne [IO.Path]::GetFullPath($liveCcs).TrimEnd('\')) { return $false }
-  return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
-}
-$appUp = Test-AppUp
+# so a flag we set under it would be lost and then read back as the user's own change ($appUp, above pass 1).
 $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
 $flagBackupRoot = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-sync-backups'
 $flagSkip = $false      # pass 1.4 did not run: leave records AND the state file alone
@@ -471,9 +474,13 @@ if (-not $flagSkip) {
     $flagNextAll[$flag] = $next
     if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
   }
+  # A session held back this run (a record failed), or every session when no state is saved, gets no resolved
+  # flags for the records pass 2 creates: those are written neutral (off), which the next run doesn't count as
+  # a change, and the next good run then sets them like any other record.
+  if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
-    foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Sort-Object Name -Descending | Select-Object -Skip 10)) {
+    foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
       try { Remove-Item -LiteralPath $old.FullName -Recurse -Force } catch { Write-Warning "could not remove old flag backup $($old.FullName): $($_.Exception.Message)" }
     }
   }
@@ -611,8 +618,8 @@ foreach ($acct in $accts) {
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
-          elseif ($flagSkip) {   # flags not resolved this run: write a neutral (off) record, which the next run
-            $cj | Add-Member -NotePropertyName isArchived -NotePropertyValue $false -Force   # treats as not a change
+          else {   # flags not resolved, or not saved, this run: write a neutral (off) record, which the next run
+            $cj | Add-Member -NotePropertyName isArchived -NotePropertyValue $false -Force   # doesn't count as a change
             $cj.PSObject.Properties.Remove('isStarred')
           }
           $cpath = Join-Path $bestSub "$($cj.sessionId).json"
@@ -627,15 +634,10 @@ foreach ($acct in $accts) {
   }
 }
 } finally {
-# If the app started while we ran, it may already hold records from before our writes and save them back:
-# then save nothing, and the next run compares with the previous state (where its rewrite reads as unchanged).
-$appStarted = (-not $DryRun -and -not $flagSkip) -and (Test-AppUp)
-if ($appStarted) { Write-Warning 'the desktop app started during the sync: the archive list and flag state are not saved this run' }
-
 # The app also lists each folder's archived records in archived-sessions.idx. Keep it in step with the records'
-# isArchived (which pass 1.4 set), so the two never disagree, whichever one the app reads. Entries for records
+# isArchived (which pass 1.4 set), so the two agree whichever one the app reads. Entries for records
 # that aren't in the folder, or can't be read, are left as they are.
-if (-not $DryRun -and -not $flagSkip -and -not $appStarted) {
+if (-not $DryRun -and -not $flagSkip) {
   $idxChanged = 0
   foreach ($dir in @(Get-ChildItem -LiteralPath $ccs -Directory | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory })) {
     $idxPath = Join-Path $dir.FullName 'archived-sessions.idx'
@@ -678,7 +680,7 @@ if (-not $DryRun -and -not $flagSkip -and -not $appStarted) {
 # Save the flag baseline AFTER pass 2, so the records it created (clone or fabricated) are in it
 # with the flags they were written with -- else the next run reads them as brand-new and unions.
 # (A session whose write failed keeps last run's values for that flag instead: pass 1.4.)
-if (-not $DryRun -and -not $flagSkip -and -not $flagFail -and -not $appStarted) {
+if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
   foreach ($mr in $madeRecs) {
     $mk = $mr.path.Substring($ccs.Length).TrimStart('\')
     foreach ($flag in 'isArchived', 'isStarred') {

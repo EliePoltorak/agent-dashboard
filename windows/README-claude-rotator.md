@@ -529,12 +529,12 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 (archive/un-archive, pin/unpin) is copied to every seat's record of that session, and "on" wins if two
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
-can't be written or read, the sync warns (naming the file) and that session keeps its last saved state, so
+can't be written, or a record the sync knew from its last run can't be read, the sync warns (naming the file) and that session keeps its last saved state, so
 the next run tries again from it. Until it succeeds, changing that session back to how it was (archiving or
 un-archiving, pinning or unpinning) may not stick; an unreadable record (including an empty one) holds its
 session back until the file is restored or deleted. The first run, and any session never seen before, use
 "on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
-are made while the app is open or the state file is unreadable). The app also lists each folder's archived
+are made while the app is open, the state file is unreadable, or their session is held back). The app also lists each folder's archived
 records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
 `claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, when it is enabled, or a manual
