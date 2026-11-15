@@ -712,12 +712,12 @@ Check 'resume script stops before delivery on Linux' (($lx -gt $resSrc.IndexOf('
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$null, [ref]$null)
 $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Select-RotationTarget' }, $true)
 . ([scriptblock]::Create($fn.Extent.Text))
-$script:fbRows = @(); $script:fbFable = @{}; $script:fbDisabled = @(); $script:fbApp = $null; $script:fbFableCalls = @(); $script:fbUsageCalls = 0
+$script:fbRows = @(); $script:fbFable = @{}; $script:fbDefault = @{}; $script:fbDefaultCalls = @(); $script:fbDisabled = @(); $script:fbApp = $null; $script:fbFableCalls = @(); $script:fbUsageCalls = 0
 function Rank-Accounts { param($r, $f) $script:fbRows }
 function Get-AppSeatLabel { $script:fbApp }
 function Read-AccessDisabled { param($l) if ($script:fbDisabled -contains $l) { 'marked' } }
 function Get-UsageCached { param($Label, $Refresh, $Model, $CacheSuffix, $CacheOnly) $script:fbUsageCalls += 1; [pscustomobject]@{ ok = $false } }
-function Test-FableCapCached { param($Label) $script:fbFableCalls += , $Label; $script:fbFable[$Label] -eq 'rejected' }
+function Test-CapCached { param($Label, $Which) if ($Which -eq 'fable') { $script:fbFableCalls += , $Label; $script:fbFable[$Label] -eq 'rejected' } else { $script:fbDefaultCalls += , $Label; $script:fbDefault[$Label] -eq 'rejected' } }
 function Row([string]$l, [string]$acc = 'unknown', [bool]$net = $true) { [pscustomobject]@{ label = $l; usable = $false; access = $acc; net = $net } }
 $script:fbRows = @((Row 'A'), (Row 'B'), (Row 'C'), (Row 'D'), (Row 'E' 'ok'))
 $script:fbApp = 'B'; $script:fbDisabled = @('C'); $script:fbFable = @{ D = 'rejected' }
@@ -733,6 +733,10 @@ Check 'fallback passes over a Fable-rejected seat to the next one' ($w.label -eq
 $script:fbRows = @((Row 'D' 'unknown' $false), (Row 'F')); $script:fbFable = @{}
 $w = Select-RotationTarget 85 -UnknownExcept 'A'
 Check 'fallback passes over a seat whose probe failed with an HTTP status' ($w.label -eq 'F') "picked '$($w.label)'"
+$script:fbRows = @((Row 'F'), (Row 'D')); $script:fbDefault = @{ F = 'rejected' }; $script:fbFable = @{}
+$w = Select-RotationTarget 85 -UnknownExcept 'A'
+Check 'fallback passes over a seat whose cached session or weekly cap is still in force' ($w.label -eq 'D') "picked '$($w.label)'"
+$script:fbDefault = @{}
 Check 'Invoke-CheckRotate routes the fallback through Select-RotationTarget' ($src -match 'Select-RotationTarget \$sessBar -UnknownExcept \$act') 'the fallback picks a seat itself again'
 
 Write-Host ""
