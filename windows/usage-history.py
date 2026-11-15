@@ -194,11 +194,11 @@ def read_seat(label):
     # (a Fable 500, say) is cached as ok, but it measured nothing, so it must not blank the Haiku reading; with no measurement at all,
     # the newest read still supplies its statuses, as before.
     ts, d = next((r for r in reversed(rows) if _f(r[1].get("s5_util")) is not None or _f(r[1].get("w7_util")) is not None), rows[-1])
-    fab = next((r[1] for r in reversed(rows) if _f(r[1].get("oi7_util")) is not None), {})
+    fts, fab = next((r for r in reversed(rows) if _f(r[1].get("oi7_util")) is not None), (None, {}))      # Fable has its own row, which can be much older than the Haiku one (the watcher stops probing it below its arming threshold)
     return {"ts": ts, "s": _f(d.get("s5_util")), "sr": _f(d.get("s5_reset")),
             "w": _f(d.get("w7_util")), "wr": _f(d.get("w7_reset")),
             "f": _f(fab.get("oi7_util")), "fr": _f(fab.get("oi7_reset")),
-            "st": d.get("s5_stat"), "wt": d.get("w7_stat"), "ft": fab.get("oi7_stat")}      # the API's own status per window: allowed, allowed_warning, rejected
+            "st": d.get("s5_stat"), "wt": d.get("w7_stat"), "ft": fab.get("oi7_stat"), **({"fts": fts} if fts else {})}      # the API's own status per window: allowed, allowed_warning, rejected; fts is the time of the read Fable came from
 
 
 def _read(path):
@@ -1256,6 +1256,8 @@ def build_provider(hist, pid, emails, now, extra):
                 w["stat"] = s[wid + "t"]            # a status read before the window reset says nothing about the new one
             if s.get(wid + "r") and now >= s[wid + "r"] > (s.get("ts") or 0):
                 w["assumed"] = True         # the reset passed and nothing has been read since: 0 is rolled forward, not measured
+            if wid == "f" and s.get("fts"):
+                w["readAt"] = int(s["fts"])         # Fable's own read time: it can be days older than the seat's readAt, which follows the session/weekly row
             a["windows"].append(w)
         a["ok"] = a["ok"] and bool(a["windows"])
         a["badges"] = [BADGE[k] for k, v in use.items() if v == label]
@@ -3983,6 +3985,9 @@ def selftest():
     # 6: the API status per window travels with the seat into the blob, and not past the window's reset
     sa = build([{"t": L, "s": {"A": {"w": 0.9, "wr": L + 10, "ts": L - 5, "wt": "allowed_warning", "st": "rejected", "ft": None}, "B": {"w": 0.3, "wr": L - 10, "ts": L - 99, "wt": "rejected"}}}], L, {}, False)["providers"][0]["accounts"]
     assert sa[0]["windows"][0]["stat"] == "allowed_warning" and "stat" not in sa[1]["windows"][0]
+    # a Fable value read days before the seat's session/weekly row carries its own readAt; a seat without fts (or the other windows) gets none
+    fa = build([{"t": L, "s": {"A": {"w": 0.9, "wr": L + 10, "ts": L - 5, "f": 0.2, "fr": L + 10, "fts": L - 5 * 86400}, "B": {"w": 0.3, "wr": L + 10, "ts": L - 5, "f": 0.1, "fr": L + 10}}}], L, {}, False)["providers"][0]["accounts"]
+    assert fa[0]["readAt"] == L - 5 and [w.get("readAt") for w in fa[0]["windows"]] == [None, L - 5 * 86400] and all("readAt" not in w for w in fa[1]["windows"]), fa
     keep_root, rd = ROOT, tempfile.mkdtemp()
     try:
         globals()["ROOT"] = rd
@@ -3992,10 +3997,12 @@ def selftest():
             json.dump({"ts": ts_, "data": dict(dd, ok=True, access="ok")}, open(os.path.join(rd, "A", fn), "w"))
         rs_ = read_seat("A")
         assert (rs_["st"], rs_["wt"], rs_["ft"], rs_["f"]) == ("allowed", "allowed_warning", "rejected", 0.2), rs_      # s/w from the newest read that measured them, Fable's from the one that carries it
+        assert rs_["ts"] == 100 and rs_["fts"] == 90, rs_             # Fable's own read time is its cache's (older than the Haiku one), not the seat's
         for fts_ in (110, 100):     # a newer (or same-second) headerless Fable error leaves the Haiku reading in place
             json.dump({"ts": fts_, "data": {"ok": True, "access": "ok", "http": 500, "note": "http 500: api_error: Overloaded"}}, open(os.path.join(rd, "A", "usage-cache-fable.json"), "w"))
             rs_ = read_seat("A")
             assert (rs_["ts"], rs_["s"], rs_["w"], rs_["st"]) == (100, .1, .5, "allowed"), rs_
+            assert rs_["f"] is None and "fts" not in rs_, rs_             # no Fable measurement at all: no Fable read time either
     finally:
         globals()["ROOT"] = keep_root
         __import__("shutil").rmtree(rd, ignore_errors=True)
