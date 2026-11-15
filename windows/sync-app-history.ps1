@@ -485,6 +485,7 @@ if (-not $flagSkip) {
           # temp file + replace: a run killed mid-write must not leave a truncated (unreadable) record
           ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath "$($r.file.FullName).sync-tmp" -Encoding UTF8 -NoNewline
           [System.IO.File]::Move("$($r.file.FullName).sync-tmp", $r.file.FullName, $true)
+          $r.file = Get-Item -LiteralPath $r.file.FullName   # our own write: the next flag compares with this, not with pass 1
           $flipped++; $next[$r.key] = $want
         } catch {
           Remove-Item -LiteralPath "$($r.file.FullName).sync-tmp" -Force -ErrorAction SilentlyContinue   # don't leave it in the app's index
