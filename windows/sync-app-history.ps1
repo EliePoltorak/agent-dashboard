@@ -314,7 +314,7 @@ foreach ($acct in $accts) {
     foreach ($f in Get-ChildItem -LiteralPath $sub.FullName -File -Filter '*.json') {
       $rawRec = $null; $j = $null
       try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json } catch { continue }
-      if ($j -isnot [pscustomobject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
+      if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
       if ($j.cwd -eq $Cwd) {
         $cnt++
@@ -648,14 +648,14 @@ if (-not $DryRun -and -not $flagSkip -and -not $appStarted) {
       $idx = $null
       if (Test-Path -LiteralPath $idxPath) {
         $idx = Get-Content -LiteralPath $idxPath -Raw | ConvertFrom-Json
-        if ($idx -isnot [pscustomobject] -or $null -eq $idx.PSObject.Properties['archived']) { Write-Warning "unexpected format in $idxPath; left as it is"; continue }
+        if ($null -eq $idx -or $idx -isnot [System.Management.Automation.PSCustomObject] -or $null -eq $idx.PSObject.Properties['archived']) { Write-Warning "unexpected format in $idxPath; left as it is"; continue }
       }
       $have = New-Object System.Collections.Generic.List[string]
       if ($idx) { foreach ($sid in @($idx.archived)) { if ($sid) { $have.Add([string]$sid) } } }
       $seen = @{}; $on = New-Object System.Collections.Generic.List[string]
       foreach ($f in Get-ChildItem -LiteralPath $dir.FullName -File -Filter 'local_*.json') {
         try { $j = Get-Content -LiteralPath $f.FullName -Raw | ConvertFrom-Json } catch { continue }
-        if ($j -isnot [pscustomobject] -or -not $j.sessionId) { continue }
+        if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject] -or -not $j.sessionId) { continue }
         $seen[[string]$j.sessionId] = $true
         if ([bool]$j.isArchived) { $on.Add([string]$j.sessionId) }
       }
