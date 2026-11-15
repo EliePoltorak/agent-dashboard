@@ -583,7 +583,7 @@ def selftest():
               and not any(n.endswith(".tmp-sync") for n in os.listdir(live)))
         # the lock belongs to the LIVE folder, not to --state: a pull given a DIFFERENT --state for the same live folder meets the same lock, stops, and writes nothing
         # (the staged .tmp-sync names are fixed per file in live, so two pulls that did not meet would delete each other's files mid-install)
-        state_b = os.path.join(root, "other-state.json")
+        state_b = os.path.join(root, "other-state-dir", "state.json")
         held_, go_ = threading.Event(), threading.Event()
         th_ = threading.Thread(target=holder_)
         th_.start()
