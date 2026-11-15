@@ -252,7 +252,7 @@ function Write-Record([string]$subDir, $file) {
   try { $null = $json | ConvertFrom-Json } catch { return $false }
   $path = Join-Path $subDir "$sid.json"
   Set-Content -LiteralPath $path -Value $json -Encoding UTF8 -NoNewline
-  $script:madeRecs.Add(@{ path = $path; isArchived = [bool]($fw -and $fw.isArchived); isStarred = [bool]($fw -and $fw.isStarred) })
+  $script:madeRecs.Add(@{ cli = $file.BaseName; path = $path; isArchived = [bool]($fw -and $fw.isArchived); isStarred = [bool]($fw -and $fw.isStarred) })
   return $true
 }
 
@@ -335,7 +335,8 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # So we remember every record's flags from the last run (.flag-state.json): a record whose flag
 # differs from that is the one you changed, and its value goes to every seat's record of the
 # session (true wins if two seats changed opposite ways). A record not seen last run counts as changed
-# only if it is on. If any record can't be written or read, the run does not save the state (below). First run, or a session no record was
+# only if it is on. A session with a record that can't be written keeps its last baseline; an unreadable record
+# stops the save (below). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
 # cliSessionId, whatever their cwd. The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
@@ -366,31 +367,39 @@ if ($appUp) {
 $flagNextAll = @{}
 $flagWant = @{}         # cliSessionId -> @{ isArchived; isStarred }: the resolved values, for records pass 2 creates
 $flagByCli = @{}
-# If any record can't be written, or a record known last run can't be read, the state is NOT saved this run.
-# The next run then compares with the last good baseline: the records we did write read as changed (to the
-# session's value) and the failed one as unchanged, so its stale value can't outvote the change. Saving a
-# partial baseline instead would let that stale value vote as "known" next run and undo the change.
+# If a session's record can't be written, that SESSION keeps last run's baseline (as if this run never
+# happened for it), and its new clones are left out. The next run then compares it with that baseline: the
+# records we did write read as changed (where they differ) and the failed one as unchanged, so its stale
+# value can't outvote the change. Saving the new values instead would let it vote as "known" and undo it.
+# A record known last run that can't be read can't be tied to a session, so then NO state is saved.
 $flagFail = $false
+$flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
+$flagPrevCi = @{}
 $seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 if (-not $flagSkip) {
   foreach ($kv in $bucketRecs.GetEnumerator()) {
     foreach ($r in $kv.Value) {
-      $cli = [string]$r.j.cliSessionId; if (-not $cli) { continue }
       $r.key = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
-      [void]$seenKeys.Add($r.key)
+      [void]$seenKeys.Add($r.key)        # read, even without a session id: not "unreadable"
+      $cli = [string]$r.j.cliSessionId; if (-not $cli) { continue }
       if (-not $flagByCli.ContainsKey($cli)) { $flagByCli[$cli] = New-Object System.Collections.Generic.List[object] }
       $flagByCli[$cli].Add($r)
     }
   }
   foreach ($flag in 'isArchived', 'isStarred') {
-    $prev = if ($flagPrevAll) { $flagPrevAll[$flag] } else { $null }
+    $prev = $null
+    if ($flagPrevAll) {   # keys are paths: compare them case-insensitively, like $seenKeys
+      $prev = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
+      foreach ($k in $flagPrevAll[$flag].Keys) { $prev[$k] = $flagPrevAll[$flag][$k] }
+    }
     # a record known last run that was not read this run but still exists (unreadable): don't save the state
     if ($prev) { foreach ($k in @($prev.Keys)) {
       if (-not $seenKeys.Contains($k) -and (Test-Path -LiteralPath (Join-Path $ccs $k))) {
-        if (-not $flagFail -and -not $DryRun) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state is not saved this run" }
+        if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run" }
         $flagFail = $true
       }
     } }
+    $flagPrevCi[$flag] = $prev           # for the save below
     $next = @{}; $flipped = 0
     foreach ($cli in @($flagByCli.Keys)) {
       $rs = $flagByCli[$cli]
@@ -412,7 +421,7 @@ if (-not $flagSkip) {
         if ($r.v -eq $want) { $next[$r.key] = $want; continue }
         if ($DryRun) { $flipped++; $next[$r.key] = $want; continue }
         # One unwritable record (locked, read-only, ...) must not abort the whole run ($ErrorActionPreference
-        # is Stop). Warn, and don't save the state this run, so the next run tries again from the last baseline.
+        # is Stop). Warn, and keep this session's last baseline, so the next run tries again from it.
         try {
           $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $r.key
           if (-not (Test-Path -LiteralPath $dest)) {
@@ -423,8 +432,8 @@ if (-not $flagSkip) {
           ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $r.file.FullName -Encoding UTF8 -NoNewline
           $flipped++; $next[$r.key] = $want
         } catch {
-          Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (the flag state is not saved this run; it is retried next run)"
-          $flagFail = $true
+          Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
+          [void]$flagFailCli.Add($cli)
         }
       }
       # clones made in pass 2 for seats lacking the session must carry the same flag
@@ -577,7 +586,7 @@ foreach ($acct in $accts) {
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
           $cpath = Join-Path $bestSub "$($cj.sessionId).json"
           ($cj | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $cpath -Encoding UTF8 -NoNewline
-          $madeRecs.Add(@{ path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
+          $madeRecs.Add(@{ cli = $m.BaseName; path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
           $cloned++
         } catch { if (Write-Record $bestSub $m) { $made++ } }
       }
@@ -591,9 +600,15 @@ foreach ($acct in $accts) {
 # with the flags they were written with -- else the next run reads them as brand-new and unions.
 if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
   foreach ($mr in $madeRecs) {
+    if ($flagFailCli.Contains([string]$mr.cli)) { continue }   # a failed session's clones stay out (see pass 1.4)
     $mk = $mr.path.Substring($ccs.Length).TrimStart('\')
     foreach ($flag in 'isArchived', 'isStarred') { $flagNextAll[$flag][$mk] = $mr[$flag] }
   }
+  # a session whose record could not be written keeps last run's baseline for all its records
+  foreach ($cli in $flagFailCli) { foreach ($r in $flagByCli[$cli]) { foreach ($flag in 'isArchived', 'isStarred') {
+    $p = $flagPrevCi[$flag]
+    if ($p -and $p.ContainsKey($r.key)) { $flagNextAll[$flag][$r.key] = [bool]$p[$r.key] } else { $flagNextAll[$flag].Remove($r.key) }
+  } } }
   $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
   # atomic: a crash mid-write must not leave a truncated file (which the next run would refuse to read)
   ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8

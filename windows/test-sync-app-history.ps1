@@ -3,8 +3,9 @@
   test-sync-app-history.ps1 -- scenario test for sync-app-history.ps1's pass 1.4: the isArchived / isStarred
   flags follow you across seats. (The sidebar pin LIST and groups are not synced -- see the script header.)
   Covers: first-run union (a planted disagreement, and again after the state folder is deleted); a record
-  not seen last run spreads only when it is on; a record whose write fails is retried without its stale value
-  spreading; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
+  not seen last run spreads only when it is on; a record whose write fails keeps its session's last baseline (the rest is saved), and an
+  unreadable record stops the save, so neither stale value spreads next run; a deleted record does not stop
+  the save; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
@@ -106,10 +107,10 @@ $stBefore = Get-Content $statePath -Raw
 Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $true; run                 # seat 1's record can't be written
 check 'failed write warns' ($out -match 'could not set isArchived')
 check 'failed write: the other seats are un-archived' (@(ofSession $G.Name | Where-Object { $_.f -ne $g1.f -and $_.arch }).Count -eq 0)
-check 'failed write: the state file is not saved' ((Get-Content $statePath -Raw) -eq $stBefore)
+$st = state; check 'failed write: the session keeps its last baseline' ($st['isArchived'][(key $g0.f)] -eq $true -and $st['isArchived'][(key $g1.f)] -eq $true)
 Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $false; run
 check 'retried: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
-check 'retried: the state file is saved again' ((Get-Content $statePath -Raw) -ne $stBefore)
+$st = state; check 'retried: the session baseline moves on' ($st['isArchived'][(key $g0.f)] -eq $false -and $st['isArchived'][(key $g1.f)] -eq $false)
 
 "--- a record that can't be read for a run: the state is not saved, so its stale ON value does not spread"
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
@@ -119,7 +120,16 @@ setRec $g0.f 'isArchived' $false; Set-Content -LiteralPath $g1.f 'not json' -NoN
 check 'unreadable record warns' ($out -match 'could not read')
 check 'unreadable record: the state file is not saved' ((Get-Content $statePath -Raw) -eq $stBefore)
 Set-Content -LiteralPath $g1.f $keep1 -NoNewline; run                                # seat 1 readable again, still archived
-check 'carried record: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+check 'readable again: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+
+"--- a record deleted between runs does not stop the save"
+$gd = @(ofSession $G.Name | Where-Object { $_.f -ne $g0.f -and $_.f -ne $g1.f })[0]
+if (-not $gd) { $gd = $g1 }
+$keepD = Get-Content -LiteralPath $gd.f -Raw; $kd = key $gd.f
+Remove-Item -LiteralPath $gd.f; run
+check 'deleted record: no read warning' ($out -notmatch 'could not read')
+check 'deleted record: dropped from the saved state' (-not (state)['isArchived'].ContainsKey($kd))
+Set-Content -LiteralPath $gd.f $keepD -NoNewline; run
 
 "--- corrupt state file: warn, change nothing, leave the file as is"
 $good = Get-Content $statePath -Raw
