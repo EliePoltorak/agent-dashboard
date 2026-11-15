@@ -172,16 +172,19 @@ def record(repo, live, ref, state, at=None):
 def roll_back(plan):
     """Put back every file of a pull's plan [(dest, backup or None)] that was swapped (its .tmp-sync is gone): a replaced one from its backup,
     which only exists once complete (written as .part, then renamed), an added one removed. A file not swapped is left as it is, so a backup
-    that died half-written never lands on an intact live file. Two passes, because the .tmp-sync files are the only record of which swaps happened and a
+    that died half-written never lands on an intact live file. A replaced file is restored atomically: the backup is copied to a sibling `.restore-sync` and
+    renamed over the live file, so a rollback killed mid-copy (restoring rotator-sync.py itself, say) leaves the live file whole (the old one or the restored
+    one, never a truncated one) and the next run can still recover. Two passes, because the .tmp-sync files are the only record of which swaps happened and a
     rollback killed part-way must leave that record whole: pass 1 reads it for EVERY file before it changes any, then restores (copying a backup again, or
     removing an already-removed added file, is harmless, so a second run finishes what a killed one began); pass 2, once all of them are restored, removes the
-    .tmp-sync and .part leftovers. -> (how many were put back, the paths that could not be)."""
+    .tmp-sync, .restore-sync and .part leftovers. -> (how many were put back, the paths that could not be)."""
     done, bad = 0, []
     swapped = [not os.path.exists(dest + ".tmp-sync") for dest, _ in plan]   # all decided before the first restore
     for (dest, bak), was_swapped in reversed(list(zip(plan, swapped))):
         try:
             if was_swapped and bak and os.path.exists(bak):
-                shutil.copy2(bak, dest)
+                shutil.copy2(bak, dest + ".restore-sync")
+                os.replace(dest + ".restore-sync", dest)
                 done += 1
             elif was_swapped and not bak and os.path.exists(dest):
                 os.remove(dest)
@@ -189,7 +192,7 @@ def roll_back(plan):
         except OSError:
             bad.append(dest)
     for dest, bak in plan:
-        for junk in (bak and bak + ".part", dest + ".tmp-sync"):   # .part first: the .tmp-sync is the record, so it goes last; an added file has no backup (bak None)
+        for junk in (bak and bak + ".part", dest + ".restore-sync", dest + ".tmp-sync"):   # .tmp-sync last: it is the record; an added file has no backup (bak None)
             if junk:
                 with contextlib.suppress(OSError):
                     os.remove(junk)
@@ -524,6 +527,34 @@ def selftest():
         got_ = roll_back([(os.path.join(rb, n), os.path.join(rb, n + ".bak-sync-X")) for n in ("p.py", "q.py")])
         check("an unswapped entry is left intact, its temps removed, and not counted",
               got_ == (0, []) and all(os.path.getsize(os.path.join(rb, n)) == 1000 for n in ("p.py", "q.py")) and sorted(os.listdir(rb)) == ["p.py", "q.py", "q.py.bak-sync-X"])
+        # a rollback killed mid-copy never leaves the live file truncated: the restore copies to a sibling and renames it over, so the next run can still recover
+        rr = os.path.join(root, "rr")
+        rdest, rbak = os.path.join(rr, "r.py"), os.path.join(rr, "r.py.bak-sync-X")
+        write(rdest, b"NEW" * 100)                     # swapped in (no .tmp-sync): to be restored from its backup
+        write(rbak, b"OLD" * 100)
+        real_copy2, killed_ = shutil.copy2, []
+
+        def dying_copy2(src, dst, *a, **k):
+            if not killed_ and os.path.abspath(dst).startswith(os.path.abspath(rdest)):   # the first write toward the live file (or its sibling) dies half-way
+                killed_.append(dst)
+                with open(dst, "wb") as fh:
+                    fh.write(b"OL")
+                raise KeyboardInterrupt
+            return real_copy2(src, dst, *a, **k)
+        shutil.copy2 = dying_copy2
+        try:
+            roll_back([(rdest, rbak)])
+        except KeyboardInterrupt:
+            pass
+        finally:
+            shutil.copy2 = real_copy2
+        check("a rollback killed mid-copy leaves the live file whole, not truncated", killed_ and open(rdest, "rb").read() == b"NEW" * 100)
+        got_ = roll_back([(rdest, rbak)])
+        check("a second rollback restores it and leaves no .restore-sync or .part behind",
+              got_ == (1, []) and open(rdest, "rb").read() == b"OLD" * 100 and sorted(os.listdir(rr)) == ["r.py", "r.py.bak-sync-X"])
+        write(rdest + ".restore-sync", b"stale")       # a leftover from a kill is removed by the next rollback
+        roll_back([(rdest, rbak)])
+        check("a .restore-sync leftover is removed by the next rollback", not os.path.exists(rdest + ".restore-sync"))
         import threading
         held_, go_ = threading.Event(), threading.Event()
 
