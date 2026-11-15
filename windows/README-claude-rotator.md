@@ -743,10 +743,12 @@ xAI and Gemini green below 85 %, yellow from 85 %, red and `capped` at 100 %. A 
 with `--account X --confirm`; unset, or with no such file, the button is not shown. The script is never killed (it copies refreshed credentials back as it ends): one still running after 90 s
 gets the answer "still applying", and every other action waits (409) until it exits (`Store.codex_reset`, selftest).
 The script mints a new claim on every run, so before it runs the seat is marked unconfirmed (`codex_pending` in the
-provider cache). A clear answer from the script (`redeemed`, `no_credit`) drops the mark; anything else (a crash,
-unreadable output, the script's own error) keeps it, and the seat shows "Last reset unconfirmed" with no Apply button
-(the server refuses it too). No reading lifts the mark, not even a lower banked count: a count can drop for another reason
-(a credit expiring, one used elsewhere) or before the claim lands. It stays until the user's `Clear`, which asks first
+provider cache). A clear answer from the script (`redeemed`, `no_credit`) drops the mark, except a `redeemed` one whose
+follow-up read failed: there is no new reading to show, so the mark becomes an "await" mark, the seat shows "Reset applied;
+waiting for a new reading" with no Apply button, and the first reading of that seat taken after the reset lifts it. Anything
+else (a crash, unreadable output, the script's own error) keeps the mark, and the seat shows "Last reset unconfirmed" with no
+Apply button (the server refuses it too). No reading lifts an unconfirmed mark, not even a lower banked count: a count can drop
+for another reason (a credit expiring, one used elsewhere) or before the claim lands. It stays until the user's `Clear`, which asks first
 (Cancel is the default) and then drops it (`POST /api/codex-reset-clear`, `Store.codex_reset_clear`); that is for after
 codex-usage shows the reset was not used. The reset column stays on show while any seat has a reset action or a pending
 state, even with nothing banked (selftest, `usage-sim.test.js`). Gemini is readable only while the Antigravity app is open (the `agy` CLI keeps its token to itself). Gemini's limits are

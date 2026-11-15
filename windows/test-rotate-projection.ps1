@@ -708,7 +708,7 @@ $lx = $resSrc.IndexOf('if ($IsLinux -or $IsMacOS) { Write-Host "`nsession resume
 Check 'resume script stops before delivery on Linux' (($lx -gt $resSrc.IndexOf('if ($DryRun)')) -and ($lx -lt $resSrc.IndexOf('if (-not $OwnWindowOnly) {')) -and ($lx -lt $resSrc.IndexOf("Join-Path `$here 'Inject-ConsoleInput.ps1'"))) "guard at $lx"
 
 # 12. the access-refusal fallback (usage unknown) goes through Select-RotationTarget and keeps its exclusions,
-#     the cached Fable rejection included. The real function, loaded from the script, over stub readers.
+#     a cached session, weekly or Fable cap still in force included. The real function, loaded from the script, over stub readers.
 $ast = [System.Management.Automation.Language.Parser]::ParseInput($src, [ref]$null, [ref]$null)
 $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Select-RotationTarget' }, $true)
 . ([scriptblock]::Create($fn.Extent.Text))

@@ -971,7 +971,7 @@ def sample(now, force=False):
     for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
         if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
             codex[label] = fresh
-    pend, cleared = settle_awaits(cache.get("codex_pending") or {}, codex)
+    cleared = settle_awaits(cache.get("codex_pending") or {}, codex)[1]
     if cleared:                         # lifted in a transaction of its own, by id: a mark cleared and replaced by a newer reset during the slow reads above is
         with pcache_txn() as c:         # not this one, and must stand (merging the removal back below would drop whatever sits under the seat's key)
             now_pend = c.get("codex_pending") or {}
@@ -3880,7 +3880,7 @@ def selftest():
             assert cst.codex_reset("A", "/x", fake)["outcome"] == "redeemed" and cst.refreshing.locked()
             cst.refreshing.release()
             # B: an unclear Codex answer keeps the seat marked (the script mints a new claim each run): no retry, and no reading lifts the mark;
-            # only the script's clear answer or the user's Clear does
+            # only the script's clear answer or the user's Clear does (an "await" mark, case D below, is the one a reading lifts)
             assert load_pcache().get("codex_pending") == {}
             cst.hist = [{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1, "banked": 3}}}]
             seen_ = []
