@@ -58,6 +58,7 @@ DAY = 86400
 WINDOWS = (1, 3, 6, 24)     # hours of history a burn rate is measured over
 BUCKET = 900                # hist is thinned to one point per 15 minutes
 DRIFT_EVERY = 6 * 3600      # rotator-sync --check runs at most this often
+CARRY_MAX = 3600            # a failed read keeps a seat's last good reading in the graph, burn and profile only this long after it was read (carry_good)
 PY = ["py", "-3"]
 IDLE_PRIORITY_CLASS = 0x40
 CHILD_FLAGS = 0x08000000 | IDLE_PRIORITY_CLASS if os.name == "nt" else 0     # every child: no console window, Idle CPU priority
@@ -1206,11 +1207,13 @@ def carry_good(hist, pid):
     """`hist` with each failed read of provider `pid` replaced by that seat's last good reading before it (latest_of's rule: not ok:false, has a ts; the reading keeps its own
     ts and resets, so util_at still zeroes a window past its reset). A failed read carries no window values, so left as it is the seat drops out of the pool for that record and
     _step loses its use across both adjacent steps; the headline (latest_of) already carries it, and the graph, burn and profile must agree with it. Shallow copies of the
-    records that change; the stored history is not touched; a failed read with no good one before it stays as it is."""
+    records that change; the stored history is not touched; a failed read with no good one before it stays as it is. Only within CARRY_MAX of that good reading: across a longer
+    outage the carried copy would show no use until recovery, and the whole outage's use would then land in one short step, spiking the burn and slipping past hour_profile's
+    gap guard. Past it the failed read stays as it is, so that use is left unplaced, as before."""
     key, last, out = "s" if pid == "claude" else pid, {}, []
     for h in hist:
         seats = seats_of(h, pid)
-        fill = {label: last[label] for label, s in seats.items() if s.get("ok") is False and label in last}
+        fill = {label: last[label] for label, s in seats.items() if s.get("ok") is False and label in last and h["t"] - last[label]["ts"] <= CARRY_MAX}
         for label, s in seats.items():
             if s.get("ok") is not False and s.get("ts"):
                 last[label] = s
@@ -3002,6 +3005,11 @@ def selftest():
     fl = build(fh, T + 7200, {}, False)["providers"][0]["limits"][0]
     assert [x[1] for x in fl["hist"]] == [100.0, 100.0, 90.0] and fl["now"] == 90.0, fl["hist"]          # the middle point equals its neighbours (not 50)
     assert abs(fl["burn"]["3"] - 5) < 1e-9, fl["burn"]                       # B's 10 % over 2 h survives the failed read between its two good ones
+    # past CARRY_MAX the failed read is not carried: a 48 h outage's use must not land in the one step after recovery (it would read as a 16 %/h 3 h burn)
+    lo_ = [{"t": T + i * 300, "s": {"A": gs(T + i * 300, 0.1)}} for i in range(144)] + [{"t": T + 43200 + i * 300, "s": {"A": {"ok": False, "note": "x"}}} for i in range(576)]         + [{"t": T + 216000 + i * 300, "s": {"A": gs(T + 216000 + i * 300, 0.6)}} for i in range(6)]
+    clo_ = carry_good(lo_, "claude")
+    assert clo_[144]["s"]["A"]["w"] == 0.1 and clo_[160] is lo_[160], clo_[160]          # carried within the hour, not after it
+    assert (burn(clo_, "w", 3, lo_[-1]["t"]) or 0) < 1, burn(clo_, "w", 3, lo_[-1]["t"])
 
     # banked resets: a cache with credits (sorted, those without an expiry left out), one without, a count above the list, an expired credit
     c = {"fetchedAt": 1793592327005, "primary": {"usedPercent": 13, "windowDurationMins": 10080, "resetsAt": 1794124925}, "secondary": None,
