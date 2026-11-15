@@ -334,7 +334,8 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # isArchived and isStarred (the record's pin flag) live in each seat's own record, with no time of change.
 # So we remember every record's flags from the last run (.flag-state.json): a record whose flag
 # differs from that is the one you changed, and its value goes to every seat's record of the
-# session (true wins if two seats changed opposite ways). First run, or a session no record was
+# session (true wins if two seats changed opposite ways). A record not seen last run counts as changed
+# only if it is on; one owed a retried write does not vote (both below). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
 # cliSessionId, whatever their cwd. The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
@@ -369,7 +370,7 @@ $flagByCli = @{}
 # Records whose flag we owe a write: last run could not write them, or could not read them. They are set to
 # the session's value but never vote, so their stale value can't pass for a change (or for an unseen ON one).
 $flagRetryNext = @{ isArchived = @{}; isStarred = @{} }
-$seenKeys = New-Object System.Collections.Generic.HashSet[string]
+$seenKeys = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 if (-not $flagSkip) {
   foreach ($kv in $bucketRecs.GetEnumerator()) {
     foreach ($r in $kv.Value) {
@@ -400,9 +401,18 @@ if (-not $flagSkip) {
         # app creates starts off, so counting it would un-archive/unpin the session everywhere.
         elseif ($prev -and $r.v) { $changed += $r }
       }
+      $voters = @($rs | Where-Object { -not $retry.ContainsKey($_.key) })
+      if (-not $changed.Count -and -not $known.Count -and -not $voters.Count -and $rs.Count -gt 1) {
+        # Every record of this session is owed a retry, so none can vote: a union of their stale values could
+        # undo a change. Leave the session alone and keep them on the list. (Deleting the state file re-baselines.)
+        foreach ($r in $rs) { $flagRetryNext[$flag][$r.key] = $true }
+        Write-Warning "$flag not synced for session $cli this run: none of its records could be read or written last time"
+        continue
+      }
       $want = if ($changed.Count) { [bool]($changed | Where-Object { $_.v }) }
               elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
-              else { [bool]($rs | Where-Object { $_.v }) }
+              elseif ($voters.Count) { [bool]($voters | Where-Object { $_.v }) }
+              else { [bool]($rs | Where-Object { $_.v }) }   # a lone record owed a retry: its own value
       if (-not $flagWant.ContainsKey($cli)) { $flagWant[$cli] = @{ isArchived = $false; isStarred = $false } }
       $flagWant[$cli][$flag] = $want
       foreach ($r in $rs) {
