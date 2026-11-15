@@ -71,7 +71,8 @@
   - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
     changed records are backed up to ~/.claude-app-seats\.flag-sync-backups\<ts>\ (newest 10 kept).
     Sidebar groups and the pin list are not synced (claude-rotator issue #10).
-  - One run at a time: a second run while ~/.claude-app-seats\.sync-history.lock is held skips.
+  - One run at a time (~/.claude-app-seats\.sync-history.lock): an interactive run waits up to 3 min for it;
+    -Quiet (the scheduled task) skips at once. The flag step runs only when -Cwd has transcripts.
   - Classification is cached in ~/.claude-app-seats\.sync-classify-cache.json keyed by file
     size+mtime, so repeated runs don't re-read every transcript.
 #>
@@ -324,11 +325,12 @@ if (-not $Quiet) {
 function Test-AppUp {
   if ($AssumeAppRunning) { return $true }
   if ($AssumeAppClosed) { return $false }   # only ever passed by the test, for its sandbox; otherwise always check
-  # A process named like the app whose path can't be read counts as the app (fail closed). The CLI's claude.exe
-  # has a readable path, so it is matched by path only and never counted here.
-  return @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
+  # Fail closed: every process named claude counts as the app UNLESS its path is a known Claude Code CLI location.
+  # So a new install layout, or a path that can't be read (e.g. an elevated CLI), skips the flag step rather than
+  # writing under a running app.
+  return @(Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object {
     $pp = $null; try { $pp = $_.Path } catch { }
-    if (-not $pp) { $_.ProcessName -eq 'claude' } else { $pp -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $pp -like '*\AnthropicClaude\*\claude.exe' }
+    -not ($pp -and ($pp -like '*\.local\bin\claude.exe' -or $pp -like '*\Claude\claude-code\*\claude.exe'))
   }).Count -gt 0
 }
 $appUp = Test-AppUp
@@ -346,7 +348,7 @@ foreach ($acct in $accts) {
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($f in Get-ChildItem -LiteralPath $sub.FullName -File -Filter '*.json') {
       $rawRec = $null; $j = $null
-      try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json } catch { continue }
+      try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { continue }
       if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
       if ($j.cwd -eq $Cwd) {
@@ -471,6 +473,9 @@ if (-not $flagSkip) {
         # One unwritable record (locked, read-only, ...) must not abort the whole run ($ErrorActionPreference
         # is Stop). Warn, and keep this session's last baseline, so the next run tries again from it.
         try {
+          # pass 1 read this a while ago; if the file changed since, don't write our older copy over it
+          $now = Get-Item -LiteralPath $r.file.FullName
+          if ($now.LastWriteTimeUtc -ne $r.file.LastWriteTimeUtc -or $now.Length -ne $r.file.Length) { throw 'it changed since it was read' }
           $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $r.key
           if (-not (Test-Path -LiteralPath $dest)) {
             New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
@@ -631,7 +636,7 @@ foreach ($acct in $accts) {
       if ($DryRun) { $cloned++ }
       else {
         try {
-          $cj = $src.raw | ConvertFrom-Json
+          $cj = $src.raw | ConvertFrom-Json -DateKind String
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }

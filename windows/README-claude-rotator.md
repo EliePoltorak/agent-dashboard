@@ -591,7 +591,7 @@ assume data loss. Full record:
 
 ## Desktop-app install flavour (MSIX vs Squirrel) — why path matching is doubled
 
-The desktop app ships in two packaging formats, and **three scripts detect the app by
+The desktop app ships in two packaging formats, and **five scripts detect the app by
 executable path**, so the format matters to them:
 
 | | MSIX (packaged) | Squirrel (plain install) |
@@ -608,7 +608,7 @@ launch again. That is what made "the app won't open until I completely reinstall
 weeks. The machine now runs the Squirrel build only; **Workspace/Cowork is unavailable**
 until an `.msix` is obtained direct from Anthropic.
 
-Consequently these four now match **both** paths, so they keep working on either machine
+Consequently these five now match **both** paths, so they keep working on either machine
 (the other machine may still have the MSIX):
 
 - `rotator-functions.ps1` → `claude-kill` — *spares* the app; without the `AnthropicClaude`
@@ -622,6 +622,10 @@ Consequently these four now match **both** paths, so they keep working on either
 - `claude-resume-sessions.ps1` — *excludes* the app from the interactive sessions it resumes.
   The app's main process carries no `--type=` switch, so with only the `WindowsApps` test it
   passed every other filter and would have been killed and "resumed" as if it were a CLI TUI.
+- `sync-app-history.ps1` → `Test-AppUp` — the opposite way round: every `claude` process counts as the app
+  unless it is at a known Claude Code CLI location (`~\.local\bin`, `%APPDATA%\Claude\claude-code\*`), so an
+  unfamiliar install path skips the archive/pin sync instead of writing under a running app. Update the CLI
+  locations there if the CLI moves.
 
 
 ## Notes
