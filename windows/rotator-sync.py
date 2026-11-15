@@ -254,11 +254,18 @@ def say_recovered(res):
         sys.stderr.write("rotator-sync: recovered an interrupted update: %d file(s) put back%s\n" % (done, "; restore by hand: " + ", ".join(bad) if bad else ""))
 
 
-def recover(state):
-    """A --pull that died mid-swap left its journal (<state>.pull-journal.json): put every file back and say so. Skipped while a pull holds
+def journal_path(live):
+    """A pull's journal, and (with ".lock" appended) its lock, live in the LIVE folder: that folder is what the transaction protects, and the staged
+    .tmp-sync names are fixed per file in it, so every pull and --check on one folder must meet at one lock whatever --state each was given.
+    `compare` only looks at files the repo has, so these never show as drift."""
+    return os.path.join(live, ".rotator-sync.pull-journal.json")
+
+
+def recover(live):
+    """A --pull that died mid-swap left its journal (journal_path(live), in the live folder): put every file back and say so. Skipped while a pull holds
     the journal's lock, so a --check never undoes a pull that is still running. (--pull itself holds that lock for its whole run and calls
     roll_back_journal directly: the lock is not re-entrant, a second handle on it would always be refused.)"""
-    jpath = state + ".pull-journal.json"
+    jpath = journal_path(live)
     if not os.path.exists(jpath):
         return
     try:
@@ -270,7 +277,7 @@ def recover(state):
 
 
 def cmd_check(repo, live, ref, state, quiet):
-    recover(state)
+    recover(live)
     maybe_fetch(repo, ref, state)
     differing, missing, sha = record(repo, live, ref, state)
     if not quiet:
@@ -288,8 +295,9 @@ def cmd_check(repo, live, ref, state, quiet):
 def cmd_pull(repo, live, ref, state):
     # ONE lock spans the whole pull -- recovery, fetch, staging, swap, cleanup -- and is taken without waiting. The staged copies have fixed
     # <dest>.tmp-sync names, so a second pull that staged before it learned of the first would overwrite, then delete, the first one's files
-    # mid-install. A second pull therefore stops here, before it has written anything.
-    jpath = state + ".pull-journal.json"
+    # mid-install. A second pull therefore stops here, before it has written anything. The lock is the live folder's (journal_path), not the --state's:
+    # two pulls on one folder with different --state files must still meet at it.
+    jpath = journal_path(live)
     lock = state_lock(jpath, wait=0)
     try:
         lock.__enter__()
@@ -502,7 +510,7 @@ def selftest():
             pass
         finally:
             os.replace = real_replace
-        check("a killed pull leaves its journal and a half-applied live", os.path.exists(state + ".pull-journal.json") and os.path.exists(os.path.join(live, "missing.txt")))
+        check("a killed pull leaves its journal and a half-applied live", os.path.exists(journal_path(live)) and os.path.exists(os.path.join(live, "missing.txt")))
         # a backup that died half-written never lands on an intact live file: only a swapped entry (no .tmp-sync left) is put back
         rb = os.path.join(root, "rb")
         os.makedirs(rb)
@@ -520,23 +528,23 @@ def selftest():
         held_, go_ = threading.Event(), threading.Event()
 
         def holder_():
-            with state_lock(state + ".pull-journal.json"):
+            with state_lock(journal_path(live)):
                 held_.set()
                 go_.wait(5)
         th_ = threading.Thread(target=holder_)
         th_.start()
         held_.wait(5)
-        recover(state)
+        recover(live)
         go_.set()
         th_.join()
-        check("a running pull's journal is left alone", os.path.exists(state + ".pull-journal.json"))
+        check("a running pull's journal is left alone", os.path.exists(journal_path(live)))
         cmd_check(repo, live, "HEAD", state, True)
-        check("the next --check rolls the interrupted update back", not os.path.exists(state + ".pull-journal.json")
+        check("the next --check rolls the interrupted update back", not os.path.exists(journal_path(live))
               and {n: open(os.path.join(live, n), "rb").read() for n in before_} == before_ and not os.path.exists(os.path.join(live, "missing.txt"))
               and not any(n.endswith(".tmp-sync") for n in os.listdir(live)))
         # a journal that vanishes as recovery takes the lock (its pull just finished) is no error; a pull that cannot get the journal's lock
         # (another pull) stops with nothing changed and its staged copies removed
-        real_lock, jp_ = state_lock, state + ".pull-journal.json"
+        real_lock, jp_ = state_lock, journal_path(live)
         write_state(jp_, {"files": []})
 
         @contextlib.contextmanager
@@ -547,7 +555,7 @@ def selftest():
                 yield
         globals()["state_lock"] = vanishing
         try:
-            recover(state)
+            recover(live)
             ok_ = True
         except Exception:
             ok_ = False
@@ -573,6 +581,25 @@ def selftest():
         os.remove(os.path.join(live, "b.py.tmp-sync"))
         check("a pull blocked by another pull changes nothing and leaves no temp", rc_ == 1 and open(os.path.join(live, "b.py"), "rb").read() == b"print(5)\n"
               and not any(n.endswith(".tmp-sync") for n in os.listdir(live)))
+        # the lock belongs to the LIVE folder, not to --state: a pull given a DIFFERENT --state for the same live folder meets the same lock, stops, and writes nothing
+        # (the staged .tmp-sync names are fixed per file in live, so two pulls that did not meet would delete each other's files mid-install)
+        state_b = os.path.join(root, "other-state.json")
+        held_, go_ = threading.Event(), threading.Event()
+        th_ = threading.Thread(target=holder_)
+        th_.start()
+        held_.wait(5)
+        write(os.path.join(live, "b.py.tmp-sync"), b"the first pull's staged copy")
+        err_b = io.StringIO()
+        try:
+            with contextlib.redirect_stderr(err_b):
+                rc_b = cmd_pull(repo, live, "HEAD", state_b)
+        finally:
+            go_.set()
+            th_.join()
+        check("a pull on the same live folder under a different --state stops on the running pull's lock and writes nothing",
+              rc_b == 1 and "another update is running" in err_b.getvalue() and not os.path.exists(state_b)
+              and open(os.path.join(live, "b.py.tmp-sync"), "rb").read() == b"the first pull's staged copy" and open(os.path.join(live, "b.py"), "rb").read() == b"print(5)\n")
+        os.remove(os.path.join(live, "b.py.tmp-sync"))
         # an unreadable journal is neither treated as finished nor rolled back: it is left, and a --pull stops on it
         with open(jp_, "wb") as fh_:
             fh_.write(b"")
@@ -628,15 +655,15 @@ def selftest():
         check("... and the warning ends with what happens to the journal", buf.getvalue().rstrip().endswith("the next --check deletes it, since no swap is left to undo")
               and os.path.exists(jp_) and load_json(jp_).get("files") and not any(n.endswith(".tmp-sync") for n in os.listdir(live)))
         write(os.path.join(live, "b.py"), b"the user edited this after the pull\n")       # so "is the file still the new content?" is the wrong question
-        live_before_ = {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n))}
+        live_before_ = {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n)) and not n.startswith(".rotator-sync.pull-journal")}
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            recover(state)
+            recover(live)
         check("the next --check deletes that journal, restores nothing and keeps the user's edit", not os.path.exists(jp_) and buf.getvalue() == ""
-              and {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n))} == live_before_)
+              and {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n)) and not n.startswith(".rotator-sync.pull-journal")} == live_before_)
         # a journal that recovery cannot delete stops the next --pull before it stages anything (a new journal would be written over it)
         write_state(jp_, {"files": [[os.path.join(live, "b.py"), None]]})
-        live_before_ = {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n))}
+        live_before_ = {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n)) and not n.startswith(".rotator-sync.pull-journal")}
         os.remove, os.replace = stuck_remove, real_replace2
         buf = io.StringIO()
         try:
@@ -646,7 +673,7 @@ def selftest():
             os.remove = real_remove
         check("a --pull whose old journal cannot be deleted stops before staging, names the journal, and exits 1",
               rc_j == 1 and jp_ in buf.getvalue() and "delete it by hand" in buf.getvalue() and os.path.exists(jp_)
-              and {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n))} == live_before_)
+              and {n: open(os.path.join(live, n), "rb").read() for n in os.listdir(live) if os.path.isfile(os.path.join(live, n)) and not n.startswith(".rotator-sync.pull-journal")} == live_before_)
         os.remove(jp_)
         # a planned file still staged means that swap did not happen: rolled back (a journal an older version wrote, which also recorded hashes, is judged the same way)
         write_state(jp_, {"files": [[os.path.join(live, "stale-added.txt"), None], [os.path.join(live, "pending.txt"), None]]})
@@ -654,8 +681,17 @@ def selftest():
         write(os.path.join(live, "pending.txt.tmp-sync"), b"staged\n")
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            recover(state)
+            recover(live)
         check("... while a journal with a planned file still staged is rolled back", not os.path.exists(jp_) and not os.path.exists(os.path.join(live, "stale-added.txt"))
+              and not os.path.exists(os.path.join(live, "pending.txt.tmp-sync")) and "recovered an interrupted update" in buf.getvalue())
+        # a --check given a DIFFERENT --state than the killed pull's (the dashboard's check uses its QUOTA_STATE_DIR one) still finds and rolls back the live folder's journal
+        write_state(jp_, {"files": [[os.path.join(live, "stale-added.txt"), None], [os.path.join(live, "pending.txt"), None]]})
+        write(os.path.join(live, "stale-added.txt"), b"x\n")
+        write(os.path.join(live, "pending.txt.tmp-sync"), b"staged\n")
+        buf = io.StringIO()
+        with contextlib.redirect_stderr(buf), contextlib.redirect_stdout(io.StringIO()):
+            cmd_check(repo, live, "HEAD", os.path.join(root, "dashboard-state", "state.json"), True)
+        check("a --check under a different --state rolls back a killed pull's journal", not os.path.exists(jp_) and not os.path.exists(os.path.join(live, "stale-added.txt"))
               and not os.path.exists(os.path.join(live, "pending.txt.tmp-sync")) and "recovered an interrupted update" in buf.getvalue())
         # a pull killed before its first swap: every planned file is still staged, so none is touched and the temps and journal go
         write(os.path.join(live, "b.py"), b"print(7)\n")
@@ -677,7 +713,7 @@ def selftest():
               and sum(n.endswith(".tmp-sync") for n in os.listdir(live)) >= 1 and open(os.path.join(live, "b.py"), "rb").read() == b"print(7)\n")
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            recover(state)
+            recover(live)
         check("... and recovery rolls it back: the live file is untouched, temps and journal gone",
               not os.path.exists(jp_) and open(os.path.join(live, "b.py"), "rb").read() == b"print(7)\n" and not any(n.endswith(".tmp-sync") for n in os.listdir(live)))
         for n in os.listdir(live):
@@ -686,7 +722,7 @@ def selftest():
         # a recovery killed part-way through its own rollback: the .tmp-sync files are the record of which swaps happened, so they must outlive the restores
         kr = os.path.join(root, "killed-rollback")
         st_k = os.path.join(kr, "state.json")
-        jp_k = st_k + ".pull-journal.json"
+        jp_k = journal_path(kr)
         k_files = [os.path.join(kr, n) for n in ("f1.py", "f2.py", "f3.py")]
         k_plan = []
         for f_ in k_files:
@@ -706,7 +742,7 @@ def selftest():
             return real_copy(src, dst, *a, **kw)
         shutil.copy2 = killing_copy
         try:
-            recover(st_k)
+            recover(kr)
         except KeyboardInterrupt:
             pass
         finally:
@@ -715,7 +751,7 @@ def selftest():
               and any(os.path.exists(f_ + ".tmp-sync") for f_ in k_files) and not update_finished(load_json(jp_k)))
         buf = io.StringIO()
         with contextlib.redirect_stderr(buf):
-            recover(st_k)
+            recover(kr)
         check("... and the next recovery finishes it: every file OLD, no temps, journal gone",
               not os.path.exists(jp_k) and all(open(f_, "rb").read() == b"OLD" for f_ in k_files)
               and not any(".tmp-sync" in n or n.endswith(".part") for n in os.listdir(kr)))

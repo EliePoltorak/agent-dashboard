@@ -2372,7 +2372,7 @@ class Store:
                 self.hist = _read_hist()[0] if stale else sorted(self.hist + new, key=lambda h: h["t"])
 
     def drift_check(self, now, here=None, py=None):
-        """rotator-sync.py --check --quiet at most every DRIFT_EVERY, when the script sits next to this one. It writes .rotator-drift.json under STATE (--state, so QUOTA_STATE_DIR redirects it with everything else; its update journal sits beside it); its exit code and output are ignored."""
+        """rotator-sync.py --check --quiet at most every DRIFT_EVERY, when the script sits next to this one. It writes .rotator-drift.json under STATE (--state, so QUOTA_STATE_DIR redirects it with everything else; the update journal belongs to the live folder, not to STATE); its exit code and output are ignored."""
         script = os.path.join(here or HERE, "rotator-sync.py")
         with self.lock, pcache_txn() as cache:
             if not os.path.isfile(script) or now - (cache.get("drift_run") or 0) < DRIFT_EVERY:
