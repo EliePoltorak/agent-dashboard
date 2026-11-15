@@ -36,7 +36,7 @@ $global:ClaudeRotatorProbeOverride = {
   if ($Model -eq 'haiku') { $script:probes[$Label]++ }
   $plan = $script:plan[$Label]
   if (-not $plan) { $plan = 'ok' }
-  if ($Model -eq 'fable') {
+  if ($Model -eq 'fable' -and $plan -notin @('network','http401')) {     # a seat the network or its token fails fails both probes, as Probe-Usage does
     if ($plan -eq 'fable-500') {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
     }
@@ -404,6 +404,30 @@ foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'http401' }
 $rc = Invoke-CheckRotate 0 $false $true 'test'
 Check 'every other seat a 401: no fallback, stays on B' ((Get-ActiveLabel) -eq 'B') (Get-ActiveLabel)
 Check 'every other seat a 401: not exit 0' ($rc -eq 3) "rc=$rc"
+
+# --- a cached Fable cap outlives the cache TTL: the fallback honours it until the cap's own reset ---
+function Write-FableCache([string]$l, [int64]$age, $reset) {
+  $now = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  @{ ts = $now - $age; data = @{ label = $l; ok = $true; access = 'ok'; http = 200; oi7_util = 1.0; oi7_stat = 'rejected'; oi7_reset = $reset } } |
+    ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root $l) 'usage-cache-fable.json') -Encoding UTF8
+}
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+Reset-Case
+Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS + 3 * 86400))
+Check 'a Fable cap read past the TTL still counts until its reset' (Test-FableCapCached 'A')
+Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS - 60))
+Check 'a Fable cap whose reset has passed no longer counts' (-not (Test-FableCapCached 'A'))
+Write-FableCache 'A' 10 $null
+Check 'a Fable cap with no reset counts' (Test-FableCapCached 'A')
+Check 'no Fable cache: no cap' (-not (Test-FableCapCached 'C'))
+Reset-Case
+Clear-AppIdentity
+Set-Active 'B'
+$script:plan['B'] = 'disabled'
+foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'network' }
+Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS + 3 * 86400))
+$rc = Invoke-CheckRotate 0 $false $true 'test'
+Check 'fallback passes over a seat whose stale Fable cap is still in force (C)' ((Get-ActiveLabel) -eq 'C') (Get-ActiveLabel)
 
 # --- quota 429 is not an access refusal ---
 Reset-Case

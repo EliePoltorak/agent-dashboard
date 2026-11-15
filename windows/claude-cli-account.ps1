@@ -1078,6 +1078,20 @@ function Invoke-EnsureCliSeat {
   return (Invoke-CheckRotate 0 $false $true 'ensure')
 }
 
+# Does this seat's cached Fable reading say its weekly Fable window is capped, with the cap still in force? Reads the cache file
+# whatever its age: the cache TTL is how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until
+# its own reset (oi7_reset, epoch seconds); with that reset missing or unreadable, until a newer reading replaces the file. Never probes.
+function Test-FableCapCached {
+  param([string]$Label)
+  $cf = Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'
+  if (-not (Test-Path -LiteralPath $cf)) { return $false }
+  try { $d = (Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json).data } catch { return $false }
+  if (-not $d -or -not $d.ok -or $d.oi7_stat -ne 'rejected') { return $false }
+  $reset = [int64]0
+  if (-not [int64]::TryParse([string]$d.oi7_reset, [ref]$reset) -or $reset -le 0) { return $true }
+  return ($reset -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+}
+
 # Rank on the HAIKU probe only — ~1s for every account at once. Probing fable for all five up
 # front is what put 2m14s between "TRIGGER" and "ROTATED" in the 2026-08-16 03:06 log entry: long
 # enough to look broken, and long enough to burn several more points at ~2%/min. Fable is only
@@ -1087,15 +1101,15 @@ function Select-RotationTarget {
   if ($PSBoundParameters.ContainsKey('UnknownExcept')) {
     # The access-refusal fallback: usage unknown (network), so no session bar, but every other exclusion
     # still holds - the active seat, the desktop-app seat, a seat marked disabled, and a seat whose cached
-    # Fable reading says rejected (cache only: the network is what failed, so no probe). Only a seat whose probe failed on the
+    # Fable reading says rejected until that cap's own reset, however old the reading (cache only: the network is what failed,
+    # so no probe; see Test-FableCapCached). Only a seat whose probe failed on the
     # network qualifies: a 401 (dead token), a 5xx, or a missing token is a seat the CLI cannot use, not an unknown one.
     $appSeat = Get-AppSeatLabel
     $unknown = @(Rank-Accounts $false $false | Where-Object {
       $_.access -eq 'unknown' -and $_.net -and $_.label -ne $UnknownExcept -and -not ($appSeat -and ($_.label -ieq $appSeat)) -and -not (Read-AccessDisabled $_.label)
     } | Sort-Object label)
     foreach ($c in $unknown) {
-      $fu = Get-UsageCached $c.label $false 'fable' '-fable' $true
-      if ($fu.ok -and $fu.oi7_stat -eq 'rejected') { continue }       # Gate C needs Fable
+      if (Test-FableCapCached $c.label) { continue }                  # Gate C needs Fable
       return [pscustomobject]@{ label = $c.label; s5 = 0; w7 = 0; fable = $null; usageUnknown = $true }
     }
     return $null
