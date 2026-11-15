@@ -308,6 +308,18 @@ def _newer(c, old):
     return old is None or (_f(c.get("fetchedAt")) or 0) > (_f(old.get("fetchedAt")) or 0)
 
 
+def codex_homes_gone(cdir=None):
+    """True when there is provably no saved Codex home: the homes folder is missing, or lists with no folder in it. A folder that cannot be listed
+    (locked by a sync or a scanner for a moment) is not proof, so False: glob() swallows that error and would otherwise read as "every home removed"."""
+    homes = os.path.join(cdir or os.path.join(HOME, ".codex"), "homes")
+    try:
+        return not any(os.path.isdir(os.path.join(homes, e)) for e in os.listdir(homes))
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+
+
 def read_codex(cdir=None, sink=None):
     """({label: seat}, {label: email}) from the local caches only; never runs node or the network.
     `sink`, when given, collects (label, cache) for every cache that got a label, the older ones too.
@@ -1022,7 +1034,8 @@ def sample(now, force=False):
         if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
             codex[label] = fresh
     lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
-    rec["codex"] = codex        # recorded even when empty: once the last saved home is removed, that empty snapshot must win in latest_of over the older seats
+    if codex or codex_homes_gone():     # recorded even when empty once the last saved home is removed: that snapshot must win in latest_of over the older seats
+        rec["codex"] = codex
     if codex:
         cache.setdefault("emails", {})["codex"] = cemails
     try:
@@ -4094,14 +4107,34 @@ def selftest():
             def boom_(*a_, **k_):
                 raise RuntimeError("boom")
             try:
-                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini=boom_)
+                keep_gone0_ = codex_homes_gone
+                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini=boom_,
+                                 codex_homes_gone=lambda *a_: True)
                 rs_ = sample(time.time(), True)
             finally:
-                globals().update(stub)
+                globals().update(stub, codex_homes_gone=keep_gone0_)
             assert rs_["s"] == {"X": {"ts": 1, "w": 0.1}} and rs_["grok"]["grok"] == {"ok": False, "note": "Grok usage unavailable (RuntimeError)"}, rs_
             # no Codex home left: the sample records an empty Codex snapshot, and latest_of takes it over the older seats (the removed accounts leave the page)
             assert rs_["codex"] == {}, rs_
             assert seats_of(latest_of([{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1}}}, rs_], "codex"), "codex") == {}
+            # an empty read is recorded only when no home provably exists: a homes folder that cannot be listed for a moment records nothing
+            hd_ = os.path.join(tempfile.mkdtemp(), ".codex")
+            assert codex_homes_gone(hd_)                                                   # no homes folder at all
+            os.makedirs(os.path.join(hd_, "homes"))
+            assert codex_homes_gone(hd_)                                                   # an empty one
+            os.makedirs(os.path.join(hd_, "homes", "A"))
+            assert not codex_homes_gone(hd_)                                               # a home left
+            shutil.rmtree(os.path.join(hd_, "homes"))
+            open(os.path.join(hd_, "homes"), "w").close()                                  # listing fails (here: not a folder): not proof of removal
+            assert not codex_homes_gone(hd_)
+            shutil.rmtree(os.path.dirname(hd_))
+            keep_gone_ = codex_homes_gone
+            try:
+                globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
+                                 read_gemini=lambda now_: (None, "x"), codex_homes_gone=lambda *a_: False)
+                assert "codex" not in sample(time.time(), True)
+            finally:
+                globals().update(stub, codex_homes_gone=keep_gone_)
             # and the session-log import does not carry the removed seat past that empty snapshot
             ev_ = [(rs_["t"] + 600, "B", {"w": (0.2, rs_["t"] + 9999, 10080)})]
             rr_ = rollout_records(ev_, set(), False, [{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1}}}, rs_])
