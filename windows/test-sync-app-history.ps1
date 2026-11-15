@@ -3,7 +3,8 @@
   test-sync-app-history.ps1 -- scenario test for sync-app-history.ps1's pass 1.4: the isArchived / isStarred
   flags follow you across seats. (The sidebar pin LIST and groups are not synced -- see the script header.)
   Covers: first-run union (a planted disagreement, and again after the state folder is deleted); a record
-  not seen last run spreads only when it is on; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
+  not seen last run spreads only when it is on; a record whose write fails is retried without its stale value
+  spreading; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
@@ -97,6 +98,17 @@ setRec $g0.f 'isArchived' $false; run
 check 'unseen off record -> still archived on every seat' (@(ofSession $G.Name | Where-Object { -not $_.arch }).Count -eq 0)
 foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $false }; run
 check 'reset again: nothing archived on that session' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+
+"--- a record whose write fails is retried, and its stale ON value does not spread"
+foreach ($r in (ofSession $G.Name)) { setRec $r.f 'isArchived' $true }; run          # archived everywhere, all known
+setRec $g0.f 'isArchived' $false                                                       # un-archive on seat 0
+Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $true; run                 # seat 1's record can't be written
+check 'failed write warns' ($out -match 'could not set isArchived')
+check 'failed write: the other seats are un-archived' (@(ofSession $G.Name | Where-Object { $_.f -ne $g1.f -and $_.arch }).Count -eq 0)
+check 'failed write: the record is on the retry list' ((state)['retry']['isArchived'].ContainsKey((key $g1.f)))
+Set-ItemProperty -LiteralPath $g1.f -Name IsReadOnly -Value $false; run
+check 'retried: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+check 'retried: off the retry list' (-not (state)['retry']['isArchived'].ContainsKey((key $g1.f)))
 
 "--- corrupt state file: warn, change nothing, leave the file as is"
 $good = Get-Content $statePath -Raw
