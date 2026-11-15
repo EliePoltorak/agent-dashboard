@@ -1988,10 +1988,29 @@ def weight_suggestions(pairs, now, days=21, minn=20, steady=1.25, off=1.3):
     return out
 
 
+def seat_runs(events, known):
+    """[(seat, [events])]: one active-login log's events cut into runs of CONSECUTIVE events of the same seat. An event is a seat's when exactly one seat in
+    `known` ({weekly reset: {seats}}) has its reset within SLOP s of the event's own. An event of another seat, or of no seat or several (unattributable, in no
+    run), ends the current run. The token counter is cumulative over the whole session, so tokens must never be measured across a switch of seats."""
+    runs, cur = [], None
+    for e in events:
+        ss = {s for kr, x in known.items() if e[3] and abs(kr - e[3]) <= SLOP for s in x}
+        if len(ss) != 1:
+            cur = None
+            continue
+        seat = next(iter(ss))
+        if cur is None or cur[0] != seat:
+            cur = (seat, [])
+            runs.append(cur)
+        cur[1].append(e)
+    return runs
+
+
 def codex_measure(cdir=None, now=None):
     """({seat: plan_type}, {seat: [(t, tokens per 1 % of weekly use)]}) from the rollout logs. A home's log belongs to that seat; an active-login event to the one
-    seat whose known weekly reset (the caches', and the homes' events') is within SLOP s of its own (none or several: skipped), as codex_events does.
-    The plan is the newest event's plan_type."""
+    seat whose known weekly reset (the caches', and the homes' events') is within SLOP s of its own (none or several: skipped), as codex_events does. An active-login
+    log is measured one run at a time (seat_runs): the session's token counter keeps counting across a switch of seats, so a run ends at an event of another seat or
+    of none, and a seat's pairs never span another seat's tokens (A, then B, then A is two A runs, each with its own anchor). The plan is the newest event's plan_type."""
     cdir, now = cdir or os.path.join(HOME, ".codex"), now or time.time()
     files, known, sink = rollout_files(cdir, now, 0), {}, []
     read_codex(cdir, sink)
@@ -2005,12 +2024,8 @@ def codex_measure(cdir=None, now=None):
             if e[3]:
                 known.setdefault(int(e[3]), set()).add(seat)
     for f, seat in files:
-        by = {}
-        for e in ([] if seat else rollout_cached(f)):
-            ss = {s for kr, x in known.items() if e[3] and abs(kr - e[3]) <= SLOP for s in x}
-            if len(ss) == 1:
-                by.setdefault(ss.pop(), []).append(e)
-        chunks += by.items()
+        if not seat:
+            chunks += seat_runs(rollout_cached(f), known)
     plans, newest, pairs = {}, {}, {}
     for seat, ev in chunks:
         for t, plan, *_ in ev:
@@ -4387,6 +4402,26 @@ def selftest():
         # a token counter that goes back (a new session) and a window change start a fresh anchor; a tick with no tokens in it is skipped
         e = lambda t, u, r, k: (t, None, u, r, k)
         assert token_pairs([e(1, 10, 99, 100), e(2, 11, 99, 50), e(3, 12, 99, 250), e(4, 13, 99, 250), e(5, 14, 99 + 5000, 900), e(6, 15, 99 + 5000, 1900)]) == [(3, 200.0), (6, 1000.0)]
+        # one active-login log that goes A -> B -> A -> (an event of no seat) -> A: its token counter is cumulative over the whole session, so each seat's pairs
+        # are measured within a run of consecutive events of that seat, never across another seat's (or an unattributable event's) tokens
+        kn = {WA: {"A"}, WB: {"B"}}
+        ea, eb, eg = (lambda t, u, k: (t, None, u, WA + 30, k)), (lambda t, u, k: (t, None, u, WB + 30, k)), (lambda t, u, k: (t, None, u, N + 777, k))
+        runs = seat_runs([ea(1, 10, 1000), ea(2, 11, 2000), eb(3, 40, 102000), ea(4, 12, 104000), eg(5, 3, 500000), ea(6, 13, 600000), (7, None, None, None, 1)], kn)
+        assert [(s, [e[0] for e in r]) for s, r in runs] == [("A", [1, 2]), ("B", [3]), ("A", [4]), ("A", [6])], runs      # B, none, and a reset-less event each end a run; the unattributable one is in none
+        assert seat_runs([ea(1, 10, 1), ea(2, 11, 2)], {WA: {"A", "X"}}) == [] and seat_runs([ea(1, 10, 1)], {WA: {"A"}, WA + 60: {"B"}}) == []      # two seats within SLOP: unattributable
+        with tempfile.TemporaryDirectory() as td2:
+            for lab in "AB":
+                os.makedirs(os.path.join(td2, "homes", lab))
+            roll(os.path.join(td2, "homes", "A", "sessions", "rollout-a.jsonl"), [tk(N - 9000, 5, WA, 1, 0, 0)], N - 100)
+            roll(os.path.join(td2, "homes", "B", "sessions", "rollout-b.jsonl"), [tk(N - 9000, 30, WB, 1, 0, 0)], N - 100)
+            ev = [(10, WA + 30, 1000), (11, WA + 30, 2000),                  # A: 1 % for 1000 tokens
+                  (40, WB + 30, 102000), (41, WB + 30, 103000),              # B takes the session's counter up by 100000 and ticks 1 % for 1000
+                  (12, WA + 30, 104000), (13, WA + 30, 105000),              # A again: a new run, so 104000 is not measured against A's 2000
+                  (3, N + 777, 500000),                                      # an event that matches no seat's window
+                  (14, WA + 30, 600000), (15, WA + 30, 601000)]              # A again: another new run, not measured against 105000
+            roll(os.path.join(td2, "sessions", "rollout-act.jsonl"), [tk(N - 8000 + 100 * i, u, r, k, 0, 0) for i, (u, r, k) in enumerate(ev)], N - 100)
+            _, p2 = codex_measure(td2, N)
+            assert [round(v) for _, v in p2["A"]] == [1000, 1000, 1000] and [round(v) for _, v in p2["B"]] == [1000], p2      # not 102000 / 495000 spanning the other seat's tokens
         blob = build([{"t": N, "codex": {s: {"w": .2, "wr": N + 9999, "wp": WEEK, "ts": N} for s in "ABCD"}}], N, {}, False,
                      {"weights": {"seat": {"codex": {"B": 5.0}}}, "codex": {"pairs": pairs}})["providers"][0]["accounts"]
         assert [a["ratio"] for a in blob] == [{"n": 8, "x": 1.0}, {"n": 8, "x": 5.0}, {"n": 3}, {"n": 0}], [a["ratio"] for a in blob]
