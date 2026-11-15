@@ -1022,8 +1022,8 @@ def sample(now, force=False):
         if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
             codex[label] = fresh
     lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
+    rec["codex"] = codex        # recorded even when empty: once the last saved home is removed, that empty snapshot must win in latest_of over the older seats
     if codex:
-        rec["codex"] = codex
         cache.setdefault("emails", {})["codex"] = cemails
     try:
         seat = read_live("grok", "grok", fetch_grok, GROK_EVERY, now, force, cache)
@@ -1259,8 +1259,8 @@ def prov_spec(pid, seats):
 def latest_of(hist, pid):
     """The newest record carrying provider `pid`, a recorded one in preference to a rebuilt (b) one. A record that carries the provider with no seats
     at all counts: sample() records Claude as an empty map once its last seat is gone (deleted, or moved under .inactive), and that newer snapshot must
-    win over the older ones, or the removed seat stays on show until its history expires. (Codex, Grok and Gemini are left out of a record when they
-    have nothing, so they are not affected.) A failed read's fallback still looks only at records that have seats."""
+    win over the older ones, or the removed seat stays on show until its history expires. Codex is recorded the same way once its last saved home is
+    removed. (Grok and Gemini always record their one seat, a failed read as a note.) A failed read's fallback still looks only at records that have seats."""
     key = "s" if pid == "claude" else pid
     rows = [h for h in hist if seats_of(h, pid)]
     present = [h for h in hist if isinstance(h.get(key), dict)]
@@ -1814,6 +1814,8 @@ def rollout_records(events, taken, rebuilt, hist=(), carry=False):
     state, recs, i = {}, [], 0
     for t, seat, wins in events:
         while i < len(prior) and prior[i]["t"] <= t:
+            if not prior[i]["codex"]:       # an empty snapshot (the last saved home removed): the seats before it are not carried past it
+                state = {}
             for s, v in prior[i]["codex"].items():
                 if isinstance(v, dict) and (v.get("ts") or prior[i]["t"]) > (state.get(s) or {}).get("ts", -1):
                     state[s] = dict(v, ts=v.get("ts") or prior[i]["t"])
@@ -4097,6 +4099,13 @@ def selftest():
             finally:
                 globals().update(stub)
             assert rs_["s"] == {"X": {"ts": 1, "w": 0.1}} and rs_["grok"]["grok"] == {"ok": False, "note": "Grok usage unavailable (RuntimeError)"}, rs_
+            # no Codex home left: the sample records an empty Codex snapshot, and latest_of takes it over the older seats (the removed accounts leave the page)
+            assert rs_["codex"] == {}, rs_
+            assert seats_of(latest_of([{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1}}}, rs_], "codex"), "codex") == {}
+            # and the session-log import does not carry the removed seat past that empty snapshot
+            ev_ = [(rs_["t"] + 600, "B", {"w": (0.2, rs_["t"] + 9999, 10080)})]
+            rr_ = rollout_records(ev_, set(), False, [{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1}}}, rs_])
+            assert rr_ and all(set(r["codex"]) == {"B"} for r in rr_), rr_
             assert rs_["gemini"]["antigravity"] == {"ok": False, "note": "Antigravity usage unavailable (RuntimeError)"} and "gemini read failed: RuntimeError" in open(APPLOG).read(), rs_
             # a failed Gemini read AFTER a good one is recorded too (ok False): the history shows the outage, which carry_good and the rates need
             try:
