@@ -57,6 +57,7 @@
     pwsh -File sync-app-history.ps1 -NoPrune        # only add/retitle; never remove
     pwsh -File sync-app-history.ps1 -Quiet          # for the launcher hook / scheduled task
     pwsh -File sync-app-history.ps1 -AssumeAppRunning   # testing: act as if the app were open (flags not synced)
+    pwsh -File sync-app-history.ps1 -AssumeAppClosed    # testing only: skip the app-running check (a sandbox index)
 
   SCHEDULED: Windows task 'Claude app-history sync' runs this every 30 min when enabled (hidden, via
   sync-app-history-hidden.vbs), so the app history stays fresh without a seat switch.
@@ -82,7 +83,8 @@ param(
   [switch]$DryRun,
   [switch]$NoPrune,
   [switch]$Quiet,
-  [switch]$AssumeAppRunning   # for the test: behave as if the desktop app were running
+  [switch]$AssumeAppRunning,  # for the test: behave as if the desktop app were running
+  [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); wins over nothing else
 )
 $ErrorActionPreference = 'Stop'
 
@@ -97,6 +99,12 @@ if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; 
 
 $cwdJson = $Cwd -replace '\\', '\\'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
+# One run at a time: two runs share temp-file names and the flag baseline. Held until the script ends.
+$lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
+$null = New-Item -ItemType Directory -Path $lockDir -Force
+try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
+catch { if (-not $Quiet) { 'another history sync is running; skipped' }; return }
+try {
 $backupRoot = Join-Path $env:USERPROFILE ".claude-app-seats\.pruned-history-backups\$stamp"
 $cachePath  = Join-Path $env:USERPROFILE '.claude-app-seats\.sync-classify-cache.json'
 $DateTitleRx = '^Session \d{4}-\d{2}-\d{2}'
@@ -303,11 +311,9 @@ if (-not $Quiet) {
 # Is the desktop app running? Checked BEFORE any record is read, so a record the app writes as it quits
 # can't be read stale and written back by pass 1.4. ($ccs must be the REAL app's index; a sandbox under a
 # redirected %APPDATA% is never live.)
-$liveCcs = Join-Path (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders').AppData 'Claude\claude-code-sessions'
 function Test-AppUp {
   if ($AssumeAppRunning) { return $true }
-  # compare full paths, so a trailing backslash or relative form can't make the real index look like a sandbox
-  if ([IO.Path]::GetFullPath($ccs).TrimEnd('\') -ne [IO.Path]::GetFullPath($liveCcs).TrimEnd('\')) { return $false }
+  if ($AssumeAppClosed) { return $false }   # only ever passed by the test, for its sandbox; otherwise always check
   return @(Get-Process -ErrorAction SilentlyContinue | Where-Object { try { $_.Path -like '*\WindowsApps\Claude_*\app\Claude.exe' -or $_.Path -like '*\AnthropicClaude\*\claude.exe' } catch { $false } }).Count -gt 0
 }
 $appUp = Test-AppUp
@@ -419,9 +425,9 @@ if (-not $flagSkip) {
         $hc = $flagPrevCli[$k]
         if ($hc) {
           [void]$flagFailCli.Add("$flag|$hc"); [void]$flagHeld.Add("$flag|$hc|$k")
-          if ($flagWarned.Add($k)) { Write-Warning "could not read $(Join-Path $ccs $k); that session's archive/pin flags keep their last synced state until it can be read. Restore or delete that file to clear this" }
+          if ($flagWarned.Add($k)) { Write-Warning "could not read $(Join-Path $ccs $k); that session's archive/pin flags keep their last synced state until it can be read. If it is corrupt, restore or delete it; if it was only in use, this clears on its own" }
         } else {
-          if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run. Restore or delete that file to clear this" }
+          if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run. If it is corrupt, restore or delete it; if it was only in use, this clears on its own" }
           $flagFail = $true
         }
       }
@@ -631,7 +637,8 @@ foreach ($acct in $accts) {
 }
 } finally {
 # The app also lists each folder's archived records in archived-sessions.idx. Keep it in step with the records'
-# isArchived (which pass 1.4 set), so the two agree whichever one the app reads. Entries for records
+# isArchived (which pass 1.4 set). The app treats the file as a load-order hint (archived sessions load later)
+# and rebuilds it from the records, so the records are the truth; this only keeps a seat's first load right. Entries for records
 # that aren't in the folder, or can't be read, are left as they are.
 if (-not $DryRun -and -not $flagSkip) {
   $idxChanged = 0
@@ -706,10 +713,11 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
   # A failed save warns rather than aborting: pass 2 has already run, and the old state file is still there.
   try {
     ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8
-    [System.IO.File]::Move("$flagStatePath.tmp", $flagStatePath, $true)
+    try { [System.IO.File]::Move("$flagStatePath.tmp", $flagStatePath, $true) }
+    catch { Start-Sleep -Milliseconds 500; [System.IO.File]::Move("$flagStatePath.tmp", $flagStatePath, $true) }   # once more: a scanner may hold it briefly
   } catch {
     Remove-Item -LiteralPath "$flagStatePath.tmp" -Force -ErrorAction SilentlyContinue
-    Write-Warning "could not save the flag state $flagStatePath ($($_.Exception.Message)); the next run compares with the previous one"
+    Write-Warning "could not save the flag state $flagStatePath ($($_.Exception.Message)); the next run compares with the previous one, so a change you make before the next successful sync may be undone"
   }
 }
 }
@@ -720,3 +728,4 @@ if (-not $Quiet) {
   if ($pruned -gt 0 -and -not $DryRun) { "pruned records backed up (reversible) at: $backupRoot" }
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
 }
+} finally { $runLock.Dispose() }

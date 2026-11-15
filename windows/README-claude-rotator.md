@@ -532,7 +532,9 @@ used seat) counts as a change only if it is on, since a record the app creates s
 can't be written, or a record the sync knew from its last run can't be read, the sync warns (naming the file) and that session keeps its last saved state, so
 the next run tries again from it. Until it succeeds, changing that session back to how it was (archiving or
 un-archiving, pinning or unpinning) may not stick; an unreadable record (including an empty one) holds its
-session back until the file is restored or deleted. The first run, and any session never seen before, use
+session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or
+deleted). One exception: a state file from before this version has no record-to-session map, so until its first
+good save an unreadable record stops the whole save. The first run, and any session never seen before, use
 "on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
 are made while the app is open, the state file is unreadable, their session is held back, or no state is saved that run). The app also lists each folder's archived
 records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the

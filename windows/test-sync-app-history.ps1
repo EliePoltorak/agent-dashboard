@@ -15,7 +15,7 @@
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
   saved baseline.
   Copies the LIVE app session index into a fresh sandbox under C:\Dev\Temp and runs the sync there with
-  %APPDATA% / %USERPROFILE% redirected (so the script's app-running guard counts the sandbox as not live).
+  %APPDATA% / %USERPROFILE% redirected, and -AssumeAppClosed (so the app-running check is skipped for the sandbox).
   The real files are only read. The sandbox is deleted on success and kept (path printed) on failure. Exit 1 on
   any failure. Each sync run takes ~1-2 min on a full index.
     pwsh -File test-sync-app-history.ps1 [<path to sync-app-history.ps1>]
@@ -34,7 +34,7 @@ Set-Content "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","conten
 $ccs = "$sb\app\Claude\claude-code-sessions"; $statePath = "$sb\home\.claude-app-seats\.flag-state.json"
 $fail = 0; $script:out = @(); $script:rc = 0
 function run([string]$extra = '') {
-  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -NoPrune $extra *>&1" 2>&1 | ForEach-Object { "$_" })
+  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -NoPrune -AssumeAppClosed $extra *>&1" 2>&1 | ForEach-Object { "$_" })
   $script:rc = $LASTEXITCODE
   $script:out | Where-Object { $_ -match '^set |^WOULD |isArchived|isStarred|not synced|rror|xception|WARNING|added \d' } | ForEach-Object { "    $_" }
 }
