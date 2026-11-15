@@ -1418,7 +1418,9 @@ def backtest(hist, targets=BT_TARGETS, every=6 * 3600, ahead=DAY, fresh=6 * 3600
     """How well each rate method projects 24 h ahead: {target label: {"n": origins, method: mean absolute error in pooled % points}}.
     An origin is every 6 h grid point with at least 24 h of history behind it and `ahead` of recorded history after it. Each method projects
     from the state at the origin (the last record at most `fresh` s old; `minpts` recorded points needed after it) with quotaProject's rules (typical: the hour profile of the history before the origin only; 3h, 24h: that burn
-    held flat); the error at an origin is the mean |projected - recorded| over the recorded points in the next `ahead`, the figure is the mean over origins."""
+    held flat); the error at an origin is the mean |projected - recorded| over the recorded points in the next `ahead`, divided by the pool's weight at
+    the origin (remaining() and project() count a seat as its weight x 100 %, so the pool's cap is 100 x the weights) to give pooled % points of
+    THIS pool, which is also what keeps a big pool from outweighing a small one in backtest_table's overall figure; the figure is the mean over origins."""
     out = {}
     for pid, wid, label in targets:
         cg = carry_good(hist, pid)
@@ -1443,9 +1445,10 @@ def backtest(hist, targets=BT_TARGETS, every=6 * 3600, ahead=DAY, fresh=6 * 3600
                     if u is not None:
                         per = s.get(wid + "p") or dflt[wid]
                         seats.append({"used": u, "reset": _roll(s.get(wid + "r"), per, t0), "period": per, "w": wt(pid, lab)[0]})
-                for m, r in rates.items():
+                cap = sum(s["w"] for s in seats)             # the pool's weight: its values run to 100 x cap
+                for m, r in (rates.items() if cap > 0 else ()):
                     pts = project(seats, r, t0, ahead)[0]
-                    errs[m].append(sum(abs(pts[round(dt / 600)][1] - v) for dt, v in actual) / len(actual))
+                    errs[m].append(sum(abs(pts[round(dt / 600)][1] - v) for dt, v in actual) / len(actual) / cap)
             t0 += every
         if errs["typical"]:
             out[label] = dict({"n": len(errs["typical"]), "errs": errs}, **{m: sum(e) / len(e) for m, e in errs.items()})
@@ -4168,6 +4171,8 @@ def selftest():
     assert pj[1] is None and dict(pj[0])[t0 + 600] == 4.0 and project([{"used": 0.95, "reset": t0 + 30 * DAY, "period": WEEK}], 60, t0, 1200)[1] == t0 + 300      # a scalar rate is unaffected
     bt = backtest(syn, (("claude", "w", "x"),))["x"]
     assert bt["n"] >= 40 and bt["typical"] < 1 and bt["typical"] * 5 < min(bt["3h"], bt["24h"]), bt          # the profile follows the day, a flat burn cannot
+    bt3 = backtest([dict(h, s={lab: h["s"]["A"] for lab in "ABC"}) for h in syn], (("claude", "w", "x"),))["x"]     # three identical seats: the pool is 3x, its % is not
+    assert bt3["n"] == bt["n"] and all(abs(bt3[m] / bt[m] - 1) < 0.25 for m in BT_METHODS), {m: (bt[m], bt3[m]) for m in BT_METHODS}      # same scale (unnormalized: about 3x); not identical, since project() spreads a pooled drain over three seats
     table, best = backtest_table({"x": bt})
     assert best == "typical" and "lowest overall: typical" in table and backtest_table({})[1] is None
 

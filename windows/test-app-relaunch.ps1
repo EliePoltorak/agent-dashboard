@@ -95,6 +95,19 @@ Invoke-SwitchRelaunch B
     Check "$($case.name): exit $($case.rc), relaunched" ($LASTEXITCODE -eq $case.rc -and $out -match 'LAUNCHED fake-claude.exe' -and $out -match [regex]::Escape($case.want)) "rc=$LASTEXITCODE out=$out"
   }
 
+  # switch ok but the app cannot be reopened (no launcher found): exit 3 and a line that says the switch stood, not a plain success
+  $child = @"
+. '$script_'
+`$script:n = 0
+function Get-AppProcs { `$script:n++; if (`$script:n -eq 1) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Start-Process { param(`$FilePath) Write-Host "LAUNCHED `$FilePath" }
+function Find-AppLauncher { `$null }
+function Invoke-Switch { `$script:SwitchDone = `$true }
+Invoke-SwitchRelaunch B
+"@
+  $out = & pwsh -NoProfile -Command $child 2>&1 | Out-String
+  Check 'switch ok, relaunch failed: exit 3, says the switch stood' ($LASTEXITCODE -eq 3 -and $out -match 'Switched to seat B, but the Claude app could not be reopened' -and $out -notmatch 'LAUNCHED') "rc=$LASTEXITCODE out=$out"
+
   # launcher: Squirrel stub first, then Update.exe --processStart, else none
   $sq = Join-Path $env:LOCALAPPDATA 'AnthropicClaude'
   New-Item -ItemType Directory -Path $sq -Force | Out-Null

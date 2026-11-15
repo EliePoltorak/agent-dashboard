@@ -177,6 +177,7 @@ function Start-ClaudeApp {
 function Invoke-SwitchRelaunch([string]$label) {
   # --switch <label> --relaunch. Closing first, then the ordinary switch with every one of its gates; the app is reopened
   # afterwards, on the new login, or on the old one when the switch refused (Invoke-Switch exits, so this runs in finally).
+  # Exit 3: switched, but the app could not be reopened.
   $wasRunning = @(Get-AppProcs).Count -gt 0
   if (-not (Close-AppGracefully)) {
     Write-Host "ABORTED: the Claude app was still running $($script:CloseWaitSec) s after it was asked to close (if it lives in the system tray, quit it from the tray icon and run this again). Nothing was switched; it was not force-closed (that can tear the login storage)." -ForegroundColor Red
@@ -187,6 +188,10 @@ function Invoke-SwitchRelaunch([string]$label) {
   finally {
     if ($script:SwitchDone) {
       if (Start-ClaudeApp) { Write-Host "Relaunched the Claude app on seat $(Resolve-Label $label)." -ForegroundColor Green }
+      else {      # the switch stands; only the reopening failed. Exit 3 so a caller (the dashboard) does not report a plain success
+        Write-Host "Switched to seat $(Resolve-Label $label), but the Claude app could not be reopened; open it from the Start menu." -ForegroundColor Red
+        exit 3
+      }
     } elseif ($wasRunning) {
       if (Start-ClaudeApp) { Write-Host "Switch failed; relaunched the Claude app on its old login." -ForegroundColor Red }
     }
