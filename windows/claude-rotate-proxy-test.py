@@ -5,6 +5,7 @@ Covers: quota 429 -> rotate -> retry on the new seat; a foreign token passes thr
 nothing to rotate to -> the client gets the original 429 (no replay); usage headers land in the
 seat's usage-cache.json; the health endpoint.
 """
+import hashlib
 import http.client
 import json
 import os
@@ -20,6 +21,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RL = "anthropic-ratelimit-unified-"
 SECRET = "sk-ant-oat01-SUPERSECRETTOKENVALUE"
 seen = []
+RACE = {"token_file": None}      # tok-race's 403 arrives after `--replace` stored a healthy token on its seat (a request in flight)
 
 
 class Fake(BaseHTTPRequestHandler):
@@ -41,7 +43,10 @@ class Fake(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if tok in (SECRET, "tok-D"):  # explicit subscription-disabled 403, not a quota 429
+        if tok == "tok-race":
+            with open(RACE["token_file"], "w") as f:
+                f.write("tok-healthy")
+        if tok in (SECRET, "tok-D", "tok-race"):  # explicit subscription-disabled 403, not a quota 429
             body = (b'{"type":"error","error":{"type":"permission_error","message":'
                     b'"Your organization has disabled Claude subscription access for Claude Code"},'
                     b'"error_code":"oauth_org_not_allowed"}')
@@ -82,6 +87,10 @@ def main():
         os.makedirs(os.path.join(root, seat))
         with open(os.path.join(root, seat, "token.txt"), "w") as f:
             f.write("tok-" + seat)
+    os.makedirs(os.path.join(root, "R"))
+    RACE["token_file"] = os.path.join(root, "R", "token.txt")
+    with open(RACE["token_file"], "w") as f:
+        f.write("tok-race")
     with open(os.path.join(root, ".active"), "w") as f:
         f.write("A")
     rot = os.path.join(root, "fake_rotator.py")
@@ -164,6 +173,7 @@ def main():
         marker = json.load(open(os.path.join(root, "C", "access-disabled.json")))
         assert marker["kind"] == "subscription_disabled" and marker["code"] == "oauth_org_not_allowed", marker
         assert SECRET not in json.dumps(marker)
+        assert marker["tok"] == hashlib.sha256(SECRET.encode()).hexdigest()[:16], marker      # names the refused token (the one sent upstream), by fingerprint
         log = open(os.path.join(root, ".proxy-log.txt"), encoding="utf-8").read()
         assert SECRET not in log, "token leaked into the proxy log"
         assert not os.path.exists(os.path.join(root, "B", "access-disabled.json"))
@@ -232,7 +242,22 @@ def main():
         assert status == 403 and b"oauth_org_not_allowed" in body and seen == ["tok-A", "tok-D"], (status, body, seen)
         md = os.path.join(root, "D", "access-disabled.json")
         assert os.path.exists(md) and json.load(open(md))["code"] == "oauth_org_not_allowed"
+        assert json.load(open(md))["tok"] == hashlib.sha256(b"tok-D").hexdigest()[:16]        # the retry seat's marker names the retry seat's token
         print("ok  a refusal on the retry seat is recorded too")
+
+        # 10. the refusal is tied to the token that was refused: seat R's request carries tok-race; before the 403 comes back the seat's token.txt
+        #     is replaced by a healthy one. The marker names tok-race (what was sent), so it does not exclude the replacement.
+        open(os.path.join(root, ".no-rotate"), "w").close()
+        with open(os.path.join(root, ".active"), "w") as f:
+            f.write("R")
+        status, body = call(port, "tok-race")
+        assert status == 403 and b"oauth_org_not_allowed" in body, (status, body)
+        mr = json.load(open(os.path.join(root, "R", "access-disabled.json")))
+        assert mr["tok"] == hashlib.sha256(b"tok-race").hexdigest()[:16], mr          # the token sent upstream, not the replacement now in token.txt
+        assert open(RACE["token_file"]).read() == "tok-healthy"
+        h = health()
+        assert h["ok"] is True and h["active"] == "R" and h["reason"] == "ready", h    # the healthy replacement is not treated as refused
+        print("ok  a refusal that lands after the token was replaced does not exclude the replacement")
         print("ALL PASSED")
     finally:
         proxy.terminate()

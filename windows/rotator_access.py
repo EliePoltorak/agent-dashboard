@@ -1,8 +1,10 @@
-"""Classify Claude API access failures. No I/O and no tokens.
+"""Classify Claude API access failures. No I/O. It never reads, stores or logs a token: the one place a token string passes through is
+token_fingerprint, which hashes the string it is handed and returns 16 hex characters.
 
 A subscription-disabled 403 is the API saying this seat cannot use Claude Code.
 A quota 429 and a network failure are different things and must not be recorded as this.
 """
+import hashlib
 
 DISABLED_MARKERS = (
     "oauth_org_not_allowed",
@@ -14,6 +16,21 @@ DISABLED_MARKERS = (
 # honoured. oauth_org_not_allowed is the subscription-disabled 403. The hook does not treat
 # a normal turn, or a user's quotation of the message, as one of these.
 HOOK_ERRORS = {"rate_limit", "billing_error", "oauth_org_not_allowed", "subscription_disabled"}
+
+
+def token_fingerprint(tok) -> str:
+    """The first 16 hex characters of SHA-256 over the token's UTF-8 bytes. The refusal marker (<seat>/access-disabled.json) carries this as
+    `tok`, naming the exact credential that was refused. claude-cli-account.ps1 (Get-TokenFingerprint) computes the same value."""
+    return hashlib.sha256(str(tok or "").encode("utf-8")).hexdigest()[:16]
+
+
+def marker_belongs(marker_tok, current_tok) -> bool:
+    """Whether a refusal marker still applies to the seat. False only when the marker names a token (`tok`) and the seat's current token.txt
+    holds a different one: the marker belongs to a replaced credential. A marker without `tok` (older code), or a token.txt that is missing,
+    unreadable or empty (current_tok falsy), keeps the old behaviour: honoured until it expires."""
+    if not marker_tok or not current_tok:
+        return True
+    return str(marker_tok) == token_fingerprint(current_tok)
 
 
 def _text(body) -> str:

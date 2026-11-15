@@ -414,6 +414,7 @@ errors, so this usually shows up as a pause, not a failure.
   and refuse to overwrite a label holding a different token unless `--replace` (the old token is
   kept as `token.txt.bak-<stamp>`). Storing a different token drops the seat's refusal marker
   (`access-disabled.json`) and its cached readings (`usage-cache[-fable].json`), which belonged to the old one.
+  Every refusal marker (written by the proxy, the rotator's probe and the StopFailure hook alike) names the refused token's fingerprint (`tok`: the first 16 hex characters of its SHA-256) and is ignored once the seat holds a different token, so a late refusal of a replaced token cannot disable its healthy replacement (a marker without `tok`, from older code, is honoured until it expires).
 
 ## Commands — PowerShell profile shortcuts
 

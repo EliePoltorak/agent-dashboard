@@ -10,8 +10,8 @@ merely quotes the error, does not fire.
 Fire-and-forget: launches `claude-cli-account.ps1 --check-rotate --now` and returns at
 once, so the stopping session never waits on it. The check itself decides whether to rotate.
 On an access refusal it first writes the rotator's refusal marker (<seat>/access-disabled.json,
-the file and fields claude-rotate-proxy.py writes) for the seat THIS session ran on: the one whose
-token.txt holds the session's CLAUDE_CODE_OAUTH_TOKEN, never whatever .active says now. The check
+the file and fields claude-rotate-proxy.py writes, `tok` included: the fingerprint of the session's token that was
+refused) for the seat THIS session ran on: the one whose token.txt holds the session's CLAUDE_CODE_OAUTH_TOKEN, never whatever .active says now. The check
 then takes its refusal path for that seat, including the fallback when probes time out.
 A session that goes through the rotate proxy (ANTHROPIC_BASE_URL at its loopback port) is not
 marked here: the proxy swaps in the active seat's token on every request, so the inherited token
@@ -28,7 +28,7 @@ from urllib.parse import urlsplit
 HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
-from rotator_access import HOOK_ERRORS, classify_hook
+from rotator_access import HOOK_ERRORS, classify_hook, token_fingerprint
 CMD = ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File",
        os.path.join(HERE, "claude-cli-account.ps1"), "--check-rotate", "--now", "--source", "StopFailure"]
 CREATE_NO_WINDOW, BREAKAWAY = 0x08000000, 0x01000000
@@ -70,13 +70,17 @@ def via_proxy():
         return False
 
 
-def mark_refused(label, code, root=None):
-    """Write <label>/access-disabled.json as the rotator reads it. Never touches token.txt."""
+def mark_refused(label, code, root=None, tok=None):
+    """Write <label>/access-disabled.json as the rotator reads it. `tok` is the refused token (the session's own); only its fingerprint is
+    written, so the marker is ignored once the seat holds a different token. Never touches token.txt."""
     path = os.path.join(root or ROOT, label, "access-disabled.json")
     now = int(time.time())
     tmp = "%s.tmp-%d" % (path, os.getpid())
     with open(tmp, "w", encoding="utf-8") as handle:
-        json.dump({"ts": now, "until": now + ACCESS_COOLDOWN, "http": 403, "code": code, "kind": "subscription_disabled"}, handle)
+        marker = {"ts": now, "until": now + ACCESS_COOLDOWN, "http": 403, "code": code, "kind": "subscription_disabled"}
+        if tok:
+            marker["tok"] = token_fingerprint(tok)
+        json.dump(marker, handle)
     os.replace(tmp, path)
 
 
@@ -165,7 +169,7 @@ def main():
         try:
             seat = session_seat()
             if seat:
-                mark_refused(seat, why)
+                mark_refused(seat, why, tok=(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip())      # session_seat matched this very token
         except Exception:
             pass
     try:

@@ -95,6 +95,16 @@ function Get-ErrorMessage([string]$Body) {
   return ConvertTo-SanitizedNote $Body
 }
 function Get-AccessMarkerPath([string]$Label) { Join-Path (Join-Path $Root $Label) 'access-disabled.json' }
+# A token's fingerprint: the first 16 hex characters of SHA-256 over its UTF-8 bytes (claude-rotate-proxy.py / rotator_access.token_fingerprint
+# computes the same). The refusal marker's `tok` field. Never the token, never a prefix of it.
+function Get-TokenFingerprint([string]$Tok) {
+  if (-not $Tok) { return '' }
+  $h = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($Tok))
+  return ((($h | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 16))
+}
+# The refusal marker, or $null when absent, expired, or belonging to a replaced credential: a marker carrying `tok` (the refused token's
+# fingerprint) is ignored once the seat's token.txt holds a different token. A marker without `tok` (older code), or an unreadable or
+# empty token.txt, keeps the plain cooldown rule.
 function Read-AccessDisabled([string]$Label) {
   if (-not $Label) { return $null }
   $f = Get-AccessMarkerPath $Label
@@ -103,17 +113,25 @@ function Read-AccessDisabled([string]$Label) {
     $j = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
     $now = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     if ([int64]$j.until -le $now) { return $null }
+    if ([string]$j.tok) {
+      $cur = ''
+      try { $cur = (Get-Content -LiteralPath (Profile-TokenFile $Label) -Raw -ErrorAction Stop).Trim() } catch {}
+      if ($cur -and ([string]$j.tok) -ne (Get-TokenFingerprint $cur)) { return $null }
+    }
     return $j
   } catch { return $null }
 }
 function Write-AccessDisabled {
-  param([string]$Label, [int]$Http = 403, [string]$Code = 'oauth_org_not_allowed')
+  # -TokFp = fingerprint of the token that was actually sent and refused (Get-TokenFingerprint), never a re-read of token.txt, which a
+  # --replace may already have changed. Without it the marker carries no `tok` and is honoured until it expires, as before.
+  param([string]$Label, [int]$Http = 403, [string]$Code = 'oauth_org_not_allowed', [string]$TokFp = '')
   if (-not $Label) { return }
   # Marker only. Never creates, rewrites, or deletes token.txt.
   $dir = Join-Path $Root $Label
   if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
   $now = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   $obj = [ordered]@{ ts = $now; until = ($now + $AccessCooldownSec); http = $Http; code = $Code; kind = 'subscription_disabled' }
+  if ($TokFp) { $obj['tok'] = $TokFp }
   $path = Get-AccessMarkerPath $Label
   $tmp = "$path.tmp-$PID"
   try {
@@ -126,10 +144,10 @@ function Clear-AccessDisabled([string]$Label) {
   if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }
 }
 function New-AccessDisabledResult {
-  param([string]$Label, [string]$Code = 'oauth_org_not_allowed', [string]$Message = '')
+  param([string]$Label, [string]$Code = 'oauth_org_not_allowed', [string]$Message = '', [string]$TokFp = '')
   $note = "subscription disabled (403 ${Code})"
   if ($Message) { $note += ": $Message" }
-  [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code=$Code; note=(ConvertTo-SanitizedNote $note) }
+  [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code=$Code; note=(ConvertTo-SanitizedNote $note); tokfp=$TokFp }
 }
 function New-ProbeUnknownResult {
   # -Network marks a transport failure (timeout, DNS, reset): the one kind the access-refusal fallback may step onto.
@@ -335,7 +353,7 @@ function Probe-Usage {
   $catBody = [string]$cat.Content
   $catStatus = [int]$cat.StatusCode
   if (Test-SubscriptionDisabled $catStatus $catBody) {
-    return (New-AccessDisabledResult $Label (Get-AccessCode $catBody) (Get-ErrorMessage $catBody))
+    return (New-AccessDisabledResult $Label (Get-AccessCode $catBody) (Get-ErrorMessage $catBody) (Get-TokenFingerprint $tok))
   }
   if ($catStatus -ge 400) {
     $msg = Get-ErrorMessage $catBody
@@ -359,7 +377,7 @@ function Probe-Usage {
     return (New-ProbeUnknownResult $Label ("probe failed: network; not marking disabled (" + $_.Exception.Message + ")") -Network)
   }
   if (Test-SubscriptionDisabled ([int]$r.StatusCode) ([string]$r.Content)) {
-    return (New-AccessDisabledResult $Label (Get-AccessCode ([string]$r.Content)) (Get-ErrorMessage ([string]$r.Content)))
+    return (New-AccessDisabledResult $Label (Get-AccessCode ([string]$r.Content)) (Get-ErrorMessage ([string]$r.Content)) (Get-TokenFingerprint $tok))
   }
   # $get reads one header value (PS7 returns header values as string arrays). Named to
   # avoid the single-letter `h` -> Get-History alias collision.
@@ -428,7 +446,7 @@ function Get-UsageCached {
   }
   $d | Add-Member -NotePropertyName ageSec -NotePropertyValue 0 -Force
   if ($d.access -eq 'disabled') {
-    Write-AccessDisabled $Label 403 $(if ($d.code) { [string]$d.code } else { 'oauth_org_not_allowed' })
+    Write-AccessDisabled $Label 403 $(if ($d.code) { [string]$d.code } else { 'oauth_org_not_allowed' }) -TokFp ([string]$d.tokfp)    # the token the probe sent, not a re-read of token.txt
   } elseif ($d.ok) {
     # Only a Fable probe that PROVES access clears the seat's shared refusal marker: a 2xx carrying the usage headers. A Haiku probe
     # running beside a refused Fable one, or an ok=$true 500 / unrelated 403 with no usage headers, proves nothing.
@@ -465,7 +483,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(foreach ($l in $Labels) { foreach ($mm in $models) { @{ l=$l; m=$mm.m; s=$mm.s } } })
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`

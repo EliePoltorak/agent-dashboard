@@ -51,7 +51,7 @@ $global:ClaudeRotatorProbeOverride = {
   if ($plan -eq 'disabled') {
     return [pscustomobject]@{
       label=$Label; ok=$false; access='disabled'; http=403; code='oauth_org_not_allowed'
-      note='subscription disabled (403 oauth_org_not_allowed)'
+      note='subscription disabled (403 oauth_org_not_allowed)'; tokfp=(Get-TokenFingerprint (TokenOf $Label))     # as Probe-Usage: the token it sent
     }
   }
   if ($plan -eq 'network') {
@@ -333,7 +333,7 @@ Clear-AppIdentity
 $script:plan['A'] = 'fable-disabled'
 $script:head['A'] = 0.01
 $origWrite = ${function:Write-AccessDisabled}
-function Write-AccessDisabled { param([string]$Label, [int]$Http = 403, [string]$Code = '') }    # the marker write is lost
+function Write-AccessDisabled { param([string]$Label, [int]$Http = 403, [string]$Code = '', [string]$TokFp = '') }    # the marker write is lost
 try { $rows = @(Rank-Accounts $true $true) } finally { ${function:Write-AccessDisabled} = $origWrite }
 $rowA = $rows | Where-Object label -eq 'A'
 Check 'ranking: a Fable 403 makes A unusable' ((-not $rowA.usable) -and $rowA.access -eq 'disabled') "usable=$($rowA.usable) access=$($rowA.access)"
@@ -561,6 +561,51 @@ Save-ProfileToken 'G' 'sk-ant-oat01-SEATG-NEWVALUE' $false
 Check 'a first token on a seat with a stale marker clears it' ($null -eq (Read-AccessDisabled 'G'))
 Reset-Case
 
+# --- a refusal marker names the refused token by fingerprint and is ignored once the seat holds a different token ---
+Check 'the fingerprint of "abc" is the literal the Python side asserts (SHA-256 first 16 hex)' ((Get-TokenFingerprint 'abc') -ceq 'ba7816bf8f01cfea')
+$pyExe = (Get-Command py -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if ($pyExe) {     # the two languages hash the same bytes: ASCII, and a non-ASCII string (UTF-8), computed by rotator_access.token_fingerprint
+  $sandboxProfile = $env:USERPROFILE; $env:USERPROFILE = $envKeep['USERPROFILE']      # (PowerShell variables are case-insensitive: $root is $Root here, so keep the sandbox profile under its own name)
+  # the py shim finds Python through the real profile
+  try { $pyOut = & $pyExe -3 -I -c "import sys; sys.path.insert(0, sys.argv[1]); from rotator_access import token_fingerprint as f; print(f('abc')); print(f('t\u00e9st-fake')); print(f('fake-' + 'x' * 40))" $PSScriptRoot } finally { $env:USERPROFILE = $sandboxProfile }
+  $psOut = @((Get-TokenFingerprint 'abc'), (Get-TokenFingerprint ("t$([char]0xE9)st-fake")), (Get-TokenFingerprint ('fake-' + ('x' * 40))))
+  Check 'PowerShell and Python fingerprint the same strings identically' ((@($pyOut) -join ',') -ceq ($psOut -join ',')) "py=$(@($pyOut) -join ',') ps=$($psOut -join ',')"
+}
+$fpOld = Get-TokenFingerprint (TokenOf 'B')
+Write-AccessDisabled -Label 'B' -TokFp $fpOld
+$mj = Get-Content (Join-Path (Join-Path $Root 'B') 'access-disabled.json') -Raw | ConvertFrom-Json
+Check 'the marker records the refused token''s fingerprint, and no token' (($mj.tok -ceq $fpOld) -and $mj.tok.Length -eq 16 -and (NoSecrets (Join-Path (Join-Path $Root 'B') 'access-disabled.json')))
+Check 'a marker is honoured while token.txt holds the refused token' ($null -ne (Read-AccessDisabled 'B'))
+Set-Content -LiteralPath (Join-Path (Join-Path $Root 'B') 'token.txt') -Value 'sk-ant-oat01-SEATB-OTHERVALUE' -Encoding UTF8 -NoNewline
+Check 'the same marker is ignored once token.txt holds another token' ($null -eq (Read-AccessDisabled 'B'))
+Write-AccessDisabled -Label 'C'
+Set-Content -LiteralPath (Join-Path (Join-Path $Root 'C') 'token.txt') -Value 'sk-ant-oat01-SEATC-OTHERVALUE' -Encoding UTF8 -NoNewline
+Check 'a marker without tok (older code) is honoured whatever token.txt holds' (($null -eq (Get-Content (Join-Path (Join-Path $Root 'C') 'access-disabled.json') -Raw | ConvertFrom-Json).tok) -and ($null -ne (Read-AccessDisabled 'C')))
+Write-AccessDisabled -Label 'E' -TokFp $fpOld
+Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'E') 'token.txt')
+Check 'an unreadable (missing) token.txt keeps today''s behaviour: the marker is honoured' ($null -ne (Read-AccessDisabled 'E'))
+$acr = ([System.Management.Automation.Language.Parser]::ParseFile((Join-Path $PSScriptRoot 'rotator-functions.ps1'), [ref]$null, [ref]$null)).Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Test-AccessCooldownActive' }, $true)
+. ([scriptblock]::Create($acr.Extent.Text)); $ProfileHome = $env:USERPROFILE
+Check 'the shell wrapper''s cooldown test follows the same rules (stale tok ignored, no tok honoured, missing token.txt honoured)' ((-not (Test-AccessCooldownActive 'B')) -and (Test-AccessCooldownActive 'C') -and (Test-AccessCooldownActive 'E'))
+Write-AccessDisabled -Label 'F' -TokFp (Get-TokenFingerprint (TokenOf 'F'))
+Check 'the shell wrapper''s cooldown test honours a marker for the token the seat holds' (Test-AccessCooldownActive 'F')
+Reset-Case
+
+# --- the race: --replace stores a healthy token (clearing the marker), then the OLD token's refusal lands late (the proxy's 15 s token cache, or a request in flight) ---
+$fpX = Get-TokenFingerprint (TokenOf 'D')
+Write-AccessDisabled -Label 'D' -TokFp $fpX
+Save-ProfileToken 'D' 'sk-ant-oat01-SEATD-REPLACEDVALUE' $true
+Check 'storing the replacement cleared the marker' ($null -eq (Read-AccessDisabled 'D'))
+Write-AccessDisabled -Label 'D' -TokFp $fpX                      # the late write for the replaced token X recreates the file ...
+Check '... the file is back' (Test-Path (Join-Path (Join-Path $Root 'D') 'access-disabled.json'))
+Check '... but the seat holding the replacement is not treated as disabled' ($null -eq (Read-AccessDisabled 'D'))
+$script:plan['D'] = 'ok'; $script:head['D'] = 0.10
+$rd = Get-UsageCached 'D' $false 'haiku' '' $false $true
+Check '... and its usage read is a real probe, not the cooldown answer' ($rd.access -eq 'ok' -and $rd.note -notmatch 'cooldown')
+Write-AccessDisabled -Label 'D' -TokFp (Get-TokenFingerprint (TokenOf 'D'))
+Check 'a refusal of the replacement itself still counts' ($null -ne (Read-AccessDisabled 'D'))
+Reset-Case
+
 # --- the claude wrapper's seat gate never blocks a credential command (every seat refused, the user adds a token) ---
 $gd = Join-Path $root 'gate'; $gh = Join-Path $gd 'home'; $ga = Join-Path $gh '.claude-cli-accounts'
 New-Item -ItemType Directory -Force -Path (Join-Path $ga 'B') | Out-Null
@@ -586,6 +631,10 @@ Check 'setup-token is never gated, and is handed no token at all' ($st_ -notmatc
 $al_ = & $gate 'auth login'
 Check 'auth login is never gated, and is handed no token at all' ($al_ -notmatch 'Not starting Claude Code' -and (-not $pyl -or $al_ -match 'TOKEN=-')) $al_
 Check 'auth status is still gated' ((& $gate 'auth status') -match 'Not starting Claude Code')
+@{ until = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 3600; tok = (Get-TokenFingerprint 'sk-ant-oat01-SEATB-REPLACED') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ga 'B\access-disabled.json')
+Check 'a marker for a replaced token does not stop a start' ((& $gate '--version') -notmatch 'Not starting Claude Code')
+@{ until = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 3600; tok = (Get-TokenFingerprint 'sk-ant-oat01-SEATB-TOKENVALUE') } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ga 'B\access-disabled.json')
+Check 'a marker for the token the seat holds still stops a start' ((& $gate '--version') -match 'Not starting Claude Code')
 Remove-Item -LiteralPath (Join-Path $ga 'B\access-disabled.json')
 Check 'a normal start on a healthy seat gets that seat token' (-not $pyl -or (& $gate 'run') -match 'TOKEN=sk-ant-oat01-SEATB-TOKENVALUE')
 

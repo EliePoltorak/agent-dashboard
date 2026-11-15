@@ -9,11 +9,23 @@ $RotatorDir = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).Path }
 $ProfileHome = if ($env:USERPROFILE) { $env:USERPROFILE } elseif ($HOME) { $HOME } else { [Environment]::GetFolderPath('UserProfile') }
 function Test-AccessCooldownActive([string]$Label) {
     if (-not $Label) { return $false }
-    $f = Join-Path (Join-Path (Join-Path $ProfileHome '.claude-cli-accounts') $Label) 'access-disabled.json'
+    $dir = Join-Path (Join-Path $ProfileHome '.claude-cli-accounts') $Label
+    $f = Join-Path $dir 'access-disabled.json'
     if (-not (Test-Path -LiteralPath $f)) { return $false }
     try {
         $j = Get-Content -LiteralPath $f -Raw | ConvertFrom-Json
-        return ([int64]$j.until -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+        if (-not ([int64]$j.until -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) { return $false }
+        # The marker names the refused token's fingerprint (`tok`: first 16 hex of SHA-256 over its UTF-8 bytes) and is ignored once the seat
+        # holds a different token. No `tok` (older code), or an unreadable token.txt: the plain cooldown rule. Same rule as Read-AccessDisabled.
+        if ([string]$j.tok) {
+            $cur = ''
+            try { $cur = (Get-Content -LiteralPath (Join-Path $dir 'token.txt') -Raw -ErrorAction Stop).Trim() } catch {}
+            if ($cur) {
+                $h = [Security.Cryptography.SHA256]::Create().ComputeHash([Text.Encoding]::UTF8.GetBytes($cur))
+                if (([string]$j.tok) -ne ((($h | ForEach-Object { $_.ToString('x2') }) -join '').Substring(0, 16))) { return $false }
+            }
+        }
+        return $true
     } catch { return $false }
 }
 

@@ -31,7 +31,7 @@ def _lower_priority():
 _lower_priority()
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-from rotator_access import classify_hook, is_subscription_disabled
+from rotator_access import classify_hook, is_subscription_disabled, token_fingerprint
 
 def _load(name, filename):
     spec = importlib.util.spec_from_file_location(name, os.path.join(HERE, filename))
@@ -174,6 +174,7 @@ def test_refusal_marks_the_sessions_seat():
     check("the refusal marks the session's seat B with its reason", data.get("code") == "oauth_org_not_allowed" and data.get("http") == 403
           and data.get("kind") == "subscription_disabled" and data.get("until", 0) - data.get("ts", 0) == 1800, repr(data))
     check("the active seat A is not marked", not os.path.exists(os.path.join(root, "A", "access-disabled.json")))
+    check("the marker names the refused token by fingerprint", data.get("tok") == token_fingerprint("tok-B") and len(data.get("tok", "")) == 16, repr(data))
     check("the marker holds no token", "tok-" not in open(mb, encoding="utf-8").read() if os.path.exists(mb) else False)
     check("the token files are untouched", open(os.path.join(root, "B", "token.txt"), encoding="utf-8").read() == "tok-B\n")
     # through the rotate proxy the inherited token is not the seat that refused (the proxy swaps tokens): the proxy owns attribution

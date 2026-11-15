@@ -33,7 +33,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 _HERE = os.path.dirname(os.path.abspath(__file__))
 if _HERE not in sys.path:
     sys.path.insert(0, _HERE)
-from rotator_access import access_code, is_subscription_disabled
+from rotator_access import access_code, is_subscription_disabled, marker_belongs, token_fingerprint
 
 PORT = int(os.environ.get("CLAUDE_ROTATE_PROXY_PORT", "18484"))
 UPSTREAM = "api.anthropic.com"
@@ -165,26 +165,42 @@ def access_marker_path(label):
     return os.path.join(ROOT, label, "access-disabled.json")
 
 
+def seat_token(label):
+    """The seat's CURRENT token.txt, read fresh (not the 15 s load_tokens cache), or "" when it is missing, unreadable or empty."""
+    try:
+        with open(os.path.join(ROOT, label, "token.txt"), encoding="utf-8-sig") as handle:
+            return handle.read().strip()
+    except OSError:
+        return ""
+
+
 def access_disabled_fresh(label):
-    """True when this seat's subscription-disabled cooldown has not elapsed. Never reads a token."""
+    """True when this seat's subscription-disabled cooldown has not elapsed AND the marker still belongs to the seat's current token: a marker
+    names the refused token's fingerprint (`tok`) and is ignored once token.txt holds a different one (a replaced credential). A marker without
+    `tok`, or an unreadable token.txt, keeps the plain cooldown rule. The token is hashed, never returned or logged."""
     if not label:
         return False
     try:
         with open(access_marker_path(label), encoding="utf-8") as handle:
             data = json.load(handle)
-        return float(data.get("until") or 0) > time.time()
+        if float(data.get("until") or 0) <= time.time():
+            return False
+        return marker_belongs(data.get("tok"), seat_token(label))
     except (OSError, ValueError, TypeError):
         return False
 
 
-def write_access_disabled(label, code):
-    """Record the refusal. Does not create, rewrite, or delete token.txt."""
+def write_access_disabled(label, code, tok=None):
+    """Record the refusal. `tok` is the token that was actually sent upstream and refused (not a re-read of token.txt, which may already hold a
+    replacement); only its fingerprint is written. Does not create, rewrite, or delete token.txt."""
     if not label:
         return
     directory = os.path.join(ROOT, label)
     now = int(time.time())
     payload = {"ts": now, "until": now + ACCESS_COOLDOWN, "http": 403,
                "code": code or "subscription_disabled", "kind": "subscription_disabled"}
+    if tok:
+        payload["tok"] = token_fingerprint(tok)
     path = access_marker_path(label)
     tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
     try:
@@ -388,7 +404,7 @@ class Handler(BaseHTTPRequestHandler):
                 if is_subscription_disabled(r.status, spent):
                     # Recorded on either attempt (the retry's seat can be the refused one); only the rotation and retry are limited to the first.
                     code = access_code(spent) or "subscription_disabled"
-                    write_access_disabled(label, code)
+                    write_access_disabled(label, code, tok)       # the token this request carried, not a fresh read of token.txt
                     write_health(False, label, "subscription_disabled")
                     log("403 subscription disabled on '%s' (%s)" % (label, code))
                     after = ask_rotator(label, "403 subscription disabled") if attempt == 0 else None
@@ -478,7 +494,40 @@ def self_test():
     with open(os.path.join(here, "fixtures", "access-responses.json"), encoding="utf-8") as handle:
         assert any(c["body"] == LOCAL_REFUSAL.decode() and c["disabled"] is True for c in json.load(handle)), "the local refusal is not a shared fixture"
     assert not is_subscription_disabled(0, "disabled Claude subscription access")
+    marker_self_test()
     print("self-test ok")
+
+
+def marker_self_test():
+    """A refusal marker names the refused token and applies only while the seat still holds it. Sandbox root; fake tokens built at runtime."""
+    import tempfile
+    global ROOT
+    saved, ROOT = ROOT, tempfile.mkdtemp(prefix="crp-marker-")
+    try:
+        os.makedirs(os.path.join(ROOT, "S"))
+        tx, ty = "fake-token-" + "x" * 8, "fake-token-" + "y" * 8
+        assert token_fingerprint("abc") == "ba7816bf8f01cfea"                    # SHA-256("abc")[:16]; the PowerShell side asserts the same literal
+        put = lambda s: open(os.path.join(ROOT, "S", "token.txt"), "w", encoding="utf-8").write(s + "\n")
+        put(tx)
+        write_access_disabled("S", "oauth_org_not_allowed", tx)
+        marker = json.load(open(access_marker_path("S"), encoding="utf-8"))
+        assert marker["tok"] == token_fingerprint(tx) and tx not in json.dumps(marker) and marker["kind"] == "subscription_disabled", marker
+        assert access_disabled_fresh("S")                                          # the seat still holds the refused token
+        put(ty)
+        assert not access_disabled_fresh("S")                                      # --replace stored another: the marker belongs to the old credential
+        write_access_disabled("S", "oauth_org_not_allowed", tx)                    # a late refusal for the OLD token (in flight / cached 15 s) lands after the swap
+        assert not access_disabled_fresh("S")                                      # ... and still does not exclude the healthy replacement
+        write_access_disabled("S", "oauth_org_not_allowed", ty)
+        assert access_disabled_fresh("S")                                          # a refusal of the token it now holds counts
+        write_access_disabled("S", "oauth_org_not_allowed")                        # no token known: a marker without `tok`, as older code wrote
+        assert "tok" not in json.load(open(access_marker_path("S"), encoding="utf-8")) and access_disabled_fresh("S")
+        put(tx)
+        assert access_disabled_fresh("S")                                          # without `tok` it is honoured whatever token.txt holds
+        write_access_disabled("S", "oauth_org_not_allowed", tx)
+        os.remove(os.path.join(ROOT, "S", "token.txt"))
+        assert access_disabled_fresh("S")                                          # token.txt missing: today's behaviour
+    finally:
+        ROOT = saved
 
 
 def main():
