@@ -466,6 +466,17 @@ function Get-UsageCached {
   return $d
 }
 
+# The probes Prefetch-Usage runs: every (label, model) pair, minus the pairs this process's memo already holds a failure for when the cooldown is honoured.
+# A worker starts with an empty memo, so without this a probe the caller already saw fail would be sent again, adding a timeout wave; Get-UsageCached
+# would have answered those from the memo anyway. A Refresh (not honouring the cooldown) re-probes on purpose, so it keeps every pair. The key is Get-UsageCached's.
+function Get-PrefetchWork {
+  param([string[]]$Labels, $Models, [bool]$HonorAccessCooldown = $true)
+  foreach ($l in $Labels) { foreach ($mm in $Models) {
+    if ($HonorAccessCooldown -and $script:UnknownProbeMemo -and $script:UnknownProbeMemo.ContainsKey("$l|$($mm.s)")) { continue }
+    @{ l=$l; m=$mm.m; s=$mm.s }
+  } }
+}
+
 # Fire every probe at once instead of one at a time. Ten serial round-trips (2 per account)
 # took ~27s for 5 accounts, dominated by the fable probes' server-side queueing; concurrently
 # the wall clock is the slowest SINGLE probe (~8-11s). Each worker writes the very same cache
@@ -485,7 +496,7 @@ function Prefetch-Usage {
   }
   $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
-  $work = @(foreach ($l in $Labels) { foreach ($mm in $models) { @{ l=$l; m=$mm.m; s=$mm.s } } })
+  $work = @(Get-PrefetchWork $Labels $models $HonorAccessCooldown)
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
   $memo = $work | ForEach-Object -ThrottleLimit 12 -Parallel {
     # Re-create what the probe needs inside the runspace: -Parallel starts a clean session,
