@@ -1,102 +1,133 @@
+(Get-Process -Id $PID).PriorityClass = 'Idle'   # first statement: a long test must not freeze the desktop (children inherit it)
 <#
-  test-sync-app-history.ps1 -- scenario test for sync-app-history.ps1's archive, pin and sidebar-group sync.
-  Copies the LIVE app session index and claude_desktop_config.json into a fresh sandbox under C:\Dev\Temp,
-  runs the sync there with %APPDATA% / %USERPROFILE% redirected, and checks each scenario. The real files
-  are only read. Exit 1 on any failure. Each sync run takes ~1-2 min on a full index.
-    pwsh -File test-sync-app-history.ps1 [-Script <path to sync-app-history.ps1>]
+  test-sync-app-history.ps1 -- scenario test for sync-app-history.ps1's pass 1.4: the isArchived / isStarred
+  flags follow you across seats. (The sidebar pin LIST and groups are not synced -- see the script header.)
+  Covers: first-run union; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
+  every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
+  left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
+  script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
+  saved baseline.
+  Copies the LIVE app session index into a fresh sandbox under C:\Dev\Temp and runs the sync there with
+  %APPDATA% / %USERPROFILE% redirected (so the script's app-running guard counts the sandbox as not live).
+  The real files are only read. The sandbox is deleted on success and kept (path printed) on failure. Exit 1 on
+  any failure. Each sync run takes ~1-2 min on a full index.
+    pwsh -File test-sync-app-history.ps1 [<path to sync-app-history.ps1>]
 #>
-param([string]$Script = (Join-Path $PSScriptRoot 'sync-app-history.ps1'))
+$Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
 $sb = "C:\Dev\Temp\sync-app-history-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-New-Item -ItemType Directory "$sb\app\Claude", "$sb\home\.claude\projects\C--Dev-hameishiv", "$sb\home\.claude-app-seats" -Force | Out-Null
+$proj = "$sb\home\.claude\projects\C--Dev-hameishiv"
+New-Item -ItemType Directory "$sb\app\Claude", $proj, "$sb\home\.claude-app-seats" -Force | Out-Null
 Copy-Item "$env:APPDATA\Claude\claude-code-sessions" "$sb\app\Claude\" -Recurse -Force
-Copy-Item "$env:APPDATA\Claude\claude_desktop_config.json" "$sb\app\Claude\" -Force
-Set-Content "$sb\home\.claude\projects\C--Dev-hameishiv\dummy.jsonl" '{"type":"user","message":{"content":"hi"}}'
+# One synthetic, recent, substantive transcript so the script has a session to create records for (pass 2).
+# The real index's transcripts are NOT copied, so with -NoPrune nothing else is created or pruned.
+$X = [guid]::NewGuid().ToString()
+$asst = 1..7 | ForEach-Object { '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok ' + $_ + '"}]}}' }
+Set-Content "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + $asst)
 "sandbox: $sb"
-$ccs = "$sb\app\Claude\claude-code-sessions"; $cfgP = "$sb\app\Claude\claude_desktop_config.json"
-$fail = 0
-function run { pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -NoPrune" 2>&1 | Where-Object { "$_" -match 'sidebar|isArchived|isStarred|rror|xception' } | ForEach-Object { "    $_" } }
-function cfg { Get-Content $cfgP -Raw | ConvertFrom-Json -AsHashtable }
-function savecfg($c) { Set-Content $cfgP ($c | ConvertTo-Json -Depth 100) -NoNewline }
+$ccs = "$sb\app\Claude\claude-code-sessions"; $statePath = "$sb\home\.claude-app-seats\.flag-state.json"
+$fail = 0; $script:out = @(); $script:rc = 0
+function run {
+  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -NoPrune *>&1" 2>&1 | ForEach-Object { "$_" })
+  $script:rc = $LASTEXITCODE
+  $script:out | Where-Object { $_ -match '^set |^WOULD |isArchived|isStarred|not synced|rror|xception|WARNING|added \d' } | ForEach-Object { "    $_" }
+}
 function check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:fail++ } }
-function recs { Get-ChildItem $ccs -Recurse -Filter local_*.json | ForEach-Object { $j = Get-Content $_.FullName -Raw | ConvertFrom-Json; [pscustomobject]@{ f = $_.FullName; id = $j.sessionId; cli = [string]$j.cliSessionId; star = [bool]$j.isStarred; scope = "$($_.Directory.Parent.Name)/$($_.Directory.Name)" } } | Where-Object cli }
+function key($f) { $f.Substring($ccs.Length).TrimStart('\') }
+function recs { Get-ChildItem $ccs -Recurse -Filter local_*.json | ForEach-Object { try { $j = Get-Content $_.FullName -Raw | ConvertFrom-Json } catch { return }; [pscustomobject]@{ f = $_.FullName; id = $j.sessionId; cli = [string]$j.cliSessionId; arch = [bool]$j.isArchived; star = [bool]$j.isStarred; title = [string]$j.title } } | Where-Object cli }
 function setRec($f, $k, $v) { $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member -NotePropertyName $k -NotePropertyValue $v -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 100) -NoNewline }
-$before = cfg
-$scopes = @(Get-ChildItem $ccs -Directory | ForEach-Object { $a = $_; Get-ChildItem $a.FullName -Directory | Where-Object { Get-ChildItem $_.FullName -Filter local_*.json } | ForEach-Object { "$($a.Name)/$($_.Name)" } })
+function recHash { (Get-ChildItem $ccs -Recurse -Filter local_*.json | Sort-Object FullName | ForEach-Object { "$($_.FullName):$((Get-FileHash $_.FullName -Algorithm MD5).Hash)" }) -join '|' }
+function state { Get-Content $statePath -Raw | ConvertFrom-Json -AsHashtable }
+function mixed($R, $p) { @($R | Group-Object cli | Where-Object { ($_.Group.$p -contains $true) -and ($_.Group.$p -contains $false) }).Count }
+function ofSession($cli) { @(recs | Where-Object { $_.cli -eq $cli }) }
 
-"--- run 1 (baseline)"; run
-$c = cfg; $e = $c.preferences.epitaxyPrefs; $R = recs
-$gid = 'cg-a35dec0d-f360-498b-b8d2-1be3a703f711'
-check 'every seat has the Zmanim group' (@($scopes | Where-Object { @($e['dframe-group-scopes'][$_]['groups'] | Where-Object { $_['id'] -eq $gid }).Count -eq 1 }).Count -eq $scopes.Count)
-check 'every seat has a Zmanim section' (@($scopes | Where-Object { @($e['dframe-code-sections'][$_]['sections'] | Where-Object { $_['id'] -eq $gid }).Count -eq 1 }).Count -eq $scopes.Count)
-$zCli = @(); foreach ($k in $before.preferences.epitaxyPrefs['dframe-group-scopes'].Values | ForEach-Object { $_['assignments'].Keys }) { $id = $k -replace '^code:', ''; $zCli += ($R | Where-Object id -eq $id).cli }
-$zCli = @($zCli | Where-Object { $_ } | Select-Object -Unique)
-$expect = @($R | Where-Object { $zCli -contains $_.cli }).Count
-$got = @($scopes | ForEach-Object { $e['dframe-group-scopes'][$_]['assignments'].Keys }).Count
-check "all seats' records of the $($zCli.Count) Zmanim sessions are assigned ($got of $expect)" ($got -eq $expect)
-$starIds = @($R | Where-Object star | ForEach-Object id)
-check 'pin list holds every starred record id' (@($starIds | Where-Object { $e['starred-local-code-sessions'] -notcontains $_ }).Count -eq 0)
-check 'every record of a starred session is starred' (@($R | Group-Object cli | Where-Object { ($_.Group.star -contains $true) -and ($_.Group.star -contains $false) }).Count -eq 0)
-$skip = 'starred-local-code-sessions', 'dframe-local-slice', 'dframe-group-scopes', 'dframe-code-sections'
-$o1 = $before.preferences.epitaxyPrefs; $o2 = $e
-check 'other epitaxyPrefs keys untouched' (@($o1.Keys | Where-Object { $skip -notcontains $_ -and (($o1[$_] | ConvertTo-Json -Depth 50 -Compress) -ne ($o2[$_] | ConvertTo-Json -Depth 50 -Compress)) }).Count -eq 0)
-$b2 = $before.Clone(); $b2.Remove('preferences'); $c2 = $c.Clone(); $c2.Remove('preferences')
-check 'rest of config untouched' (($b2 | ConvertTo-Json -Depth 100 -Compress) -eq ($c2 | ConvertTo-Json -Depth 100 -Compress))
+"--- run 1 (baseline: first run, no state file)"; run; $R = recs
+check 'run 1 exits 0' ($rc -eq 0)
+check 'state file written' (Test-Path $statePath)
+check 'every record of a session with any archived record is archived' ((mixed $R 'arch') -eq 0)
+check 'every record of a session with any starred record is starred' ((mixed $R 'star') -eq 0)
+check "synthetic session got records ($(@($R | Where-Object cli -eq $X).Count))" (@($R | Where-Object cli -eq $X).Count -ge 2)
 
-"--- run 2 (idle)"; $s = Get-Content $cfgP -Raw; $out = run; $out
-check 'idle run changes nothing' ((Get-Content $cfgP -Raw) -eq $s -and -not ($out -match 'updated|set '))
+"--- run 2 (idle)"; $h = recHash; run
+check 'idle run changes no record file' ((recHash) -eq $h)
+check "idle run prints no 'set ' line, no error" (-not ($out -match '^set |rror|xception') -and $rc -eq 0)
 
-# pick a multi-seat session for pin tests
-$G = recs | Group-Object cli | Where-Object { $_.Count -ge 4 -and -not ($_.Group.star -contains $true) } | Select-Object -First 1
-"--- pin one session on one seat ($($G.Count) seats)"
-$r0 = $G.Group[0]; setRec $r0.f 'isStarred' $true; $c = cfg; $c.preferences.epitaxyPrefs['starred-local-code-sessions'] += $r0.id; savecfg $c
+# a real multi-seat session, nothing flagged, for the pin / archive tests
+$G = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Sort-Object Count -Descending | Select-Object -First 1
+if (-not $G) { "FAIL no unflagged multi-seat session in the index to test with"; exit 1 }
+$g0 = $G.Group[0]; $g1 = $G.Group[1]
+"--- pin on one seat ($($G.Count) seats)"
+setRec $g0.f 'isStarred' $true; run
+check 'starred on every seat' (@(ofSession $G.Name | Where-Object { -not $_.star }).Count -eq 0)
+"--- unpin on a different seat"
+setRec $g1.f 'isStarred' $false; run
+check 'unstarred on every seat' (@(ofSession $G.Name | Where-Object star).Count -eq 0)
+
+"--- archive on one seat"
+setRec $g0.f 'isArchived' $true; run
+check 'archived on every seat' (@(ofSession $G.Name | Where-Object { -not $_.arch }).Count -eq 0)
+"--- un-archive on a different seat"
+setRec $g1.f 'isArchived' $false; run
+check 'un-archived on every seat' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
+
+"--- opposite changes on two seats in the same run -> on wins"
+# After a run every record of a session agrees, so opposite changes can only come from a state file where two
+# seats were recorded differently: seat 0 was 'on' (now off), seat 1 was 'off' (now on).
+$st = state
+foreach ($fl in 'isArchived', 'isStarred') { $st[$fl][(key $g0.f)] = $true; $st[$fl][(key $g1.f)] = $false; setRec $g0.f $fl $false; setRec $g1.f $fl $true }
+Set-Content $statePath ($st | ConvertTo-Json -Compress -Depth 5); run
+$S = ofSession $G.Name
+check 'on wins: archived on every seat' (@($S | Where-Object { -not $_.arch }).Count -eq 0)
+check 'on wins: starred on every seat' (@($S | Where-Object { -not $_.star }).Count -eq 0)
+foreach ($r in $S) { setRec $r.f 'isArchived' $false; setRec $r.f 'isStarred' $false }; run   # reset, and let the state follow
+check 'reset: nothing flagged on that session' (@(ofSession $G.Name | Where-Object { $_.arch -or $_.star }).Count -eq 0)
+
+"--- corrupt state file: warn, change nothing, leave the file as is"
+$good = Get-Content $statePath -Raw
+setRec $g0.f 'isArchived' $true          # a real change that a healthy run would spread to every seat
+Set-Content $statePath 'not json' -NoNewline
+$h = recHash; run
+check 'warns about the state file' (($out -match 'WARNING.*unreadable|unreadable.*not synced') -and ($out -match [regex]::Escape('.flag-state.json')))
+check 'no record changed' ((recHash) -eq $h)
+check 'state file left as is' ((Get-Content $statePath -Raw) -eq 'not json')
+check 'corrupt state does not fail the run' ($rc -eq 0)
+Set-Content $statePath $good -NoNewline; setRec $g0.f 'isArchived' $false
+
+"--- missing ~\.claude-app-seats directory"
+Remove-Item -LiteralPath "$sb\home\.claude-app-seats" -Recurse -Force
 run
-$L = (cfg).preferences.epitaxyPrefs['starred-local-code-sessions']
-check 'pinned on every seat (records)' (@(recs | Where-Object { $_.cli -eq $G.Name -and -not $_.star }).Count -eq 0)
-check 'pin list has every seat''s id' (@($G.Group | Where-Object { $L -notcontains $_.id }).Count -eq 0)
+check 'run succeeds' ($rc -eq 0 -and -not ($out -match 'rror|xception'))
+check 'state file exists again' (Test-Path $statePath)
 
-"--- unpin it on a different seat"
-$r1 = $G.Group[2]; setRec $r1.f 'isStarred' $false; $c = cfg; $c.preferences.epitaxyPrefs['starred-local-code-sessions'] = @($c.preferences.epitaxyPrefs['starred-local-code-sessions'] | Where-Object { $_ -ne $r1.id }); savecfg $c
-run
-$L = (cfg).preferences.epitaxyPrefs['starred-local-code-sessions']
-check 'unpinned on every seat (records)' (@(recs | Where-Object { $_.cli -eq $G.Name -and $_.star }).Count -eq 0)
-check 'no id of it left in pin list' (@($G.Group | Where-Object { $L -contains $_.id }).Count -eq 0)
+"--- a record the script clones from another seat carries the flags"
+$RX = ofSession $X
+if ($RX.Count -ge 2) {
+  $a = $RX[0]; $b = $RX[1]
+  Remove-Item -LiteralPath $b.f
+  setRec $a.f 'isArchived' $true; setRec $a.f 'isStarred' $true
+  run
+  $S = ofSession $X
+  $new = @($S | Where-Object { $_.f -ne $a.f -and (Split-Path $_.f) -eq (Split-Path $b.f) })
+  check 'the deleted record was re-created' ($new.Count -eq 1 -and $S.Count -eq $RX.Count)
+  check 'every record of the session archived + starred' (@($S | Where-Object { -not ($_.arch -and $_.star) }).Count -eq 0)
+  $st = state
+  check 'new record is in the saved baseline with its flags' ($new.Count -eq 1 -and $st['isArchived'][(key $new[0].f)] -eq $true -and $st['isStarred'][(key $new[0].f)] -eq $true)
+} else { "SKIP clone scenario: fewer than 2 records of the synthetic session" }
 
-"--- add it to Zmanim on one seat"
-$c = cfg; $a = $c.preferences.epitaxyPrefs['dframe-group-scopes'][$r1.scope]['assignments']; $a["code:$($r1.id)"] = $gid; savecfg $c
-run
-$gs = (cfg).preferences.epitaxyPrefs['dframe-group-scopes']
-check 'in Zmanim on every seat' (@($G.Group | Where-Object { $gs[$_.scope]['assignments']["code:$($_.id)"] -ne $gid }).Count -eq 0)
+"--- a record the script fabricates from the transcript carries the flags"
+$RX = ofSession $X
+if ($RX.Count -ge 1) {
+  $a = $RX[0]
+  foreach ($r in ($RX | Select-Object -Skip 1)) { Remove-Item -LiteralPath $r.f }
+  setRec $a.f 'title' 'Session 2026-01-01 00:00'    # no well-titled source left -> pass 2 cannot clone, it fabricates
+  run
+  $S = ofSession $X
+  $made = @($S | Where-Object { $_.f -ne $a.f })
+  check "records were fabricated ($($made.Count))" ($made.Count -ge 1)
+  check 'fabricated records are archived + starred' (@($made | Where-Object { -not ($_.arch -and $_.star) }).Count -eq 0)
+  $st = state
+  check 'fabricated records are in the saved baseline' (@($made | Where-Object { $st['isArchived'][(key $_.f)] -ne $true -or $st['isStarred'][(key $_.f)] -ne $true }).Count -eq 0)
+}
 
-"--- remove it from Zmanim on another seat"
-$c = cfg; $c.preferences.epitaxyPrefs['dframe-group-scopes'][$r0.scope]['assignments'].Remove("code:$($r0.id)"); savecfg $c
-run
-$gs = (cfg).preferences.epitaxyPrefs['dframe-group-scopes']
-check 'out of Zmanim on every seat' (@($G.Group | Where-Object { $gs[$_.scope]['assignments'].Contains("code:$($_.id)") }).Count -eq 0)
-
-"--- rename Zmanim on one seat"
-$c = cfg; ($c.preferences.epitaxyPrefs['dframe-group-scopes'][$r0.scope]['groups'] | Where-Object { $_['id'] -eq $gid })['name'] = 'Zmanim2'; savecfg $c
-run
-$e = (cfg).preferences.epitaxyPrefs
-check 'renamed on every seat (groups)' (@($scopes | Where-Object { ($e['dframe-group-scopes'][$_]['groups'] | Where-Object { $_['id'] -eq $gid })['name'] -ne 'Zmanim2' }).Count -eq 0)
-check 'renamed on every seat (sections)' (@($scopes | Where-Object { ($e['dframe-code-sections'][$_]['sections'] | Where-Object { $_['id'] -eq $gid })['name'] -ne 'Zmanim2' }).Count -eq 0)
-
-"--- remove the Zmanim section on one seat, add a foreign key to its group entry"
-$c = cfg; $sc = $c.preferences.epitaxyPrefs['dframe-code-sections'][$r0.scope]; $sc['sections'] = @($sc['sections'] | Where-Object { $_['id'] -ne $gid }); $c.preferences.epitaxyPrefs['dframe-group-scopes'][$r0.scope]['probeKey'] = 'keep-me'; savecfg $c
-run
-$e = (cfg).preferences.epitaxyPrefs
-check 'section restored on that seat' (@($e['dframe-code-sections'][$r0.scope]['sections'] | Where-Object { $_['id'] -eq $gid }).Count -eq 1)
-check 'foreign key kept' ($e['dframe-group-scopes'][$r0.scope]['probeKey'] -eq 'keep-me')
-"--- idle again"; $s = Get-Content $cfgP -Raw; $out = run; $out
-check 'second idle run changes nothing' ((Get-Content $cfgP -Raw) -eq $s -and -not ($out -match 'updated|set '))
-
-"--- delete Zmanim on one seat"
-$c = cfg; $sc = $c.preferences.epitaxyPrefs['dframe-group-scopes'][$r1.scope]; $sc['groups'] = @($sc['groups'] | Where-Object { $_['id'] -ne $gid }); savecfg $c
-run
-$e = (cfg).preferences.epitaxyPrefs
-check 'group gone on every seat' (@($scopes | Where-Object { @($e['dframe-group-scopes'][$_]['groups'] | Where-Object { $_['id'] -eq $gid }).Count }).Count -eq 0)
-check 'its section gone on every seat' (@($scopes | Where-Object { @($e['dframe-code-sections'][$_]['sections'] | Where-Object { $_['id'] -eq $gid }).Count }).Count -eq 0)
-check 'no assignment to it anywhere' (@($scopes | ForEach-Object { $e['dframe-group-scopes'][$_]['assignments'].Values } | Where-Object { $_ -eq $gid }).Count -eq 0)
-
-"$fail failure(s)"; exit [int]($fail -gt 0)
-
-
+"$fail failure(s)"
+if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }
+exit [int]($fail -gt 0)
