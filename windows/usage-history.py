@@ -1678,8 +1678,8 @@ def append_lines(recs):
 def save(hist, rec, now):
     """Append rec; once a day, rewrite the file without lines older than KEEP_DAYS. Under the lock, a file another
     process changed since this one last read or wrote it (a --backfill) is re-read first, and the prune always re-reads,
-    so a rewrite never drops what someone else wrote. Returns the history now on disk, in time order (the file itself may hold rec after a newer line;
-    _read_hist sorts on every read)."""
+    so a rewrite never drops what someone else wrote. Returns the history in time order (an appended rec can sit after a newer line in the
+    file; _read_hist sorts on every read)."""
     with hist_lock():
         if hist_sig() != _SIG:
             hist = _read_hist()[0]
@@ -2754,8 +2754,14 @@ class Store:
                     ce = cache.setdefault("credits", {}).setdefault(seat, {})
                     ce["gen"] = (ce.get("gen") or 0) + 1        # with the spend, atomically: a read already in flight was asked before it, and its answer would restore the spent grant
                     spend_grant(cache, seat, gid, now, prev_send if res["outcome"] == "alreadyRedeemed" else None)        # the follow-up read below is refused while the seat is held (429 / sign-in / scope): the page must not offer the spent grant again meanwhile
-        self.credits_read(seat, time.time(), fetch or http_json, force=True)      # still honours a 429 / sign-in hold
-        if settled and res["outcome"] in ("redeemed", "alreadyRedeemed"):
+        landed = settled and res["outcome"] in ("redeemed", "alreadyRedeemed")
+        try:
+            self.credits_read(seat, time.time(), fetch or http_json, force=True)      # still honours a 429 / sign-in hold
+        except Exception as e:   # shortcut: same broad catch as the handlers. A landed reset must not be reported as failed; otherwise the error is the answer
+            if not landed:
+                raise
+            applog("claude reset: credits read after the reset failed: %s: %s" % (type(e).__name__, e))
+        if landed:
             self.reread_usage()             # the usage readings predate the reset: read them again, or the seat stays shown capped and the pool depleted
         else:
             with self.lock:
@@ -2765,7 +2771,8 @@ class Store:
     def reread_usage(self):
         """The live Claude read Refresh runs (probe_claude: every seat's usage cache rewritten), then a forced sample and rebuild. Used after a confirmed Claude
         reset (the caller holds `refreshing`). A probe that fails is logged and the sample still runs. The reset has already landed here, so nothing in this
-        read may make it look failed: a sample that raises is logged and the page is rebuilt from what it has instead."""
+        read may make it look failed: a sample that raises is logged and the page is rebuilt from what it has instead, and a rebuild that raises too
+        (a page export that cannot be written) is only logged."""
         try:
             rc = probe_claude()
         except (OSError, subprocess.SubprocessError) as e:
@@ -5005,9 +5012,17 @@ def selftest():
         # the claim landed but its answer was lost: the next reading no longer lists g2 and offers g11; the retry still resends g2 with rid2
         save_pcache(dict(load_pcache(), credits={"A": dict(ke, grants=[g for g in ke["grants"] if g["id"] != "g2"])}))
         assert [g["id"] for g in usable_grants(load_pcache()["credits"]["A"], "full", KN)] == ["g11"]
-        r_ = ks.claude_reset("A", "full", kf, nid)
+        def bad_credits(*a, **k):
+            Store.credits_read(ks, *a, **k)                                              # the read itself happens (its fetch is counted below), then fails
+            raise PcacheError("cache unreadable")
+        ks.credits_read = bad_credits                                                     # the credits re-read after a landed reset fails: still not reported as failed
+        try:
+            r_ = ks.claude_reset("A", "full", kf, nid)
+        finally:
+            del ks.credits_read
         assert r_ == {"outcome": "alreadyRedeemed", "text": "That reset was already applied; nothing more was used."}
         assert rr_ == [1], rr_                                                            # already applied: the reset happened, so its usage is read again too
+        assert "credits read after the reset failed: PcacheError" in open(APPLOG).read()
         # reread_usage itself: the live Claude probe, then a forced sample; a probe that cannot run still takes the sample
         rs_ = Store.__new__(Store)
         rs_ord = []
