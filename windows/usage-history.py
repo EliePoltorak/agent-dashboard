@@ -1104,11 +1104,12 @@ def hour_profile(rows, wid, pid="claude", gap=DAY):
     """Typical-day profile: expected %/h of one account for each local hour of the day (24 numbers) and its mean, or None with under 24 h of history.
     Each step between two consecutive records (reset-aware, as burn is) is spread over the hours it spans by time; the profile for an hour is the
     use that fell in it divided by the time covered for that hour in days, so a day with no records for an hour does not count as a day of zero use.
-    A step longer than `gap` is skipped (its use cannot be placed); an hour with under 30 min covered gets the overall mean."""
+    A step longer than `gap` is skipped (its use cannot be placed), and so is a step with an end that measures no seat for this window (a failed read left as a gap by
+    carry_good: its time is not covered, not an hour of zero use); an hour with under 30 min covered gets the overall mean."""
     drop, cov = [0.0] * 24, [0.0] * 24
     for a, b in zip(rows, rows[1:]):
         ta, tb = a["t"], b["t"]
-        if tb <= ta or tb - ta > gap:
+        if tb <= ta or tb - ta > gap or not (remaining(a, wid, pid=pid)[1] and remaining(b, wid, pid=pid)[1]):
             continue
         d = _step(seats_of(a, pid), seats_of(b, pid), wid, pid) * 100
         t = ta
@@ -1209,7 +1210,7 @@ def carry_good(hist, pid):
     _step loses its use across both adjacent steps; the headline (latest_of) already carries it, and the graph, burn and profile must agree with it. Shallow copies of the
     records that change; the stored history is not touched; a failed read with no good one before it stays as it is. Only within CARRY_MAX of that good reading: across a longer
     outage the carried copy would show no use until recovery, and the whole outage's use would then land in one short step, spiking the burn and slipping past hour_profile's
-    gap guard. Past it the failed read stays as it is, so that use is left unplaced, as before."""
+    gap guard. Past it the failed read stays as it is: a gap that rates and the profile treat as a break (use across it is left unplaced)."""
     key, last, out = "s" if pid == "claude" else pid, {}, []
     for h in hist:
         seats = seats_of(h, pid)
@@ -1232,11 +1233,15 @@ def build_limit(hist, latest, pid, wid, label, now, dflt):
         if cnt:
             rows.append(h)
             last[h["t"] // BUCKET] = [h["t"], round(r, 1), 1 if h.get("b") else 0]
-    p = prep(rows, wid, pid)         # burn only over records that carry this window, so a young provider reads null
+    # the graph holds only records that measure this window, but rates and the profile run over every record where the provider exists: one where no seat measures
+    # this window (every read failed past carry_good's limit) is a break there, so use across it is unplaced rather than bridged; before the provider existed there is no
+    # record, so a young provider still reads null
+    seq = [h for h in hist if seats_of(h, pid)]
+    p = prep(seq, wid, pid)
     first = rows[0]["t"]
     lim = {"id": wid, "label": label, "cap": round(sum(w for _, w in seats) * 100, 2), "now": round(rem, 1), "hist": [last[k] for k in sorted(last)],
            "burn": {}, "drain": {}, "seats": []}
-    prof = hour_profile(rows, wid, pid)
+    prof = hour_profile(seq, wid, pid)
     if prof:
         lim["profile"], lim["typical"] = [round(x, 2) for x in prof[0]], round(prof[1], 2)
     for w in WINDOWS:
@@ -1373,17 +1378,20 @@ def backtest(hist, targets=BT_TARGETS, every=6 * 3600, ahead=DAY, fresh=6 * 3600
     held flat); the error at an origin is the mean |projected - recorded| over the recorded points in the next `ahead`, the figure is the mean over origins."""
     out = {}
     for pid, wid, label in targets:
-        rows = [h for h in carry_good(hist, pid) if remaining(h, wid, pid=pid)[1]]
+        cg = carry_good(hist, pid)
+        rows = [h for h in cg if remaining(h, wid, pid=pid)[1]]      # origins and recorded points are real readings
         if len(rows) < 2:
             continue
+        seq = [h for h in cg if seats_of(h, pid)]                     # burn and profile keep a failed-read gap as a break, as build_limit does
+        sts = [h["t"] for h in seq]
         ts, dflt = [h["t"] for h in rows], {w: p for w, _, p in PROVIDERS[pid][1]}
-        p, lefts = prep(rows, wid, pid), [remaining(h, wid, pid=pid)[0] for h in rows]
+        p, lefts = prep(seq, wid, pid), [remaining(h, wid, pid=pid)[0] for h in rows]
         errs = {m: [] for m in BT_METHODS}
         t0 = (ts[0] + DAY) // every * every + every
         while t0 + ahead <= ts[-1]:
             i = bisect.bisect_right(ts, t0) - 1
             actual = [(ts[j] - t0, lefts[j]) for j in range(i + 1, bisect.bisect_right(ts, t0 + ahead))]
-            prof = hour_profile(rows[:i + 1], wid, pid) if t0 - ts[i] <= fresh else None
+            prof = hour_profile(seq[:bisect.bisect_right(sts, ts[i])], wid, pid) if t0 - ts[i] <= fresh else None
             rates = {"typical": prof and prof[0], "3h": burn_p(p, 3, t0), "24h": burn_p(p, 24, t0)}
             if len(actual) >= minpts and all(r is not None for r in rates.values()):
                 seats = []
@@ -3010,6 +3018,18 @@ def selftest():
     clo_ = carry_good(lo_, "claude")
     assert clo_[144]["s"]["A"]["w"] == 0.1 and clo_[160] is lo_[160], clo_[160]          # carried within the hour, not after it
     assert (burn(clo_, "w", 3, lo_[-1]["t"]) or 0) < 1, burn(clo_, "w", 3, lo_[-1]["t"])
+    # ... and the gap is a break for the rates the dashboard shows, not only for burn() on the raw history: records where every seat failed stay in the sequence the
+    # builder runs rate and profile over, so the recovery reading is not joined to the last good one 47.5 h earlier (that read 1.05 %/h as the 3 h burn)
+    lo_lim = build(lo_, lo_[-1]["t"], {}, False)["providers"][0]["limits"][0]
+    assert lo_lim["burn"]["3"] == 0.0, lo_lim["burn"]                      # the 3 h span ends in the gap: its use is unplaced, so 0 (not 0.5 of a seat over 47.5 h)
+    assert lo_lim["hist"][-1][1] == 40.0 and not any(T + 47000 < x[0] < T + 215000 for x in lo_lim["hist"]), lo_lim["hist"][-3:]       # the graph still holds only real (or carried) readings
+    # profile: 20 h good at 1 %/h, 15 h failed (past carry), 10 h good at 1 %/h. Outage time is not covered time, and the 0.3 -> 0.6 jump is not spread over it
+    def pg(t0, n, u0):
+        return [{"t": T + t0 + i * 300, "s": {"A": gs(T + t0 + i * 300, u0 + i * 300 / 3600 * 0.01)}} for i in range(n)]
+    pf_ = pg(0, 240, 0.1) + [{"t": T + 72000 + i * 300, "s": {"A": {"ok": False, "note": "x"}}} for i in range(180)] + pg(126000, 120, 0.6)
+    assert abs(hour_profile(pf_, "w")[1] - 1.0) < 1e-6, hour_profile(pf_, "w")      # directly: covered hours burn 1 %/h (counting the outage as covered gives 0.67, bridging it 1.33)
+    pf_lim = build(pf_, pf_[-1]["t"], {}, False)["providers"][0]["limits"][0]
+    assert 0.9 < pf_lim["typical"] <= 1.0, pf_lim["typical"]                 # through the builder: only carry_good's one carried hour (use 0) dilutes it
 
     # banked resets: a cache with credits (sorted, those without an expiry left out), one without, a count above the list, an expired credit
     c = {"fetchedAt": 1793592327005, "primary": {"usedPercent": 13, "windowDurationMins": 10080, "resetsAt": 1794124925}, "secondary": None,
