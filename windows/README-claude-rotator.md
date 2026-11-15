@@ -709,7 +709,8 @@ tested headless with `claude -p --plugin-dir <mod folder> "/seats"`. Needs Claud
 ## Agent Dashboard (`usage-history.py`)
 
 The Agent Dashboard is a local app. `usage-app-install.ps1` registers the logon task `Claude usage dashboard`,
-which runs `usage-history.py --serve` on `127.0.0.1:8787` at Idle CPU priority, and adds the Start-menu shortcut
+which runs `usage-history.py --serve` on `127.0.0.1:8787` at Idle CPU priority (with `--state-dir` naming the folder when
+`QUOTA_STATE_DIR` is set at install, since a scheduled task does not inherit the installing shell's environment), and adds the Start-menu shortcut
 `Agent Dashboard` that opens the page as an app window (install and `-Uninstall` also remove the shortcuts of the
 app's earlier names, `Quota Management` and `Quota`). Every 5 minutes it reads each
 seat's `usage-cache[-fable].json` (it never probes), appends a line to

@@ -13,9 +13,10 @@ from file:// with no server. The 'Claude usage dashboard' scheduled task runs --
   usage-history.py --serve [--port 8787]   local app: page, /api/data, POST /api/refresh, POST /api/switch, sampler thread
   usage-history.py --make-icons            write the app icons into <state dir>\\usage-app\\
   usage-history.py --selftest              run the checks
+  any of these [--state-dir DIR]           the state folder, as QUOTA_STATE_DIR (the logon task passes it: a task does not inherit a shell's environment)
 
 QUOTA_STATE_DIR, when set, redirects everything this script WRITES to that folder (seat caches are still
-read from their real places).
+read from their real places). --state-dir wins over it, and is copied into QUOTA_STATE_DIR so every child inherits it.
 
 shortcut: a seat that is used elsewhere (the desktop app, the VM) only updates when something
 probes it (a rotation, /seats, --status), so its line moves in steps; add probing only if the
@@ -44,6 +45,16 @@ import zlib
 
 HOME = os.path.expanduser("~")
 ROOT = os.path.join(HOME, ".claude-cli-accounts")
+
+
+def state_arg(argv):
+    """The folder given by --state-dir DIR, else None. Read before any path is derived, so it moves every file QUOTA_STATE_DIR does."""
+    i = argv.index("--state-dir") + 1 if "--state-dir" in argv else 0
+    return argv[i] if 0 < i < len(argv) and argv[i] and not argv[i].startswith("--") else None
+
+
+if state_arg(sys.argv):
+    os.environ["QUOTA_STATE_DIR"] = state_arg(sys.argv)       # children (rotator-sync, the reset script, the app relauncher) inherit the same folder
 STATE = os.environ.get("QUOTA_STATE_DIR") or ROOT
 HIST = os.path.join(STATE, ".usage-history.jsonl")
 EMAILS = os.path.join(STATE, ".usage-emails.json")
@@ -5315,6 +5326,22 @@ def selftest():
         __import__("shutil").rmtree(ld, ignore_errors=True)
     # icons: a valid PNG signature and an ICO header
     assert png(16)[:8] == b"\x89PNG\r\n\x1a\n" and ico(png(16))[:6] == b"\0\0\1\0\1\0"
+    # --state-dir: the logon task's only way to name the state folder (a task does not inherit the installing shell's QUOTA_STATE_DIR)
+    assert state_arg(["x", "--serve", "--state-dir", "D:/s"]) == "D:/s" and state_arg(["x", "--serve"]) is None
+    assert state_arg(["x", "--state-dir"]) is None and state_arg(["x", "--state-dir", "--serve"]) is None
+    sd_ = tempfile.mkdtemp()
+    try:
+        probe_ = ("import importlib.util, os, sys; d = sys.argv[2]; sys.argv = ['usage-history.py', '--serve', '--state-dir', d]; "
+                  "s = importlib.util.spec_from_file_location('uh', sys.argv and %r); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                  "print(m.STATE + '|' + m.HIST + '|' + m.PCACHE + '|' + os.environ['QUOTA_STATE_DIR'])") % os.path.abspath(__file__)
+        env_ = dict(os.environ, QUOTA_STATE_DIR=os.path.join(sd_, "from-env"))
+        out_ = subprocess.run([sys.executable, "-c", probe_, "unused", sd_], capture_output=True, text=True, env=env_, timeout=60)
+        assert out_.stdout.strip().split("|") == [sd_, os.path.join(sd_, ".usage-history.jsonl"), os.path.join(sd_, ".usage-providers.json"), sd_], (out_.stdout, out_.stderr[-400:])
+    finally:
+        shutil.rmtree(sd_, ignore_errors=True)
+    ins_ = open(os.path.join(HERE, "usage-app-install.ps1"), encoding="utf-8-sig").read()
+    act_ = [ln for ln in ins_.splitlines() if "New-ScheduledTaskAction" in ln]
+    assert len(act_) == 1 and "$stateArg" in act_[0] and "--state-dir" in ins_.split("New-ScheduledTaskAction")[0], act_
     say("usage-history selftest: ok")
 
 

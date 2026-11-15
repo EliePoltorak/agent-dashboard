@@ -40,11 +40,16 @@ if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found next to $py" }
 & $py $script --make-icons
 if ($LASTEXITCODE) { throw 'icon generation failed' }
 
+# the state folder: a scheduled task does not inherit this shell's environment, so a QUOTA_STATE_DIR set here is passed to the server as
+# --state-dir, or the server would write its history and provider cache (pending-reset marks included) to the default folder instead
+$state = if ($env:QUOTA_STATE_DIR) { [IO.Path]::GetFullPath($env:QUOTA_STATE_DIR) } else { Join-Path $HOME '.claude-cli-accounts' }
+$stateArg = if ($env:QUOTA_STATE_DIR) { " --state-dir `"$state`"" } else { '' }
+
 Remove-Task $oldTask
 Remove-Task $taskName
 foreach ($l in $oldLnks) { if (Test-Path $l) { Remove-Item $l } }
 
-$action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$script`" --serve --port $Port" -WorkingDirectory $dir
+$action = New-ScheduledTaskAction -Execute $pythonw -Argument "`"$script`" --serve --port $Port$stateArg" -WorkingDirectory $dir
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:USERDOMAIN\$env:USERNAME"
 $settings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
     -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -Priority 10 `
@@ -63,7 +68,6 @@ if (-not $up) { throw "the app did not answer on ${url}api/data within 30 s; see
 $chrome = 'C:\Program Files\Google\Chrome\Application\chrome.exe'
 $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
 $browser = if (Test-Path $chrome) { $chrome } else { $edge }
-$state = if ($env:QUOTA_STATE_DIR) { $env:QUOTA_STATE_DIR } else { Join-Path $HOME '.claude-cli-accounts' }
 $sh = (New-Object -ComObject WScript.Shell).CreateShortcut($lnk)
 $sh.TargetPath = $browser
 $sh.Arguments = "--app=$url"
