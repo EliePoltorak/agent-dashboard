@@ -1827,7 +1827,7 @@ def rollout_records(events, taken, rebuilt, hist=(), carry=False):
     state, recs, i = {}, [], 0
     for t, seat, wins in events:
         while i < len(prior) and prior[i]["t"] <= t:
-            if not prior[i].get("b"):       # a sampled record lists every seat that had a home then (an empty one: the last saved home removed), so a seat it lacks was removed and is not carried past it; an imported ("b") record lists only the seats the logs had shown
+            if not prior[i].get("b"):       # a sampled record lists every seat that had a home then (an empty one: the last saved home removed), so a seat it lacks was removed and is not carried past it; a --backfill ("b") record lists only the seats the logs had shown, so it is exempt (records the sampler imports from the logs carry the whole replay state and are not flagged)
                 for s in [s for s in state if s not in prior[i]["codex"]]:
                     del state[s]
             for s, v in prior[i]["codex"].items():
@@ -2273,8 +2273,8 @@ def valid_seat(seat, homes):
 
 
 def valid_claude_seat(seat, seats):
-    """A Claude seat the reset may be applied to: any folder under ROOT holding token.txt (token_seats), so letters, digits, "_" and "-" (the same characters
-    app-login-token.ps1 accepts for a seat name; no dot, slash or space, so the label is safe in a path and a command line), and one of `seats` (exact match)."""
+    """A Claude seat the reset may be applied to: any folder under ROOT holding token.txt (token_seats), so letters, digits, "_" and "-" (the characters
+    app-login-token.ps1 accepts for a seat name, which also caps it at 32: a longer label gets no app login and falls back to token.txt; no dot, slash or space, so the label is safe in a path and a command line), and one of `seats` (exact match)."""
     return isinstance(seat, str) and re.fullmatch(r"[A-Za-z0-9_-]+", seat) is not None and seat in seats
 
 
@@ -2692,7 +2692,7 @@ class Store:
                 applog("codex reset: recording the reset failed: %s: %s" % (type(e).__name__, e))
             try:
                 if new:
-                    last = next((dict(h["codex"]) for h in reversed(self.hist) if h.get("codex")), {})
+                    last = next((dict(h["codex"]) for h in reversed(self.hist) if h.get("codex") and not h.get("b")), {})      # a sampled record: a --backfill ("b") one lists only the seats the logs showed, and rollout_records drops the seats a sampled record lacks
                     last[seat] = new
                     self.hist = save(self.hist, {"t": int(now), "codex": last}, now)
             except Exception as e:   # shortcut: same broad catch as the handlers
@@ -4090,6 +4090,14 @@ def selftest():
             cst.refreshing.acquire()                                         # in time: the result itself, and the caller keeps the lock
             assert cst.codex_reset("A", "/x", fake)["outcome"] == "redeemed" and cst.refreshing.locked()
             cst.refreshing.release()
+            # the reading saved after a reset copies its seat list from the newest SAMPLED record, never a --backfill ("b") one, which lists only the seats the
+            # logs showed: rollout_records drops the seats a sampled record lacks, so a partial copy would drop B from the chart
+            hb_ = cst.hist
+            cst.hist = [{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1, "banked": 3}, "B": {"ts": 1, "w": 0.2}}}, {"t": 2, "b": 1, "codex": {"A": {"ts": 2, "w": 0.1}}}]
+            assert cst.codex_reset_job("A", "/x", fake)["outcome"] == "redeemed" and set(cst.hist[-1]["codex"]) == {"A", "B"}, cst.hist[-1]
+            cst.hist = hb_
+            with pcache_txn() as c_:
+                c_["codex_pending"] = {}
             # B: an unclear Codex answer keeps the seat marked (the script mints a new claim each run): no retry, and no reading lifts the mark;
             # only the script's clear answer or the user's Clear does (an "await" mark, case D below, is the one a reading lifts)
             assert load_pcache().get("codex_pending") == {}
