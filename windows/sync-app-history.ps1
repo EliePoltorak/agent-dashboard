@@ -56,6 +56,7 @@
     pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
     pwsh -File sync-app-history.ps1 -NoPrune        # only add/retitle; never remove
     pwsh -File sync-app-history.ps1 -Quiet          # for the launcher hook / scheduled task
+    pwsh -File sync-app-history.ps1 -AssumeAppRunning   # testing: act as if the app were open (flags not synced)
 
   SCHEDULED: Windows task 'Claude app-history sync' runs this every 30 min when enabled (hidden, via
   sync-app-history-hidden.vbs), so the app history stays fresh without a seat switch.
@@ -336,8 +337,8 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # So we remember every record's flags from the last run (.flag-state.json): a record whose flag
 # differs from that is the one you changed, and its value goes to every seat's record of the
 # session (true wins if two seats changed opposite ways). A record not seen last run counts as changed
-# only if it is on. A session with a record that can't be written keeps its last baseline; an unreadable record
-# stops the save (below). First run, or a session no record was
+# only if it is on. A session with a record that can't be written or read keeps its last baseline
+# (below; with a state file that predates its record->session map, an unreadable record stops the save). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
 # cliSessionId, whatever their cwd. The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
@@ -377,6 +378,7 @@ $flagByCli = @{}
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 $flagHeld = New-Object 'System.Collections.Generic.HashSet[string]'   # "flag|cli|key" of unreadable known records
+$flagWarned = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # warn once per record
 $flagPrevCli = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)   # key -> cliSessionId, last run
 if ($flagPrevAll -and $flagPrevAll['cli']) { foreach ($k in $flagPrevAll['cli'].Keys) { $flagPrevCli[$k] = [string]$flagPrevAll['cli'][$k] } }
 $flagPrevCi = @{}
@@ -405,7 +407,7 @@ if (-not $flagSkip) {
         $hc = $flagPrevCli[$k]
         if ($hc) {
           [void]$flagFailCli.Add("$flag|$hc"); [void]$flagHeld.Add("$flag|$hc|$k")
-          if ($flag -eq 'isArchived') { Write-Warning "could not read $(Join-Path $ccs $k); that session's archive/pin flags keep their last synced state until it can be read. Restore or delete that file to clear this" }
+          if ($flagWarned.Add($k)) { Write-Warning "could not read $(Join-Path $ccs $k); that session's archive/pin flags keep their last synced state until it can be read. Restore or delete that file to clear this" }
         } else {
           if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run. Restore or delete that file to clear this" }
           $flagFail = $true
@@ -447,6 +449,7 @@ if (-not $flagSkip) {
           [System.IO.File]::Move("$($r.file.FullName).tmp", $r.file.FullName, $true)
           $flipped++; $next[$r.key] = $want
         } catch {
+          Remove-Item -LiteralPath "$($r.file.FullName).tmp" -Force -ErrorAction SilentlyContinue   # don't leave it in the app's index
           Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
           [void]$flagFailCli.Add("$flag|$cli")
         }
@@ -645,8 +648,14 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
   $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
   # Temp file, then an atomic replace: a crash mid-write must not leave a truncated file, and a failed
   # replace must not lose the old one ([IO.File]::Move keeps the destination; Move-Item -Force deletes it first).
-  ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8
-  [System.IO.File]::Move("$flagStatePath.tmp", $flagStatePath, $true)
+  # A failed save warns rather than aborting: pass 2 has already run, and the old state file is still there.
+  try {
+    ($flagNextAll | ConvertTo-Json -Compress -Depth 5) | Set-Content -LiteralPath "$flagStatePath.tmp" -Encoding UTF8
+    [System.IO.File]::Move("$flagStatePath.tmp", $flagStatePath, $true)
+  } catch {
+    Remove-Item -LiteralPath "$flagStatePath.tmp" -Force -ErrorAction SilentlyContinue
+    Write-Warning "could not save the flag state $flagStatePath ($($_.Exception.Message)); the next run compares with the previous one"
+  }
 }
 
 if (-not $Quiet) {
