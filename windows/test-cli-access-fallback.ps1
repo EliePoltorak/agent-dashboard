@@ -388,17 +388,19 @@ $wk = @(Get-PrefetchWork @('A','B') $allModels $true | ForEach-Object { "$($_.l)
 Check 'work list drops a memoized pair when the cooldown is honoured' (($wk -join ',') -eq 'A|,B|,B|-fable') ($wk -join ',')
 $wk = @(Get-PrefetchWork @('A','B') $allModels $false | ForEach-Object { "$($_.l)|$($_.s)" })
 Check 'work list keeps every pair when the cooldown is not honoured' (($wk -join ',') -eq 'A|,A|-fable,B|,B|-fable') ($wk -join ',')
-# and for real: the workers must not probe the memoized pair (the mock logs each call to a file; environment variables reach the runspaces)
+# and for real: the workers must not probe the memoized pair (the mock records each call as its own file in a folder, since parallel appends to one file can
+# lose a line to a sharing violation; environment variables reach the runspaces)
 Reset-Case
 $script:UnknownProbeMemo = @{ 'A|-fable' = [pscustomobject]@{ label='A'; ok=$false; access='unknown' } }
-$probeLog = Join-Path $root 'prefetch-probes.log'
+$probeLog = Join-Path $root 'prefetch-probes'
+$null = New-Item -ItemType Directory -Force -Path $probeLog
 $env:CLAUDE_ROTATOR_TEST_PROBE_LOG = $probeLog
 $origProbe = ${function:Probe-Usage}
-function Probe-Usage { param([string]$Label, [string]$Model) <# MOCK-NO-NETWORK #> Add-Content -LiteralPath $env:CLAUDE_ROTATOR_TEST_PROBE_LOG -Value "$Label|$Model"; [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network (mock)' } }
+function Probe-Usage { param([string]$Label, [string]$Model) <# MOCK-NO-NETWORK #> Set-Content -LiteralPath (Join-Path $env:CLAUDE_ROTATOR_TEST_PROBE_LOG "$Label`_$Model") -Value ''; [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network (mock)' } }
 if ((Get-Command Probe-Usage -CommandType Function).Definition -notmatch 'MOCK-NO-NETWORK') { Write-Host 'ABORT: Probe-Usage is not the mock' -ForegroundColor Red; exit 2 }
 $env:CLAUDE_ROTATOR_SELFTEST = '0'
 try { Prefetch-Usage @('A','B') $false $true $true } finally { $env:CLAUDE_ROTATOR_SELFTEST = '1'; ${function:Probe-Usage} = $origProbe; $env:CLAUDE_ROTATOR_TEST_PROBE_LOG = $null }
-$probed = @(Get-Content $probeLog -ErrorAction SilentlyContinue | Sort-Object)
+$probed = @(Get-ChildItem -LiteralPath $probeLog -File -ErrorAction SilentlyContinue | ForEach-Object { $_.Name -replace '_', '|' } | Sort-Object)
 Check 'the real prefetch does not probe a memoized pair again' (($probed -join ',') -eq 'A|haiku,B|fable,B|haiku') ($probed -join ',')
 Check 'Probe-Usage is the real one again (after the memo case)' ((Get-Command Probe-Usage -CommandType Function).Definition -notmatch 'MOCK-NO-NETWORK')
 
