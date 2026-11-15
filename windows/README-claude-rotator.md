@@ -530,7 +530,8 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 seats changed opposite ways. The first run, and any session never seen before, use "on for any seat →
 on for all"; records the sync itself creates carry the session's flags. **This step runs only while the
 app is closed** (the live app holds its records in memory and rewrites them), so in practice at a
-`claude-account --switch`/`--rotate`; the 30-minute task skips it and says so. Originals are backed up
+`claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, or a manual
+`claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
 under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 runs are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
 as a first run.
