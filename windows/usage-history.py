@@ -2655,7 +2655,8 @@ class Store:
             self.rebuild(time.time())
 
     def claude_reset(self, seat, kind, fetch=None, new_id=None, resend_rid=None, login=app_login):
-        """Apply one banked Claude reset of `kind` on `seat` (the caller holds `refreshing`), then re-read that seat's credits. The grant is picked here, from
+        """Apply one banked Claude reset of `kind` on `seat` (the caller holds `refreshing`), then re-read that seat's credits and, when the reset is confirmed
+        (`redeemed` or `alreadyRedeemed`), every seat's usage (reread_usage). The grant is picked here, from
         the last reading, never taken from the page. The claim (grant id + request id) is saved per seat and kind before the call and kept while the outcome
         is unconfirmed; until it settles, every click resends that same claim, even when a later reading no longer lists its grant (a lost answer to a
         claim that landed), so a retry can never spend a second grant. A confirmed reset also takes its grant off the cached reading at once (spend_grant; for an
@@ -2713,13 +2714,19 @@ class Store:
 
     def reread_usage(self):
         """The live Claude read Refresh runs (probe_claude: every seat's usage cache rewritten), then a forced sample and rebuild. Used after a confirmed Claude
-        reset (the caller holds `refreshing`). A probe that fails is logged and the sample still runs, so the page is rebuilt either way."""
+        reset (the caller holds `refreshing`). A probe that fails is logged and the sample still runs. The reset has already landed here, so nothing in this
+        read may make it look failed: a sample that raises is logged and the page is rebuilt from what it has instead."""
         try:
             rc = probe_claude()
         except (OSError, subprocess.SubprocessError) as e:
             rc = type(e).__name__
         applog("claude reset: usage read again -> %s" % rc)
-        self.take(force=True)
+        try:
+            self.take(force=True)
+        except Exception as e:   # shortcut: same broad catch as the handlers; the reset itself succeeded
+            applog("claude reset: sample after the reset failed: %s: %s" % (type(e).__name__, e))
+            with self.lock:
+                self.rebuild(time.time())
 
     def claude_reset_clear(self, seat, kind, rid):
         """Drop a pending Claude claim (seat + kind) by hand (the caller holds `refreshing`): a resend of it never got an answer Claude recognises, so it would stay
@@ -4888,6 +4895,12 @@ def selftest():
             globals()["probe_claude"] = bad_probe
             rs_ord.clear(), rs_.reread_usage()
             assert rs_ord == [("take", True)] and "usage read again -> OSError" in open(APPLOG).read(), rs_ord
+            def bad_take(force=False):
+                raise PcacheError("cache unreadable")
+            globals()["probe_claude"] = lambda: 0
+            rs_.take, rs_.lock, rs_.rebuild = bad_take, threading.RLock(), lambda now: rs_ord.append("rebuild")
+            rs_ord.clear(), rs_.reread_usage()                                            # a landed reset is never reported as failed
+            assert rs_ord == ["rebuild"] and "sample after the reset failed: PcacheError" in open(APPLOG).read(), rs_ord
         finally:
             globals()["probe_claude"] = keep_pc
         assert b'"grant_id": "g2", "request_id": "rid2"' in kc[2][2] and not any(b'"g11"' in (c[2] or b"") for c in kc)
