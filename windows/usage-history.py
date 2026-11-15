@@ -2570,9 +2570,9 @@ class Store:
             {"outcome": "error", "text": "Seat %s has no unconfirmed reset to clear." % seat}
 
     def codex_reset_job(self, seat, script, popen):
-        """The reset itself, then the reading taken after it recorded; the unconfirmed mark dropped only when the answer was clear. A `redeemed` answer
-        whose follow-up read failed has no reading to show, so the page would still offer Apply on the pre-reset one: the mark becomes an "await" mark
-        (fresh id), and the first reading newer than it lifts it (settle_awaits)."""
+        """The reset itself, then the reading taken after it recorded; the unconfirmed mark dropped only when the answer was clear. A `redeemed` or
+        `alreadyRedeemed` answer whose follow-up read failed has no reading to show, so the page would still offer Apply on the pre-reset one: the mark
+        becomes an "await" mark (fresh id), and the first reading newer than it, from the cache or the session logs, lifts it (lift_awaits)."""
         res, settled, new = run_reset(seat, script, popen)
         applog("codex reset: seat %s -> %s%s" % (seat, res["outcome"], "" if settled else " (unconfirmed)"))
         with self.lock:
@@ -3952,7 +3952,7 @@ def selftest():
             assert cst.codex_reset_clear("A", "")["outcome"] == "error" and "cleared by hand" in open(APPLOG).read()
             r_ = cst.codex_reset("A", "/x", fake)                                                                   # a clear answer: no mark left
             assert r_["outcome"] == "redeemed" and load_pcache()["codex_pending"] == {}
-            # D: a `redeemed` answer whose follow-up read failed leaves an "await" mark (no reading to show): Apply stays off, the page says the reset was applied,
+            # D: a `redeemed` (or `alreadyRedeemed`, below) answer whose follow-up read failed leaves an "await" mark (no reading to show): Apply stays off, the page says the reset was applied,
             # and the first reading newer than the mark lifts it; an older one does not; an unconfirmed mark (no "await") is never lifted by a reading
             r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(json.dumps({"status": "redeemed", "outcome": "redeemed"}).encode()) if "--confirm" in argv else Proc(b"?", 1))
             m_ = load_pcache()["codex_pending"]["A"]
