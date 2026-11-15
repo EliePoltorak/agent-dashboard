@@ -1253,9 +1253,14 @@ def prov_spec(pid, seats):
 
 
 def latest_of(hist, pid):
-    """The newest record carrying provider `pid`, a recorded one in preference to a rebuilt (b) one."""
+    """The newest record carrying provider `pid`, a recorded one in preference to a rebuilt (b) one. A record that carries the provider with no seats
+    at all counts: sample() records Claude as an empty map once its last seat is gone (deleted, or moved under .inactive), and that newer snapshot must
+    win over the older ones, or the removed seat stays on show until its history expires. (Codex, Grok and Gemini are left out of a record when they
+    have nothing, so they are not affected.) A failed read's fallback still looks only at records that have seats."""
+    key = "s" if pid == "claude" else pid
     rows = [h for h in hist if seats_of(h, pid)]
-    rec = next((h for h in reversed(rows) if not h.get("b")), rows[-1] if rows else {"t": 0})
+    present = [h for h in hist if isinstance(h.get(key), dict)]
+    rec = next((h for h in reversed(present) if not h.get("b")), present[-1] if present else {"t": 0})
     seats = dict(seats_of(rec, pid))
     for label, s in seats.items():          # a failed read keeps showing the last good one, with the failure as its note
         if s.get("ok") is False:
@@ -3117,6 +3122,11 @@ def selftest():
     g = [{"t": T, "grok": {"grok": {"ts": T, "w": 0.2}}}, {"t": T + 300, "grok": {"grok": {"ok": False, "note": "expired"}}}]
     lg = latest_of(g, "grok")["grok"]["grok"]
     assert lg["w"] == 0.2 and lg["note"] == "expired" and g[1]["grok"]["grok"].get("w") is None, lg   # last good kept, history untouched
+    le_ = [{"t": T, "s": {"A": {"ts": T, "w": 0.4}}}, {"t": T + 300, "s": {}}]                       # the last Claude seat was removed
+    assert latest_of(le_, "claude")["s"] == {} and latest_of(le_, "claude")["t"] == T + 300, latest_of(le_, "claude")
+    assert not any(a.get("w") for pv in build(le_, T + 600, {}, False, {})["providers"] for a in pv.get("accounts", []))   # the removed seat is no longer shown
+    assert build(le_[:1], T + 600, {}, False, {})["providers"]                                          # (while it was there, it was)
+    assert latest_of(le_[:1] + [{"t": T + 300, "codex": {"X": {"ts": T, "w": 0.1}}}], "claude")["s"]["A"]["w"] == 0.4   # a record without the key is not a snapshot of it
     h = [rec(T, A=(0.10, R), B=(0.5, R)), rec(T + 3600, A=(0.20, R), B=(0.5, R))]
     assert abs(burn(h, "w", 3, T + 3600) - 10) < 1e-9
     h = [rec(T, A=(0.90, R)), rec(T + 3600, A=(0.05, R + WEEK))]          # weekly reset in between
