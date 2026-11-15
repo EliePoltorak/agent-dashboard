@@ -2704,9 +2704,22 @@ class Store:
                     ce["gen"] = (ce.get("gen") or 0) + 1        # with the spend, atomically: a read already in flight was asked before it, and its answer would restore the spent grant
                     spend_grant(cache, seat, gid, now, prev_send if res["outcome"] == "alreadyRedeemed" else None)        # the follow-up read below is refused while the seat is held (429 / sign-in / scope): the page must not offer the spent grant again meanwhile
         self.credits_read(seat, time.time(), fetch or http_json, force=True)      # still honours a 429 / sign-in hold
-        with self.lock:
-            self.rebuild(time.time())
+        if settled and res["outcome"] in ("redeemed", "alreadyRedeemed"):
+            self.reread_usage()             # the usage readings predate the reset: read them again, or the seat stays shown capped and the pool depleted
+        else:
+            with self.lock:
+                self.rebuild(time.time())
         return res
+
+    def reread_usage(self):
+        """The live Claude read Refresh runs (probe_claude: every seat's usage cache rewritten), then a forced sample and rebuild. Used after a confirmed Claude
+        reset (the caller holds `refreshing`). A probe that fails is logged and the sample still runs, so the page is rebuilt either way."""
+        try:
+            rc = probe_claude()
+        except (OSError, subprocess.SubprocessError) as e:
+            rc = type(e).__name__
+        applog("claude reset: usage read again -> %s" % rc)
+        self.take(force=True)
 
     def claude_reset_clear(self, seat, kind, rid):
         """Drop a pending Claude claim (seat + kind) by hand (the caller holds `refreshing`): a resend of it never got an answer Claude recognises, so it would stay
@@ -4723,12 +4736,14 @@ def selftest():
                 raise r_
             return r_
         ks = Store.__new__(Store)
-        ks.lock, ks.rebuild = threading.RLock(), lambda now: None
+        rr_ = []                                                                          # each live re-read of usage a reset asked for
+        ks.lock, ks.rebuild, ks.reread_usage = threading.RLock(), lambda now: None, lambda: rr_.append(1)
         save_pcache({"credits": {"A": dict(ke), "B": dict(ke)}})
         ids = iter("rid%d" % i for i in range(1, 99))
         nid = lambda: next(ids)
         r_ = ks.claude_reset("A", "fable", kf, nid)
         assert r_ == {"outcome": "redeemed", "text": "Fable reset applied to seat A."}, r_
+        assert rr_ == [1], rr_                                                            # a confirmed reset reads the usage again: the seat is no longer shown capped
         assert kc[0][:3] == ("POST", RESET_URL % ORG, b'{"program": "cedar_ember", "grant_id": "g1", "request_id": "rid1"}'), kc[0]
         assert RESET_URL % ORG == "https://api.anthropic.com/api/organizations/%s/reset_rate_limits" % ORG
         assert kc[0][3:6] == ("Bearer secret-A", "application/json", "oauth-2025-04-20") and kc[0][6].startswith("claude-cli/") and kc[0][6].endswith(" (external, cli)")
@@ -4847,15 +4862,34 @@ def selftest():
         # an unconfirmed claim keeps its request id; the retry of the same grant reuses it; a settled answer drops it
         save_pcache({"credits": {"A": dict(ke)}})
         kc.clear(), post.extend([TimeoutError("t"), (200, {"result": "already_used"}), (200, {"result": "reset"})])
+        rr_.clear()
         r_ = ks.claude_reset("A", "full", kf, nid)
         cl = load_pcache()["credits_claims"]
         assert r_["outcome"] == "error" and "unconfirmed (Claude could not be reached)" in r_["text"] and list(cl) == ["A:full"] and cl["A:full"]["id"] == "rid2"
+        assert rr_ == []                                                                  # an unconfirmed reset changed nothing to read
         assert cl["A:full"]["gid"] == "g2"
         # the claim landed but its answer was lost: the next reading no longer lists g2 and offers g11; the retry still resends g2 with rid2
         save_pcache(dict(load_pcache(), credits={"A": dict(ke, grants=[g for g in ke["grants"] if g["id"] != "g2"])}))
         assert [g["id"] for g in usable_grants(load_pcache()["credits"]["A"], "full", KN)] == ["g11"]
         r_ = ks.claude_reset("A", "full", kf, nid)
         assert r_ == {"outcome": "alreadyRedeemed", "text": "That reset was already applied; nothing more was used."}
+        assert rr_ == [1], rr_                                                            # already applied: the reset happened, so its usage is read again too
+        # reread_usage itself: the live Claude probe, then a forced sample; a probe that cannot run still takes the sample
+        rs_ = Store.__new__(Store)
+        rs_ord = []
+        rs_.take = lambda force=False: rs_ord.append(("take", force))
+        keep_pc = probe_claude
+        try:
+            globals()["probe_claude"] = lambda: rs_ord.append("probe") or 0
+            rs_.reread_usage()
+            assert rs_ord == ["probe", ("take", True)], rs_ord
+            def bad_probe():
+                raise OSError("no pwsh")
+            globals()["probe_claude"] = bad_probe
+            rs_ord.clear(), rs_.reread_usage()
+            assert rs_ord == [("take", True)] and "usage read again -> OSError" in open(APPLOG).read(), rs_ord
+        finally:
+            globals()["probe_claude"] = keep_pc
         assert b'"grant_id": "g2", "request_id": "rid2"' in kc[2][2] and not any(b'"g11"' in (c[2] or b"") for c in kc)
         assert load_pcache()["credits_claims"] == {}
         save_pcache(dict(load_pcache(), credits={"A": dict(ke)}))
