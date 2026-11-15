@@ -1443,7 +1443,7 @@ def load_extra():
             break
     plans, pairs = codex_measure()
     try:
-        with open(os.path.join(ROOT, ".rotator-drift.json"), encoding="utf-8-sig") as fh:
+        with open(os.path.join(STATE, ".rotator-drift.json"), encoding="utf-8-sig") as fh:
             drift = json.load(fh)
     except (OSError, ValueError):
         pass
@@ -2347,14 +2347,14 @@ class Store:
                 self.hist = _read_hist()[0] if stale else sorted(self.hist + new, key=lambda h: h["t"])
 
     def drift_check(self, now, here=None, py=None):
-        """rotator-sync.py --check --quiet at most every DRIFT_EVERY, when the script sits next to this one. It writes .rotator-drift.json; its exit code and output are ignored."""
+        """rotator-sync.py --check --quiet at most every DRIFT_EVERY, when the script sits next to this one. It writes .rotator-drift.json under STATE (--state, so QUOTA_STATE_DIR redirects it with everything else; its update journal sits beside it); its exit code and output are ignored."""
         script = os.path.join(here or HERE, "rotator-sync.py")
         with self.lock, pcache_txn() as cache:
             if not os.path.isfile(script) or now - (cache.get("drift_run") or 0) < DRIFT_EVERY:
                 return False
             cache["drift_run"] = int(now)           # first, so a hang or crash is not retried every sample
         try:
-            run_bounded((py or PY) + [script, "--check", "--quiet"], 120, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+            run_bounded((py or PY) + [script, "--check", "--quiet", "--state", os.path.join(STATE, ".rotator-drift.json")], 120, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
         except (OSError, subprocess.SubprocessError):
             pass
         return True
@@ -3581,7 +3581,7 @@ def selftest():
             st.lock = threading.RLock()
             assert not st.drift_check(1000 * DRIFT_EVERY, td, [sys.executable])                       # no rotator-sync.py next to us: nothing runs
             open(os.path.join(td, "rotator-sync.py"), "w").write("import sys;open(%r,'a').write(' '.join(sys.argv[1:]) + chr(10))" % mark)
-            assert st.drift_check(1000 * DRIFT_EVERY, td, [sys.executable]) and open(mark).read() == "--check --quiet" + chr(10)
+            assert st.drift_check(1000 * DRIFT_EVERY, td, [sys.executable]) and open(mark).read() == "--check --quiet --state " + os.path.join(STATE, ".rotator-drift.json") + chr(10)
             assert not st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY - 1, td, [sys.executable]) and open(mark).read().count("--check") == 1
             assert st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY, td, [sys.executable]) and open(mark).read().count("--check") == 2
             # both child runs go through run_bounded (a grandchild holding the pipe must not hold the sampler): a recorder in its place sees each call and its deadline
@@ -3592,7 +3592,7 @@ def selftest():
                 raise subprocess.TimeoutExpired(argv, timeout)           # a hung child: both callers must absorb it
             globals()["run_bounded"] = rb_rec_
             try:
-                assert st.drift_check(1000 * DRIFT_EVERY + 2 * DRIFT_EVERY, td, [sys.executable]) and seen_rb_[-1][1] == 120 and seen_rb_[-1][0][-2:] == ["--check", "--quiet"]
+                assert st.drift_check(1000 * DRIFT_EVERY + 2 * DRIFT_EVERY, td, [sys.executable]) and seen_rb_[-1][1] == 120 and seen_rb_[-1][0][-4:] == ["--check", "--quiet", "--state", os.path.join(STATE, ".rotator-drift.json")]
                 if os.name == "nt":
                     assert ls_probe() == [] and seen_rb_[-1][1] == 30 and seen_rb_[-1][0][0] == "powershell"
             finally:
@@ -4784,6 +4784,17 @@ def selftest():
         with open(PCACHE, "w") as fh_:
             fh_.write("{}")
         assert load_extra()["pcacheError"] is None and "pcacheError" not in build([], 5, {}, False, load_extra())
+        # the drift file is read from STATE (where drift_check's --state writes it), not ROOT: QUOTA_STATE_DIR redirects both
+        keep_state_ = globals()["STATE"]
+        globals()["STATE"] = os.path.join(os.path.dirname(PCACHE), "state-dir")
+        os.makedirs(STATE)
+        try:
+            with open(os.path.join(STATE, ".rotator-drift.json"), "w") as fh_:
+                fh_.write('{"checked": 2, "ref": "r", "differing": ["x.py"]}')
+            assert (load_extra()["drift"] or {}).get("differing") == ["x.py"]
+        finally:
+            globals()["STATE"] = keep_state_
+            shutil.rmtree(os.path.join(os.path.dirname(PCACHE), "state-dir"))
         # a read that fails with an OSError is retried (twice, 0.2 s apart): a one-off PermissionError shows no banner, one that persists does; bad content never waits
         real_lp_, tries_ = globals()["load_pcache"], []
 
