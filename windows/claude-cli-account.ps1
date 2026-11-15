@@ -437,7 +437,7 @@ function Get-UsageCached {
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
     # A Fable probe that read no Fable window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not
     # overwrite a cached cap still in force: the fallback reads that file until the cap's own reset (Test-FableCapCached).
-    $keepCap = ($Model -like '*fable*' -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-FableCapCached $Label))
+    $keepCap = ($Model -like '*fable*' -and -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300) -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-FableCapCached $Label))
     if (-not $keepCap) { try { @{ ts=$now; data=$d } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {} }
   } elseif ($HonorAccessCooldown -and $d.access -eq 'unknown') {
     $script:UnknownProbeMemo[$memoKey] = $d
@@ -449,7 +449,9 @@ function Get-UsageCached {
 # took ~27s for 5 accounts, dominated by the fable probes' server-side queueing; concurrently
 # the wall clock is the slowest SINGLE probe (~8-11s). Each worker writes the very same cache
 # file Get-UsageCached would have written, so the ordered print loop below then just reads
-# cache hits — no duplicated probe logic, and nothing to keep in sync.
+# cache hits — no duplicated probe logic, and nothing to keep in sync. One exception: a
+# headerless non-2xx Fable probe does not overwrite a cap still in force, so a seat in that
+# state is probed once more by the loop when its cached cap is past the TTL.
 function Prefetch-Usage {
   param([string[]]$Labels, [bool]$Refresh, [bool]$WithFable = $true, [bool]$HonorAccessCooldown = $true)
   $models = @(@{ m='haiku'; s='' })
@@ -1083,7 +1085,8 @@ function Invoke-EnsureCliSeat {
 
 # Does this seat's cached Fable reading say its weekly Fable window is capped, with the cap still in force? Reads the cache file
 # whatever its age: the cache TTL is how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until
-# its own reset (oi7_reset, epoch seconds); with that reset missing or unreadable, until a newer reading replaces the file. Never probes.
+# its own reset (oi7_reset, epoch seconds); with that reset missing or unreadable, until a newer 2xx Fable reading replaces the file
+# (a headerless non-2xx one does not: see Get-UsageCached). Never probes.
 function Test-FableCapCached {
   param([string]$Label)
   $cf = Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'

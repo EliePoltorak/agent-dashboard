@@ -40,6 +40,9 @@ $global:ClaudeRotatorProbeOverride = {
     if ($plan -eq 'fable-500') {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
     }
+    if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
+      return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; status='allowed'; s5_util=0.1; note='' }
+    }
     if ($plan -eq 'fable-disabled') {
       return [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code='oauth_org_not_allowed'; note='subscription disabled (403 oauth_org_not_allowed)' }
     }
@@ -441,6 +444,10 @@ Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS - 60))
 $script:plan['A'] = 'fable-500'
 $null = Get-UsageCached 'A' $true 'fable' '-fable'
 Check 'a headerless Fable probe still replaces a cap that has reset' ((Get-Content (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -Raw | ConvertFrom-Json).data.http -eq 500)
+Write-FableCache 'A' ($FableTTL + 3600) $null
+$script:plan['A'] = 'fable-2xx-bare'
+$null = Get-UsageCached 'A' $true 'fable' '-fable'
+Check 'a 2xx Fable probe without the Fable window replaces a cap with no reset' (-not (Test-FableCapCached 'A'))
 
 # --- quota 429 is not an access refusal ---
 Reset-Case
