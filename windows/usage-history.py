@@ -1199,6 +1199,22 @@ def latest_of(hist, pid):
     return dict(rec, **{"s" if pid == "claude" else pid: seats}) if seats else rec
 
 
+def carry_good(hist, pid):
+    """`hist` with each failed read of provider `pid` replaced by that seat's last good reading before it (latest_of's rule: not ok:false, has a ts; the reading keeps its own
+    ts and resets, so util_at still zeroes a window past its reset). A failed read carries no window values, so left as it is the seat drops out of the pool for that record and
+    _step loses its use across both adjacent steps; the headline (latest_of) already carries it, and the graph, burn and profile must agree with it. Shallow copies of the
+    records that change; the stored history is not touched; a failed read with no good one before it stays as it is."""
+    key, last, out = "s" if pid == "claude" else pid, {}, []
+    for h in hist:
+        seats = seats_of(h, pid)
+        fill = {label: last[label] for label, s in seats.items() if s.get("ok") is False and label in last}
+        for label, s in seats.items():
+            if s.get("ok") is not False and s.get("ts"):
+                last[label] = s
+        out.append(dict(h, **{key: dict(seats, **fill)}) if fill else h)
+    return out
+
+
 def build_limit(hist, latest, pid, wid, label, now, dflt):
     seats = [(s, w) for label, s in seats_of(latest, pid).items() if (w := wt(pid, label)[0]) > 0 and util_at(s, wid, now) is not None]
     if not seats:
@@ -1303,7 +1319,8 @@ def build_provider(hist, pid, emails, now, extra):
             if a["label"] in sug:
                 a["suggest"] = {"w": sug[a["label"]][0], "n": sug[a["label"]][1]}
     dflt = {w: p for w, _, p in wins}
-    limits = [x for x in (build_limit(hist, latest, pid, wid, lbl, now, dflt) for wid, lbl in lims) if x]
+    ch = carry_good(hist, pid)                 # a failed read keeps the seat in the pool, as the headline (latest_of) already has it
+    limits = [x for x in (build_limit(ch, latest, pid, wid, lbl, now, dflt) for wid, lbl in lims) if x]
     out = {"id": pid, "name": name, "total": len(accounts), "loaded": sum(a["ok"] for a in accounts),
            "accounts": accounts, "limits": limits}
     if use:
@@ -1350,7 +1367,7 @@ def backtest(hist, targets=BT_TARGETS, every=6 * 3600, ahead=DAY, fresh=6 * 3600
     held flat); the error at an origin is the mean |projected - recorded| over the recorded points in the next `ahead`, the figure is the mean over origins."""
     out = {}
     for pid, wid, label in targets:
-        rows = [h for h in hist if remaining(h, wid, pid=pid)[1]]
+        rows = [h for h in carry_good(hist, pid) if remaining(h, wid, pid=pid)[1]]
         if len(rows) < 2:
             continue
         ts, dflt = [h["t"] for h in rows], {w: p for w, _, p in PROVIDERS[pid][1]}
@@ -2970,6 +2987,18 @@ def selftest():
     assert burn(h, "w", 3, T + 100) is None                                # records after `now` are not used
     assert util_at({"w": 0.7, "wr": R}, "w", R + 1) == 0.0                 # stale reading past its reset
     assert remaining(rec(T, A=(0.25, R), B=(1.0, R)), "w") == (75.0, 2)
+    # a failed read must not drop its seat from the graph or the burn: two seats at 50 % used, B failed in the middle record, then B at 60 %
+    def gs(t, u, **kw):
+        return dict({"w": u, "wr": R, "ts": t}, **kw)
+    fh = [{"t": T, "s": {"A": gs(T, 0.5), "B": gs(T, 0.5)}},
+          {"t": T + 3600, "s": {"A": gs(T + 3600, 0.5), "B": {"ok": False, "note": "no usable reading"}}},
+          {"t": T + 7200, "s": {"A": gs(T + 7200, 0.5), "B": gs(T + 7200, 0.6)}}]
+    cg = carry_good(fh, "claude")
+    assert fh[1]["s"]["B"] == {"ok": False, "note": "no usable reading"} and cg[0] is fh[0] and cg[1]["s"]["B"] == fh[0]["s"]["B"] and cg[2] is fh[2]       # stored history untouched, only the failed record copied
+    assert carry_good([fh[1]], "claude")[0] is fh[1]                         # no good reading before it: left as it is
+    fl = build(fh, T + 7200, {}, False)["providers"][0]["limits"][0]
+    assert [x[1] for x in fl["hist"]] == [100.0, 100.0, 90.0] and fl["now"] == 90.0, fl["hist"]          # the middle point equals its neighbours (not 50)
+    assert abs(fl["burn"]["3"] - 5) < 1e-9, fl["burn"]                       # B's 10 % over 2 h survives the failed read between its two good ones
 
     # banked resets: a cache with credits (sorted, those without an expiry left out), one without, a count above the list, an expired credit
     c = {"fetchedAt": 1793592327005, "primary": {"usedPercent": 13, "windowDurationMins": 10080, "resetsAt": 1794124925}, "secondary": None,
