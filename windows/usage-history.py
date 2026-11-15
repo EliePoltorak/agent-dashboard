@@ -2637,7 +2637,9 @@ class Store:
     def codex_reset_job(self, seat, script, popen):
         """The reset itself, then the reading taken after it recorded; the unconfirmed mark dropped only when the answer was clear. A `redeemed` or
         `alreadyRedeemed` answer whose follow-up read failed has no reading to show, so the page would still offer Apply on the pre-reset one: the mark
-        becomes an "await" mark (fresh id), and the first reading newer than it, from the cache or the session logs, lifts it (lift_awaits)."""
+        becomes an "await" mark (fresh id), and the first reading newer than it, from the cache or the session logs, lifts it (lift_awaits). Once the
+        answer is `redeemed` or `alreadyRedeemed` nothing after it may make the reset look failed: a reading that cannot be saved, or a page that cannot be rebuilt,
+        is only logged (the same as reread_usage for Claude); for any other answer such a failure still raises."""
         res, settled, new = run_reset(seat, script, popen)
         applog("codex reset: seat %s -> %s%s" % (seat, res["outcome"], "" if settled else " (unconfirmed)"))
         with self.lock:
@@ -2649,11 +2651,24 @@ class Store:
                     cache.setdefault("codex_pending", {}).pop(seat, None)
                 if new:
                     cache.setdefault("codex_fresh", {})[seat] = new       # sample() prefers it until the seat's own cache is newer
-            if new:
-                last = next((dict(h["codex"]) for h in reversed(self.hist) if h.get("codex")), {})
-                last[seat] = new
-                self.hist = save(self.hist, {"t": int(now), "codex": last}, now)
-            self.rebuild(now)
+            # the credit is spent once the answer is `redeemed` or `alreadyRedeemed` and the mark above is recorded: a reading that cannot be saved, or a page that cannot be
+            # rebuilt (a read-only usage-dashboard.html), is then only logged, never reported as a reset that did not go through (as reread_usage does for Claude)
+            spent = res.get("outcome") in ("redeemed", "alreadyRedeemed")
+            try:
+                if new:
+                    last = next((dict(h["codex"]) for h in reversed(self.hist) if h.get("codex")), {})
+                    last[seat] = new
+                    self.hist = save(self.hist, {"t": int(now), "codex": last}, now)
+            except Exception as e:   # shortcut: same broad catch as the handlers
+                if not spent:
+                    raise
+                applog("codex reset: saving the reading after the reset failed: %s: %s" % (type(e).__name__, e))
+            try:
+                self.rebuild(now)
+            except Exception as e:   # shortcut: same broad catch as the handlers
+                if not spent:
+                    raise
+                applog("codex reset: page rebuild after the reset failed: %s: %s" % (type(e).__name__, e))
         return res
 
     def switch(self, provider, role, seat, popen=subprocess.Popen, here=None):
@@ -4106,6 +4121,32 @@ def selftest():
             assert cst.codex_reset_clear("A", "")["outcome"] == "error" and "cleared by hand" in open(APPLOG).read()
             r_ = cst.codex_reset("A", "/x", fake)                                                                   # a clear answer: no mark left
             assert r_["outcome"] == "redeemed" and load_pcache()["codex_pending"] == {}
+            # a confirmed reset is never reported as failed because of what runs after it: a page that cannot be rebuilt (a read-only usage-dashboard.html) or a reading that
+            # cannot be saved is logged and the redeemed result still returned; any other answer keeps raising (the handler's "error" line)
+            keep_rebuild_, keep_save_ = cst.rebuild, save
+            def deny_(*a_, **k_):
+                raise PermissionError("read-only")
+            try:
+                cst.rebuild = deny_
+                r_ = cst.codex_reset("A", "/x", fake)
+                assert r_ == {"outcome": "redeemed", "text": "Reset applied to seat A."}, r_
+                assert "codex reset: page rebuild after the reset failed: PermissionError: read-only" in open(APPLOG).read()
+                assert load_pcache()["codex_pending"] == {}
+                cst.rebuild = keep_rebuild_
+                globals()["save"] = deny_
+                r_ = cst.codex_reset_job("A", "/x", fake)
+                assert r_ == {"outcome": "redeemed", "text": "Reset applied to seat A."}, r_
+                assert "codex reset: saving the reading after the reset failed: PermissionError: read-only" in open(APPLOG).read()
+                cst.rebuild = deny_
+                nc_ = lambda argv, **kw: Proc(json.dumps({"status": "no_credit"}).encode()) if "--confirm" in argv else Proc(json.dumps(rd).encode())
+                try:
+                    cst.codex_reset_job("A", "/x", nc_)
+                    assert False, "a failed rebuild after a non-redeemed answer must still raise"
+                except PermissionError:
+                    pass
+            finally:
+                cst.rebuild = keep_rebuild_
+                globals()["save"] = keep_save_
             # D: a `redeemed` (or `alreadyRedeemed`, below) answer whose follow-up read failed leaves an "await" mark (no reading to show): Apply stays off, the page says the reset was applied,
             # and the first reading newer than the mark lifts it; an older one does not; an unconfirmed mark (no "await") is never lifted by a reading
             r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(json.dumps({"status": "redeemed", "outcome": "redeemed"}).encode()) if "--confirm" in argv else Proc(b"?", 1))
