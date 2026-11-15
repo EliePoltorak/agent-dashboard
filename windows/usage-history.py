@@ -1004,14 +1004,13 @@ def sample(now, force=False):
         applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
         seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
     if seat:
-        cache["gemini_last"], cache.setdefault("notes", {})["gemini"] = int(now), {}
+        cache.setdefault("notes", {})["gemini"] = {}
         rec["gemini"] = {"antigravity": seat}
         if seat.get("plan"):
             cache.setdefault("pnote", {})["gemini"] = "Plan: " + seat["plan"]
-    else:                               # not readable: the last recorded reading stays on show (its age is the Read column), with the reason
-        cache.setdefault("notes", {})["gemini"] = {"antigravity": why}
-        if not cache.get("gemini_last"):
-            rec["gemini"] = {"antigravity": {"ok": False, "note": why}}
+    else:                               # not readable: recorded as a failed read, so the history marks the outage (carry_good, the rates and the profile need the failure
+        cache.setdefault("notes", {})["gemini"] = {"antigravity": why}      # records to bridge a short one and break at a long one); the last good reading stays on show (latest_of), its age the Read column
+        rec["gemini"] = {"antigravity": {"ok": False, "note": why}}
     try:
         email = gemini_email()
     except Exception as e:
@@ -3320,6 +3319,19 @@ def selftest():
     assert gb["limits"][1]["now"] == 90.0 and gb["limits"][1]["seats"][0]["reset"] == rst and gb["accounts"][0]["note"] == ""
     nr = build([{"t": 5, "gemini": {"antigravity": {"ok": False, "note": LS_ADMIN}}}], 9, {}, False, {})["providers"][0]
     assert nr["loaded"] == 0 and nr["limits"] == [] and nr["accounts"][0]["note"] == LS_ADMIN
+    # a failed Gemini read after good ones is recorded (sample writes ok False); the dashboard still shows the last good reading, with the failure as the account's note
+    gf = build(gh[:4] + [{"t": 2200, "gemini": {"antigravity": {"ok": False, "note": LS_OFF}}}], 2400, {}, False, {})["providers"][0]
+    assert gf["loaded"] == 1 and gf["limits"][1]["now"] == 90.0 and gf["accounts"][0]["note"] == LS_OFF and gf["accounts"][0]["readAt"] == 1900, gf["accounts"]
+    # ... and past CARRY_MAX the failure is a break for the burn, like Claude's: a 48 h outage's use must not land in the one step after recovery
+    GR = 1_700_000_000 + 40 * WEEK
+
+    def gg(t, u):
+        return {"t": t, "gemini": {"antigravity": {"n": {"g1": "Flash"}, "g1": u, "g1r": GR, "g1p": WEEK, "ts": t}}}
+    go_ = [gg(GR - 30 * WEEK + i * 300, 0.1) for i in range(144)] + [{"t": GR - 30 * WEEK + 43200 + i * 300, "gemini": {"antigravity": {"ok": False, "note": "x"}}} for i in range(576)]         + [gg(GR - 30 * WEEK + 216000 + i * 300, 0.6) for i in range(6)]
+    gl_ = build(go_, go_[-1]["t"], {}, False, {})["providers"][0]["limits"][0]
+    assert gl_["burn"]["3"] == 0.0, gl_["burn"]
+    gbr_ = [gg(GR - 30 * WEEK + i * 300, 0.1) for i in range(144)] + [gg(GR - 30 * WEEK + 216000 + i * 300, 0.6) for i in range(6)]      # the same history with no failure records: bridged
+    assert (build(gbr_, gbr_[-1]["t"], {}, False, {})["providers"][0]["limits"][0]["burn"]["3"] or 0) > 0       # the control: with nothing recorded for the outage the recovery reading is joined to the last good one (that read 1.0 here)
 
     # D: Codex history from rollout logs (synthetic ~/.codex)
     from datetime import datetime, timezone
@@ -3955,6 +3967,16 @@ def selftest():
                 globals().update(stub)
             assert rs_["s"] == {"X": {"ts": 1, "w": 0.1}} and rs_["grok"]["grok"] == {"ok": False, "note": "Grok usage unavailable (RuntimeError)"}, rs_
             assert rs_["gemini"]["antigravity"] == {"ok": False, "note": "Antigravity usage unavailable (RuntimeError)"} and "gemini read failed: RuntimeError" in open(APPLOG).read(), rs_
+            # a failed Gemini read AFTER a good one is recorded too (ok False): the history shows the outage, which carry_good and the rates need
+            try:
+                globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), gemini_email=lambda: None,
+                                 read_gemini=lambda now_: ({"ts": int(now_), "plan": "Pro"}, None))
+                assert sample(time.time(), True)["gemini"]["antigravity"]["ts"] > 0
+                globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
+                rg_ = sample(time.time(), True)
+            finally:
+                globals().update(stub)
+            assert rg_["gemini"] == {"antigravity": {"ok": False, "note": "Antigravity isn't running"}}, rg_
             assert cst.codex_reset_clear("A", load_pcache()["codex_pending"]["A"]["id"])["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
             assert cst.codex_reset_clear("A", "")["outcome"] == "error" and "cleared by hand" in open(APPLOG).read()
             r_ = cst.codex_reset("A", "/x", fake)                                                                   # a clear answer: no mark left
