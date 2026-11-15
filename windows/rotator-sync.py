@@ -913,24 +913,32 @@ def selftest():
             cmd_pull(repo2, live2, "HEAD", st2)
         check("... and one that replaces the server file too says to restart, and to reload open windows", "restart it now" in buf.getvalue() and "reload any open dashboard windows" in buf.getvalue()
               and "changed in an earlier pull" not in buf.getvalue())
-        # Idle priority: from Normal, this script lowers itself; the profile's rotator-sync function starts it at Idle and its shell
-        # goes back to its own priority afterwards (a copy of the function runs a stand-in script that prints its own class)
+        # Idle priority. No test process is ever raised above Idle (this selftest runs at Idle, as main() lowered it, and so does every child it starts), so nothing is started at Normal
+        # here: lower_priority is checked by what it asks Windows for (the calls mocked), and by a real call leaving this process at Idle; the profile's rotator-sync function is run
+        # from an Idle shell (a copy of the function runs a stand-in script that prints its own class) and must start the script at Idle and leave the shell's class as it found it
         if os.name == "nt":
+            import ctypes
+            from unittest import mock
+            kd = mock.MagicMock()
+            with mock.patch.object(ctypes, "WinDLL", return_value=kd) as wd:
+                lower_priority()
+            check("rotator-sync asks Windows for IDLE_PRIORITY_CLASS (0x40) for the current process",
+                  wd.call_args_list == [mock.call("kernel32")] and kd.SetPriorityClass.call_args_list == [mock.call(kd.GetCurrentProcess.return_value, 0x40)])
+            k32 = ctypes.WinDLL("kernel32")
+            k32.GetCurrentProcess.restype, k32.GetPriorityClass.argtypes = ctypes.c_void_p, (ctypes.c_void_p,)
+            lower_priority()
+            check("a real lower_priority call leaves this process at Idle", k32.GetPriorityClass(k32.GetCurrentProcess()) == 0x40)
             probe = "import ctypes as c; k = c.WinDLL('kernel32'); k.GetCurrentProcess.restype = c.c_void_p; k.GetPriorityClass.argtypes = (c.c_void_p,); print(k.GetPriorityClass(k.GetCurrentProcess()))"
-            r = subprocess.run([sys.executable, "-c", "import importlib.util as u, sys; s = u.spec_from_file_location('rs', sys.argv[1]); m = u.module_from_spec(s); "
-                                "s.loader.exec_module(m); m.lower_priority(); " + probe.replace("import ctypes as c; ", "import ctypes as c; "), os.path.abspath(__file__)],
-                               capture_output=True, creationflags=0x20, timeout=60)           # NORMAL_PRIORITY_CLASS: Idle below is lower_priority's doing
-            check("rotator-sync lowers itself to Idle", r.stdout.split()[-1:] == [b"64"])
             fdir = os.path.join(root, "fn")
             os.makedirs(fdir)
             shutil.copy2(os.path.join(HERE, "rotator-functions.ps1"), fdir)
             write(os.path.join(fdir, "rotator-sync.py"), ("import sys\n" + probe.replace("; ", "\n") + "\nprint('|'.join(sys.argv[1:]))\n").encode())
-            ps = ("(Get-Process -Id $PID).PriorityClass = 'Normal'; . '%s'; rotator-sync --check 'a b'; "
+            ps = (". '%s'; 'shell-before:' + (Get-Process -Id $PID).PriorityClass; rotator-sync --check 'a b'; "
                   "'shell:' + (Get-Process -Id $PID).PriorityClass" % os.path.join(fdir, "rotator-functions.ps1"))
             r = subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-Command", ps], capture_output=True, timeout=120)
             out = r.stdout.decode("utf-8", "replace").split()
-            check("the rotator-sync function starts it at Idle and keeps its arguments, and its shell goes back", out[:1] == ["64"]
-                  and "--check|a b" in r.stdout.decode("utf-8", "replace") and out[-1:] == ["shell:Normal"])
+            check("the rotator-sync function starts it at Idle and keeps its arguments, and its Idle shell stays at Idle", out[:2] == ["shell-before:Idle", "64"]
+                  and "--check|a b" in r.stdout.decode("utf-8", "replace") and out[-1:] == ["shell:Idle"])
     finally:
         rmtree(root)
     print("rotator-sync selftest: all passed")
