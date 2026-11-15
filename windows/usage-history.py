@@ -2659,22 +2659,30 @@ class Store:
         """The reset itself, then the reading taken after it recorded; the unconfirmed mark dropped only when the answer was clear. A `redeemed` or
         `alreadyRedeemed` answer whose follow-up read failed has no reading to show, so the page would still offer Apply on the pre-reset one: the mark
         becomes an "await" mark (fresh id), and the first reading newer than it, from the cache or the session logs, lifts it (lift_awaits). Once the
-        answer is `redeemed` or `alreadyRedeemed` nothing after it may make the reset look failed: a reading that cannot be saved, or a page that cannot be rebuilt,
-        is only logged (the same as reread_usage for Claude); for any other answer such a failure still raises."""
+        answer is `redeemed` or `alreadyRedeemed` nothing after it may make the reset look failed: a mark that cannot be settled (the provider cache cannot be written; the earlier
+        unconfirmed mark then stays), a reading that cannot be saved, or a page that cannot be rebuilt, is only logged (the same as reread_usage for Claude); for any other answer
+        such a failure still raises."""
         res, settled, new = run_reset(seat, script, popen)
         applog("codex reset: seat %s -> %s%s" % (seat, res["outcome"], "" if settled else " (unconfirmed)"))
+        # the credit is spent once the answer is `redeemed` or `alreadyRedeemed`: what is recorded or rebuilt after that (the mark, a reading that cannot be saved, a page that cannot be
+        # rebuilt, a read-only usage-dashboard.html) is then only logged, never reported as a reset that did not go through (as reread_usage does for Claude)
+        spent = res.get("outcome") in ("redeemed", "alreadyRedeemed")
         with self.lock:
             now = time.time()
-            with pcache_txn() as cache:
-                if settled and res.get("outcome") in ("redeemed", "alreadyRedeemed") and not new:      # either way the credit is spent and the page's reading predates it
-                    cache.setdefault("codex_pending", {})[seat] = {"at": int(now), "id": secrets.token_urlsafe(16), "await": True}
-                elif settled:
-                    cache.setdefault("codex_pending", {}).pop(seat, None)
-                if new:
-                    cache.setdefault("codex_fresh", {})[seat] = new       # sample() prefers it until the seat's own cache is newer
-            # the credit is spent once the answer is `redeemed` or `alreadyRedeemed` and the mark above is recorded: a reading that cannot be saved, or a page that cannot be
-            # rebuilt (a read-only usage-dashboard.html), is then only logged, never reported as a reset that did not go through (as reread_usage does for Claude)
-            spent = res.get("outcome") in ("redeemed", "alreadyRedeemed")
+            try:
+                with pcache_txn() as cache:
+                    if settled and spent and not new:      # either way the credit is spent and the page's reading predates it
+                        cache.setdefault("codex_pending", {})[seat] = {"at": int(now), "id": secrets.token_urlsafe(16), "await": True}
+                    elif settled:
+                        cache.setdefault("codex_pending", {}).pop(seat, None)
+                    if new:
+                        cache.setdefault("codex_fresh", {})[seat] = new       # sample() prefers it until the seat's own cache is newer
+            except (PcacheError, OSError, TimeoutError) as e:
+                if not spent:
+                    raise
+                # the unconfirmed mark codex_reset wrote before the run is then still in the cache, which keeps Apply off: the safe state (a second reset is never offered on a credit that
+                # may already be spent); Clear by hand lifts it once codex-usage shows the refilled limit
+                applog("codex reset: recording the reset failed: %s: %s" % (type(e).__name__, e))
             try:
                 if new:
                     last = next((dict(h["codex"]) for h in reversed(self.hist) if h.get("codex")), {})
@@ -2743,7 +2751,7 @@ class Store:
     def claude_reset(self, seat, kind, fetch=None, new_id=None, resend_rid=None, login=app_login):
         """Apply one banked Claude reset of `kind` on `seat` (the caller holds `refreshing`), then re-read that seat's credits and, when the reset is confirmed
         (`redeemed` or `alreadyRedeemed`), every seat's usage (reread_usage). The grant is picked here, from
-        the last reading, never taken from the page. The claim (grant id + request id) is saved per seat and kind before the call and kept while the outcome
+        the last reading, never taken from the page. A confirmed reset is never reported as failed because the cache write that settles it fails: that is logged and the claim stays pending (see below). The claim (grant id + request id) is saved per seat and kind before the call and kept while the outcome
         is unconfirmed; until it settles, every click resends that same claim, even when a later reading no longer lists its grant (a lost answer to a
         claim that landed), so a retry can never spend a second grant. A confirmed reset also takes its grant off the cached reading at once (spend_grant; for an
         `alreadyRedeemed` answer only when that reading is not clearly newer than the claim's previous send: see spend_grant). `resend_rid` (the page's "Resend pending" dialog) asks for that claim only:
@@ -2783,14 +2791,21 @@ class Store:
             res, settled = consume_reset(seat, kind, gid, rid, fetch or (lambda r: http_json(r, CONSUME_TIMEOUT)), ver, token=tok)
         keep = settled is False or (settled is None and resend)    # a refusal of the resend proves nothing about the earlier claim
         applog("claude reset: seat %s %s -> %s%s" % (seat, kind, res["outcome"], " (unconfirmed)" if settled is False else " (refused; the earlier claim is kept)" if keep else ""))
-        if not keep:
-            with self.lock, pcache_txn() as cache:
-                (cache.get("credits_claims") or {}).pop(key, None)
-                if settled and res["outcome"] in ("redeemed", "alreadyRedeemed"):
-                    ce = cache.setdefault("credits", {}).setdefault(seat, {})
-                    ce["gen"] = (ce.get("gen") or 0) + 1        # with the spend, atomically: a read already in flight was asked before it, and its answer would restore the spent grant
-                    spend_grant(cache, seat, gid, now, prev_send if res["outcome"] == "alreadyRedeemed" else None)        # the follow-up read below is refused while the seat is held (429 / sign-in / scope): the page must not offer the spent grant again meanwhile
         landed = settled and res["outcome"] in ("redeemed", "alreadyRedeemed")
+        if not keep:
+            try:
+                with self.lock, pcache_txn() as cache:
+                    (cache.get("credits_claims") or {}).pop(key, None)
+                    if landed:
+                        ce = cache.setdefault("credits", {}).setdefault(seat, {})
+                        ce["gen"] = (ce.get("gen") or 0) + 1        # with the spend, atomically: a read already in flight was asked before it, and its answer would restore the spent grant
+                        spend_grant(cache, seat, gid, now, prev_send if res["outcome"] == "alreadyRedeemed" else None)        # the follow-up read below is refused while the seat is held (429 / sign-in / scope): the page must not offer the spent grant again meanwhile
+            except (PcacheError, OSError, TimeoutError) as e:
+                if not landed:
+                    raise
+                # the reset landed, so it is never reported as failed: the claim then stays pending, and a later Apply resends it with the same request id, which Claude answers
+                # "already applied" (alreadyRedeemed: nothing more is used, so no second grant is spent) and settles it then
+                applog("claude reset: recording the reset failed: %s: %s" % (type(e).__name__, e))
         try:
             self.credits_read(seat, time.time(), fetch or http_json, force=True)      # still honours a 429 / sign-in hold
         except Exception as e:   # shortcut: same broad catch as the handlers. A landed reset must not be reported as failed; otherwise the error is the answer
@@ -4195,6 +4210,30 @@ def selftest():
             finally:
                 cst.rebuild = keep_rebuild_
                 globals()["save"] = keep_save_
+            # the mark that settles a confirmed reset cannot be written (the provider cache is locked or read-only): still reported as applied, logged, and the unconfirmed mark the
+            # reset began with stays (Apply stays off); for any other answer the same failure still raises
+            keep_txn_ = pcache_txn
+            def no_txn_(*a_, **k_):
+                raise PcacheError("cache locked")
+            try:
+                with pcache_txn() as c_:
+                    c_["codex_pending"] = {"A": {"at": 1, "id": "u"}}
+                cst.rebuild = lambda now_: None
+                globals()["pcache_txn"] = no_txn_
+                r_ = cst.codex_reset_job("A", "/x", fake)
+                assert r_ == {"outcome": "redeemed", "text": "Reset applied to seat A."}, r_
+                assert "codex reset: recording the reset failed: PcacheError: cache locked" in open(APPLOG).read()
+                assert load_pcache()["codex_pending"] == {"A": {"at": 1, "id": "u"}}, load_pcache()["codex_pending"]
+                try:
+                    cst.codex_reset_job("A", "/x", nc_)
+                    assert False, "a failed mark after a non-redeemed answer must still raise"
+                except PcacheError:
+                    pass
+            finally:
+                globals()["pcache_txn"] = keep_txn_
+                cst.rebuild = keep_rebuild_
+            with pcache_txn() as c_:
+                c_["codex_pending"] = {}
             # D: a `redeemed` (or `alreadyRedeemed`, below) answer whose follow-up read failed leaves an "await" mark (no reading to show): Apply stays off, the page says the reset was applied,
             # and the first reading newer than the mark lifts it; an older one does not; an unconfirmed mark (no "await") is never lifted by a reading
             r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(json.dumps({"status": "redeemed", "outcome": "redeemed"}).encode()) if "--confirm" in argv else Proc(b"?", 1))
@@ -5183,6 +5222,35 @@ def selftest():
         assert "already settled" in ks.claude_reset("A", "full", kf, nid, resend_rid="ridGone")["text"] and len(kc) == n_ and load_pcache()["credits_claims"]["A:full"]["id"] == "ridNow"
         post.append((200, {"result": "already_used"}))
         assert ks.claude_reset("A", "full", kf, nid, resend_rid="ridNow")["outcome"] == "alreadyRedeemed" and b'"request_id": "ridNow"' in kc[-2][2]
+        # the cache write that settles a confirmed reset fails (locked, read-only): still reported as applied and logged. The claim stays pending, so the next Apply resends the SAME
+        # request id and Claude answers "already applied": no second grant is spent. The same failure after an unconfirmed answer still raises
+        save_pcache({"credits": {"A": dict(ke)}})
+        keep_txn_ = pcache_txn
+        posts_ = lambda: sum(c_[0] == "POST" for c_ in kc)
+        def txn_after_post_(*a_, **k_):         # fails only a transaction taken after this call's own POST
+            if posts_() > seen_[0]:
+                raise PcacheError("cache locked")
+            return keep_txn_(*a_, **k_)
+        seen_ = [posts_()]
+        post.append((200, {"result": "reset"}))
+        try:
+            globals()["pcache_txn"] = txn_after_post_
+            r_ = ks.claude_reset("A", "full", kf, lambda: "ridTxn")
+            assert r_["outcome"] == "redeemed", r_
+            assert "claude reset: recording the reset failed: PcacheError: cache locked" in open(APPLOG).read()
+            assert load_pcache()["credits_claims"]["A:full"]["id"] == "ridTxn" and load_pcache()["credits_claims"]["A:full"]["gid"] == "g2", load_pcache()["credits_claims"]
+            seen_[0] = posts_()
+            post.append((200, {"result": "cooldown"}))                                          # a definite answer that is not a landed reset: the claim must be cleared, so the failure raises
+            try:
+                ks.claude_reset("A", "full", kf, nid)
+                assert False, "a failed write after a definite refusal must still raise"
+            except PcacheError:
+                pass
+        finally:
+            globals()["pcache_txn"] = keep_txn_
+        save_pcache(dict(load_pcache(), credits={"A": dict(ke)}, credits_claims={"A:full": {"id": "ridTxn", "gid": "g2", "at": KN}}))
+        post.append((200, {"result": "already_used"}))
+        assert ks.claude_reset("A", "full", kf, nid)["outcome"] == "alreadyRedeemed" and b'"request_id": "ridTxn"' in [c_ for c_ in kc if c_[0] == "POST"][-1][2] and load_pcache()["credits_claims"] == {}
         # every other outcome
         for ans, oc, text, kept in [((200, {"result": "not_limited"}), "nothingToReset", "Seat A had nothing to reset right now.", False),
                                     ((200, {"result": "ineligible"}), "noCredit", "Claude says seat A has no 5-hour reset to apply.", False),
