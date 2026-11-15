@@ -950,6 +950,19 @@ def consume_reset(label, kind, gid, rid, fetch, ver=None, login=app_login, token
                                         "cannot use a second reset." % (label, why)}, False
 
 
+def settle_awaits(pending, codex):
+    """(pending, seats cleared): `pending` without each "await" mark whose seat has a reading in `codex` newer than the mark. An await mark is a reset the script
+    confirmed whose follow-up read failed, so the page still shows the pre-reset reading: the first reading taken after it replaces that, and Apply is safe again.
+    A mark without "await" is never touched: a reading proves nothing about an unconfirmed reset (see Store.codex_reset)."""
+    out, cleared = {}, []
+    for seat, m in pending.items():
+        if isinstance(m, dict) and m.get("await") and ((codex.get(seat) or {}).get("ts") or 0) > (m.get("at") or 0):
+            cleared.append(seat)
+        else:
+            out[seat] = m
+    return out, sorted(cleared)
+
+
 def sample(now, force=False):
     rec = {"t": int(now), "s": read_claude()}
     cache = load_pcache()
@@ -958,6 +971,11 @@ def sample(now, force=False):
     for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
         if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
             codex[label] = fresh
+    pend, cleared = settle_awaits(cache.get("codex_pending") or {}, codex)
+    for label in cleared:
+        applog("codex reset: seat %s reading after the reset arrived; Apply back on" % label)
+    if cleared:
+        cache["codex_pending"] = pend       # merged back below with the rest of this sample's changes
     if codex:
         rec["codex"] = codex
         cache.setdefault("emails", {})["codex"] = cemails
@@ -1312,6 +1330,8 @@ def build_provider(hist, pid, emails, now, extra):
         if pid == "codex" and label in (extra.get("codexPending") or ()):
             a["resetPending"] = True        # its last reset is unconfirmed: no Apply reset until a reading settles it
             a["resetPendingId"] = extra["codexPending"][label]      # the mark the page shows: its Clear names it (a mark from before ids existed is "")
+            if label in (extra.get("codexAwait") or ()):
+                a["resetAwait"] = True      # the reset was confirmed and only its reading is missing: the page says so instead of "unconfirmed"
         if acts:                            # the switch buttons: roles whose rotator can use this seat, minus the one it already holds
             a["switch"] = acts
         rk = [(k, usable_grants(cr, k, now)) for k in RESET_KINDS] if pid == "claude" and extra.get("claudeReset") else []
@@ -1483,7 +1503,8 @@ def load_extra():
         pass
     return {"notes": c.get("notes"), "pnote": c.get("pnote"), "credits": c.get("credits") if credits_enabled() else None, "claims": pending_claims(c), "claudeReset": credits_enabled(), "drift": drift if isinstance(drift, dict) else None, "canReset": redeem_script() is not None, "inUse": in_use(), "switch": switch_targets(),
             "weights": dict(read_weights_cfg(), plans={"codex": plans}), "codex": {"pairs": pairs},
-            "codexPending": {s: (v.get("id") or "") if isinstance(v, dict) else "" for s, v in sorted((c.get("codex_pending") or {}).items())}, "codexRefresh": codex_usage_argv() is not None, "pcacheError": perr}
+            "codexPending": {s: (v.get("id") or "") if isinstance(v, dict) else "" for s, v in sorted((c.get("codex_pending") or {}).items())},
+            "codexAwait": sorted(s for s, v in (c.get("codex_pending") or {}).items() if isinstance(v, dict) and v.get("await")), "codexRefresh": codex_usage_argv() is not None, "pcacheError": perr}
 
 
 LOCK_WAIT = 30                      # s: how long a writer waits for the history or provider-cache lock
@@ -2482,7 +2503,8 @@ class Store:
         is never killed: still running after RESET_TIMEOUT s, the outcome is "running", that thread keeps `refreshing` until the script ends (other actions get
         409 meanwhile), and the caller must NOT release the lock. Before it runs, the seat is marked unconfirmed; a seat still marked is refused, because a
         second run would mint a second claim. Only the script's own clear answer or the user's Clear (codex_reset_clear) lifts the mark: a reading proves
-        nothing (a count can drop for another reason, or before the claim lands)."""
+        nothing (a count can drop for another reason, or before the claim lands). One exception: a reset the script confirmed (`redeemed`) whose follow-up
+        read failed leaves an "await" mark instead (see codex_reset_job), which the first reading taken after it lifts (settle_awaits, in sample())."""
         with self.lock, pcache_txn() as c:
             pend = c.setdefault("codex_pending", {})
             if seat in pend:
@@ -2530,13 +2552,17 @@ class Store:
             {"outcome": "error", "text": "Seat %s has no unconfirmed reset to clear." % seat}
 
     def codex_reset_job(self, seat, script, popen):
-        """The reset itself, then the reading taken after it recorded; the unconfirmed mark dropped only when the answer was clear."""
+        """The reset itself, then the reading taken after it recorded; the unconfirmed mark dropped only when the answer was clear. A `redeemed` answer
+        whose follow-up read failed has no reading to show, so the page would still offer Apply on the pre-reset one: the mark becomes an "await" mark
+        (fresh id), and the first reading newer than it lifts it (settle_awaits)."""
         res, settled, new = run_reset(seat, script, popen)
         applog("codex reset: seat %s -> %s%s" % (seat, res["outcome"], "" if settled else " (unconfirmed)"))
         with self.lock:
             now = time.time()
             with pcache_txn() as cache:
-                if settled:
+                if settled and res.get("outcome") == "redeemed" and not new:
+                    cache.setdefault("codex_pending", {})[seat] = {"at": int(now), "id": secrets.token_urlsafe(16), "await": True}
+                elif settled:
                     cache.setdefault("codex_pending", {}).pop(seat, None)
                 if new:
                     cache.setdefault("codex_fresh", {})[seat] = new       # sample() prefers it until the seat's own cache is newer
@@ -3908,6 +3934,34 @@ def selftest():
             assert cst.codex_reset_clear("A", "")["outcome"] == "error" and "cleared by hand" in open(APPLOG).read()
             r_ = cst.codex_reset("A", "/x", fake)                                                                   # a clear answer: no mark left
             assert r_["outcome"] == "redeemed" and load_pcache()["codex_pending"] == {}
+            # D: a `redeemed` answer whose follow-up read failed leaves an "await" mark (no reading to show): Apply stays off, the page says the reset was applied,
+            # and the first reading newer than the mark lifts it; an older one does not; an unconfirmed mark (no "await") is never lifted by a reading
+            r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(json.dumps({"status": "redeemed", "outcome": "redeemed"}).encode()) if "--confirm" in argv else Proc(b"?", 1))
+            m_ = load_pcache()["codex_pending"]["A"]
+            assert r_["outcome"] == "redeemed" and m_.get("await") is True and m_["id"] and m_["at"] > 0, m_
+            ex_ = {"canReset": True, "codexPending": {"A": m_["id"]}, "codexAwait": ["A"]}
+            acc_ = build([{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1, "banked": 3}}}], 5, {}, False, ex_)["providers"][0]["accounts"][0]
+            assert acc_["resetPending"] is True and acc_["resetAwait"] is True and acc_["resetPendingId"] == m_["id"]
+            assert "resetAwait" not in build([{"t": 1, "codex": {"A": {"ts": 1, "w": 0.1, "banked": 3}}}], 5, {}, False, dict(ex_, codexAwait=[]))["providers"][0]["accounts"][0]
+            assert cst.codex_reset("A", "/x", fake)["outcome"] == "error" and "A" in load_pcache()["codex_pending"]    # still refused while the mark stands
+            with pcache_txn() as c_:
+                c_.pop("codex_fresh", None)                                                                             # an earlier case's fresh reading would stand in for the cache's own
+            try:
+                for ts_, kept_ in ((m_["at"] - 5, True), (m_["at"] + 5, False)):
+                    globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({"A": {"ts": ts_, "w": 0.1, "banked": 3}}, {}),
+                                     fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"), gemini_email=lambda: None)
+                    sample(time.time(), True)
+                    assert ("A" in load_pcache()["codex_pending"]) is kept_, (ts_, load_pcache()["codex_pending"])
+                assert "seat A reading after the reset arrived; Apply back on" in open(APPLOG).read()
+                with pcache_txn() as c_:
+                    c_["codex_pending"] = {"A": {"at": 1, "id": "u"}}                                                   # unconfirmed: no "await"
+                sample(time.time(), True)
+                assert "A" in load_pcache()["codex_pending"]                                                            # the same newer reading does not lift it
+            finally:
+                globals().update(stub)
+            assert settle_awaits({"A": {"at": 5, "id": "i", "await": True}, "B": {"at": 5, "id": "j"}, "C": "x"}, {"A": {"ts": 5}, "B": {"ts": 9}, "C": {"ts": 9}}) ==                 ({"A": {"at": 5, "id": "i", "await": True}, "B": {"at": 5, "id": "j"}, "C": "x"}, [])                   # a reading at the mark's own time is not newer
+            assert settle_awaits({"A": {"at": 5, "id": "i", "await": True}, "D": {"at": 5, "id": "k", "await": True}}, {"A": {"ts": 6}}) == ({"D": {"at": 5, "id": "k", "await": True}}, ["A"])
+            assert cst.codex_reset_clear("A", load_pcache()["codex_pending"]["A"]["id"])["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
         finally:
             globals().update(keep)
 

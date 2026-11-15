@@ -238,6 +238,9 @@ assert.strictEqual(quotaShare(600, 600), 100);
   assert.ok(resetBtn(cx, { label: 'A', banked: 2 }).includes('>Apply reset</button>'));
   assert.strictEqual(resetBtn(cx, { label: 'A', banked: 2, resetPending: true }),
     '<small class="muted">Last reset unconfirmed</small><button class="rs" data-a="rsclear" data-v="A">Clear</button>');
+  // a reset the script confirmed whose reading has not arrived yet: Apply stays off, and the cell says the reset was applied, not "unconfirmed"
+  const awaitB = resetBtn(cx, { label: 'A', banked: 2, resetPending: true, resetAwait: true });
+  assert.ok(awaitB.includes('Reset applied; waiting for a new reading') && !awaitB.includes('unconfirmed') && !awaitB.includes('>Apply reset<') && awaitB.includes('data-a="rsclear"'), awaitB);
   // through accounts(): the reset column stays when nothing is banked anywhere but a seat has a pending claim or an unconfirmed reset
   const tblSrc = tpl.slice(tpl.indexOf('const resetBtn = '), tpl.indexOf('\nfunction panel('));
   const accounts = new Function('D', 'esc', 'QUOTA_RESET_KINDS', 'quotaBankedTotal', 'quotaBankedCell', 'quotaLevel', 'quotaSwitchBtns', 'swBusy', 'nm', 'bkTitle',

@@ -291,7 +291,7 @@ const bkTitle = a => { const t = [a.bankedAt ? 'Read ' + ago(a.bankedAt) : '', a
 const resetBtn = (p, a) => !D.app || !p.canReset || D.pcacheError ? '' : p.id === 'claude'
   ? (a.resets || []).filter(r => QUOTA_RESET_KINDS[r.kind]).map(r => `<button class="rs" data-a="reset" data-p="claude" data-v="${esc(a.label)}" data-k="${esc(r.kind)}">${r.pending ? 'Resend pending' : 'Apply'} ${esc(QUOTA_RESET_KINDS[r.kind].noun)}</button>` +
       (r.pending ? `<button class="rs" data-a="rsclear" data-p="claude" data-v="${esc(a.label)}" data-k="${esc(r.kind)}">Clear</button>` : '')).join('')
-  : a.resetPending ? `<small class="muted">Last reset unconfirmed</small><button class="rs" data-a="rsclear" data-v="${esc(a.label)}">Clear</button>`
+  : a.resetPending ? `<small class="muted">${a.resetAwait ? 'Reset applied; waiting for a new reading' : 'Last reset unconfirmed'}</small><button class="rs" data-a="rsclear" data-v="${esc(a.label)}">Clear</button>`
   : a.banked >= 1 ? `<button class="rs" data-a="reset" data-p="${esc(p.id)}" data-v="${esc(a.label)}">Apply reset</button>` : '';
 
 function accounts(p) {
