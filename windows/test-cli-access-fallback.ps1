@@ -60,6 +60,9 @@ $global:ClaudeRotatorProbeOverride = {
   if ($plan -eq 'http401') {     # Probe-Usage's result for a dead token: an HTTP failure, not a network one
     return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$false; note='probe failed: http 401: authentication_error: invalid token; not marking disabled' }
   }
+  if ($plan -eq 'default-500') {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
+    return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
+  }
   if ($plan -eq 'quota') {
     return [pscustomobject]@{
       label=$Label; ok=$true; access='ok'; http=429; note=''
@@ -448,6 +451,55 @@ Write-FableCache 'A' ($FableTTL + 3600) $null
 $script:plan['A'] = 'fable-2xx-bare'
 $null = Get-UsageCached 'A' $true 'fable' '-fable'
 Check 'a 2xx Fable probe without the Fable window replaces a cap with no reset' (-not (Test-FableCapCached 'A'))
+
+# --- a cached SESSION or WEEKLY cap (the default-model reading) is honoured the same way ---
+function Write-DefaultCache([string]$l, [int64]$age, [hashtable]$fields) {
+  $now = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $d = @{ label = $l; ok = $true; access = 'ok'; http = 200; s5_util = 0.2; w7_util = 0.2; s5_stat = 'allowed'; w7_stat = 'allowed'; status = 'allowed' }
+  foreach ($k in $fields.Keys) { $d[$k] = $fields[$k] }
+  @{ ts = $now - $age; data = $d } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root $l) 'usage-cache.json') -Encoding UTF8
+}
+$stale = $UsageTTL + 3600
+foreach ($which in 's5','w7') {
+  $word = if ($which -eq 's5') { 'session' } else { 'weekly' }
+  Reset-Case
+  Clear-AppIdentity
+  Set-Active 'B'
+  $script:plan['B'] = 'disabled'
+  foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'network' }
+  Write-DefaultCache 'A' $stale @{ "${which}_stat" = 'rejected'; "${which}_reset" = ($nowS + 3600); status = 'rejected' }
+  Check "a $word cap read past the TTL still counts until its reset" (Test-CapCached 'A' 'default')
+  $rc = Invoke-CheckRotate 0 $false $true 'test'
+  Check "fallback passes over a seat whose stale $word cap is still in force (C)" ((Get-ActiveLabel) -eq 'C') (Get-ActiveLabel)
+  Reset-Case
+  Clear-AppIdentity
+  Set-Active 'B'
+  $script:plan['B'] = 'disabled'
+  foreach ($l in @('A','C','D','E','F')) { $script:plan[$l] = 'network' }
+  Write-DefaultCache 'A' $stale @{ "${which}_stat" = 'rejected'; "${which}_reset" = ($nowS - 60); status = 'rejected' }
+  Check "a $word cap whose reset has passed no longer counts" (-not (Test-CapCached 'A' 'default'))
+  $rc = Invoke-CheckRotate 0 $false $true 'test'
+  Check "fallback does not exclude a seat whose $word cap has reset (A)" ((Get-ActiveLabel) -eq 'A') (Get-ActiveLabel)
+}
+Reset-Case
+Write-DefaultCache 'A' 10 @{ status = 'rejected' }
+Check 'an overall rejection naming no window, no reset, counts' (Test-CapCached 'A' 'default')
+Write-DefaultCache 'A' 10 @{}
+Check 'an allowed default reading is no cap' (-not (Test-CapCached 'A' 'default'))
+Check 'no default cache: no cap' (-not (Test-CapCached 'C' 'default'))
+# a headerless non-2xx default-model probe must not overwrite a cap still in force; a real 2xx reading does
+Reset-Case
+Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = ($nowS + 3600); status = 'rejected' }
+$script:plan['A'] = 'default-500'
+$null = Get-UsageCached 'A' $true 'haiku' ''
+Check 'a headerless default probe leaves a session cap in force on disk' (Test-CapCached 'A' 'default')
+$script:plan['A'] = 'ok'
+$null = Get-UsageCached 'A' $true 'haiku' ''
+Check 'a 2xx default probe replaces the cap' (-not (Test-CapCached 'A' 'default'))
+Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = ($nowS - 60); status = 'rejected' }
+$script:plan['A'] = 'default-500'
+$null = Get-UsageCached 'A' $true 'haiku' ''
+Check 'a headerless default probe still replaces a cap that has reset' ((Get-Content (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Raw | ConvertFrom-Json).data.http -eq 500)
 
 # --- quota 429 is not an access refusal ---
 Reset-Case

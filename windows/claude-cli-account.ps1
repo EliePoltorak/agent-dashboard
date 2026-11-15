@@ -435,9 +435,12 @@ function Get-UsageCached {
     $proved = ([int]$d.http -ge 200 -and [int]$d.http -lt 300 -and ($d.status -or $d.s5_util -or $d.oi7_util))
     if ($Model -like '*fable*' -and $proved) { Clear-AccessDisabled $Label }
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
-    # A Fable probe that read no Fable window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not
-    # overwrite a cached cap still in force: the fallback reads that file until the cap's own reset (Test-FableCapCached).
-    $keepCap = ($Model -like '*fable*' -and -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300) -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-FableCapCached $Label))
+    # A probe that read no window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not overwrite a
+    # cached cap still in force: the fallback reads that file until the cap's own reset (Test-CapCached). For a Fable probe the
+    # window is oi7; for any other model it is the session or weekly one (no status, s5_stat, w7_stat or s5_util).
+    $non2xx = -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300)
+    $keepCap = if ($Model -like '*fable*') { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
+               else { ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and (Test-CapCached $Label 'default')) }
     if (-not $keepCap) { try { @{ ts=$now; data=$d } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {} }
   } elseif ($HonorAccessCooldown -and $d.access -eq 'unknown') {
     $script:UnknownProbeMemo[$memoKey] = $d
@@ -450,7 +453,7 @@ function Get-UsageCached {
 # the wall clock is the slowest SINGLE probe (~8-11s). Each worker writes the very same cache
 # file Get-UsageCached would have written, so the ordered print loop below then just reads
 # cache hits — no duplicated probe logic, and nothing to keep in sync. One exception: a
-# headerless non-2xx Fable probe does not overwrite a cap still in force, so a seat in that
+# headerless non-2xx probe does not overwrite a cap still in force, so a seat in that
 # state is probed once more by the loop when its cached cap is past the TTL.
 function Prefetch-Usage {
   param([string[]]$Labels, [bool]$Refresh, [bool]$WithFable = $true, [bool]$HonorAccessCooldown = $true)
@@ -462,7 +465,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-FableCapCached','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(foreach ($l in $Labels) { foreach ($mm in $models) { @{ l=$l; m=$mm.m; s=$mm.s } } })
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
@@ -1083,19 +1086,38 @@ function Invoke-EnsureCliSeat {
   return (Invoke-CheckRotate 0 $false $true 'ensure')
 }
 
-# Does this seat's cached Fable reading say its weekly Fable window is capped, with the cap still in force? Reads the cache file
-# whatever its age: the cache TTL is how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until
-# its own reset (oi7_reset, epoch seconds); with that reset missing or unreadable, until a newer 2xx Fable reading replaces the file
-# (a headerless non-2xx one does not: see Get-UsageCached). Never probes.
-function Test-FableCapCached {
-  param([string]$Label)
-  $cf = Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'
+# Does this seat's cached reading say a window is capped, with the cap still in force? Which = 'fable' reads the weekly Fable window
+# (usage-cache-fable.json, oi7_*); 'default' reads the default-model reading (usage-cache.json): the session window (s5_*), the weekly
+# window (w7_*), or an overall status of rejected with neither window named. Reads the cache file whatever its age: the cache TTL is
+# how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until its own reset (epoch seconds); with
+# that reset missing or unreadable, until a newer 2xx reading replaces the file (a headerless non-2xx one does not: see
+# Get-UsageCached). Never probes.
+function Test-CapCached {
+  param([string]$Label, [string]$Which = 'default')
+  $name = if ($Which -eq 'fable') { 'usage-cache-fable.json' } else { 'usage-cache.json' }
+  $cf = Join-Path (Join-Path $Root $Label) $name
   if (-not (Test-Path -LiteralPath $cf)) { return $false }
   try { $d = (Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json).data } catch { return $false }
-  if (-not $d -or -not $d.ok -or $d.oi7_stat -ne 'rejected') { return $false }
-  $reset = [int64]0
-  if (-not [int64]::TryParse([string]$d.oi7_reset, [ref]$reset) -or $reset -le 0) { return $true }
-  return ($reset -gt [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())
+  if (-not $d -or -not $d.ok) { return $false }
+  $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $inForce = {
+    param($stat, $resetRaw)
+    if ($stat -ne 'rejected') { return $false }
+    $reset = [int64]0
+    if (-not [int64]::TryParse([string]$resetRaw, [ref]$reset) -or $reset -le 0) { return $true }
+    return ($reset -gt $now)
+  }
+  if ($Which -eq 'fable') { return (& $inForce $d.oi7_stat $d.oi7_reset) }
+  if (& $inForce $d.s5_stat $d.s5_reset) { return $true }
+  if (& $inForce $d.w7_stat $d.w7_reset) { return $true }
+  # an overall rejection that names no rejected window has no reset to wait for: it holds until a reading replaces it
+  return ($d.status -eq 'rejected' -and $d.s5_stat -ne 'rejected' -and $d.w7_stat -ne 'rejected')
+}
+
+# The Fable-window cap alone (see Test-CapCached).
+function Test-FableCapCached {
+  param([string]$Label)
+  return (Test-CapCached $Label 'fable')
 }
 
 # Rank on the HAIKU probe only — ~1s for every account at once. Probing fable for all five up
@@ -1107,15 +1129,16 @@ function Select-RotationTarget {
   if ($PSBoundParameters.ContainsKey('UnknownExcept')) {
     # The access-refusal fallback: usage unknown (network), so no session bar, but every other exclusion
     # still holds - the active seat, the desktop-app seat, a seat marked disabled, and a seat whose cached
-    # Fable reading says rejected until that cap's own reset, however old the reading (cache only: the network is what failed,
-    # so no probe; see Test-FableCapCached). Only a seat whose probe failed on the
+    # reading says a capped window (the default-model session or weekly window, or the weekly Fable one) until that cap's own
+    # reset, however old the reading (cache only: the network is what failed, so no probe; see Test-CapCached). Only a seat whose probe failed on the
     # network qualifies: a 401 (dead token), a 5xx, or a missing token is a seat the CLI cannot use, not an unknown one.
     $appSeat = Get-AppSeatLabel
     $unknown = @(Rank-Accounts $false $false | Where-Object {
       $_.access -eq 'unknown' -and $_.net -and $_.label -ne $UnknownExcept -and -not ($appSeat -and ($_.label -ieq $appSeat)) -and -not (Read-AccessDisabled $_.label)
     } | Sort-Object label)
     foreach ($c in $unknown) {
-      if (Test-FableCapCached $c.label) { continue }                  # Gate C needs Fable
+      if (Test-CapCached $c.label 'default') { continue }             # a session or weekly cap still in force: the seat cannot serve
+      if (Test-CapCached $c.label 'fable') { continue }               # Gate C needs Fable
       return [pscustomobject]@{ label = $c.label; s5 = 0; w7 = 0; fable = $null; usageUnknown = $true }
     }
     return $null
