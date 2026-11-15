@@ -54,7 +54,7 @@ def state_arg(argv):
 
 
 if state_arg(sys.argv):
-    os.environ["QUOTA_STATE_DIR"] = state_arg(sys.argv)       # children (rotator-sync, the reset script, the app relauncher) inherit the same folder
+    os.environ["QUOTA_STATE_DIR"] = state_arg(sys.argv)       # so a child that reads QUOTA_STATE_DIR (none today: rotator-sync gets --state) sees the same folder
 STATE = os.environ.get("QUOTA_STATE_DIR") or ROOT
 HIST = os.path.join(STATE, ".usage-history.jsonl")
 EMAILS = os.path.join(STATE, ".usage-emails.json")
@@ -5332,7 +5332,7 @@ def selftest():
     sd_ = tempfile.mkdtemp()
     try:
         probe_ = ("import importlib.util, os, sys; d = sys.argv[2]; sys.argv = ['usage-history.py', '--serve', '--state-dir', d]; "
-                  "s = importlib.util.spec_from_file_location('uh', sys.argv and %r); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+                  "s = importlib.util.spec_from_file_location('uh', %r); m = importlib.util.module_from_spec(s); s.loader.exec_module(m); "
                   "print(m.STATE + '|' + m.HIST + '|' + m.PCACHE + '|' + os.environ['QUOTA_STATE_DIR'])") % os.path.abspath(__file__)
         env_ = dict(os.environ, QUOTA_STATE_DIR=os.path.join(sd_, "from-env"))
         out_ = subprocess.run([sys.executable, "-c", probe_, "unused", sd_], capture_output=True, text=True, env=env_, timeout=60)
@@ -5342,6 +5342,20 @@ def selftest():
     ins_ = open(os.path.join(HERE, "usage-app-install.ps1"), encoding="utf-8-sig").read()
     act_ = [ln for ln in ins_.splitlines() if "New-ScheduledTaskAction" in ln]
     assert len(act_) == 1 and "$stateArg" in act_[0] and "--state-dir" in ins_.split("New-ScheduledTaskAction")[0], act_
+    # the installer's quoting survives the Windows command-line parse a task's arguments go through: spaces, a trailing backslash, a drive root
+    qfn_ = [ln for ln in ins_.splitlines() if ln.startswith("function Quote-Arg")]
+    pwsh_ = shutil.which("pwsh")
+    if os.name == "nt" and pwsh_ and len(qfn_) == 1:
+        qd_ = tempfile.mkdtemp()
+        try:
+            echo_ = os.path.join(qd_, "echo.py")
+            open(echo_, "w").write("import sys, json; print(json.dumps(sys.argv[1:]))")
+            for raw_ in ("D:\\my state\\", "D:\\", "C:\\a b\\c"):
+                q_ = subprocess.run([pwsh_, "-NoProfile", "-Command", qfn_[0] + "; Quote-Arg '" + raw_ + "'"], capture_output=True, text=True, timeout=60).stdout.strip()
+                got_ = subprocess.run('"%s" "%s" --serve --state-dir %s --port 1' % (sys.executable, echo_, q_), capture_output=True, text=True, timeout=60).stdout
+                assert json.loads(got_) == ["--serve", "--state-dir", raw_, "--port", "1"], (raw_, q_, got_)
+        finally:
+            shutil.rmtree(qd_, ignore_errors=True)
     say("usage-history selftest: ok")
 
 

@@ -714,8 +714,8 @@ which runs `usage-history.py --serve` on `127.0.0.1:8787` at Idle CPU priority (
 `Agent Dashboard` that opens the page as an app window (install and `-Uninstall` also remove the shortcuts of the
 app's earlier names, `Quota Management` and `Quota`). Every 5 minutes it reads each
 seat's `usage-cache[-fable].json` (it never probes), appends a line to
-`~/.claude-cli-accounts/.usage-history.jsonl` (35 days kept), and rewrites
-`~/.claude-cli-accounts/usage-dashboard.html` from `usage-dashboard.template.html`. The page shows
+`.usage-history.jsonl` (35 days kept) in its state folder (`~/.claude-cli-accounts`, or `QUOTA_STATE_DIR` / `--state-dir`), and rewrites
+`usage-dashboard.html` there from `usage-dashboard.template.html`. The page shows
 the weekly quota left (all models or Fable) as a share of the whole pool (100 % = every seat full; the headline says how many seats), the usage rate in % of the whole pool per hour, and a projection of
 when the pool runs out, with each seat refilled at its weekly reset. It reloads itself every 5 min.
 **Refresh** (app only) probes every Claude seat (`claude-cli-account.ps1 --status`) and samples again. It updates Codex too when

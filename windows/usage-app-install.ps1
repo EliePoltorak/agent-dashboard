@@ -3,6 +3,8 @@
   via pythonw.exe) and a Start-menu shortcut that opens it as a standalone app window.
     usage-app-install.ps1              install / reinstall
     usage-app-install.ps1 -Uninstall   remove the task and the shortcut
+  A QUOTA_STATE_DIR set when this runs is resolved once (against the current folder) and passed to the task as --state-dir,
+  since a scheduled task does not inherit this shell's environment.
   PowerShell 7. The task runs at Idle CPU priority (Task Scheduler priority 10); usage-history.py also lowers itself to Idle
   and starts every child at Idle, whatever launched it.
 #>
@@ -37,13 +39,21 @@ $py = (py -3 -c 'import sys; print(sys.executable)').Trim()
 $pythonw = Join-Path (Split-Path $py) 'pythonw.exe'
 if (-not (Test-Path $pythonw)) { throw "pythonw.exe not found next to $py" }
 
-& $py $script --make-icons
-if ($LASTEXITCODE) { throw 'icon generation failed' }
+# one argument for a Windows command line: quoted, with trailing backslashes doubled so `D:\dir\` (or `D:\`) does not end in \" (an escaped quote)
+function Quote-Arg([string]$s) { '"' + ($s -replace '(\\+)$', '$1$1') + '"' }
 
 # the state folder: a scheduled task does not inherit this shell's environment, so a QUOTA_STATE_DIR set here is passed to the server as
-# --state-dir, or the server would write its history and provider cache (pending-reset marks included) to the default folder instead
-$state = if ($env:QUOTA_STATE_DIR) { [IO.Path]::GetFullPath($env:QUOTA_STATE_DIR) } else { Join-Path $HOME '.claude-cli-accounts' }
-$stateArg = if ($env:QUOTA_STATE_DIR) { " --state-dir `"$state`"" } else { '' }
+# --state-dir, or the server would write its history and provider cache (pending-reset marks included) to the default folder instead. Resolved
+# once, against PowerShell's current folder (not the process's), and written back so --make-icons below uses the same folder.
+$stateArg = ''
+if ($env:QUOTA_STATE_DIR) {
+    $env:QUOTA_STATE_DIR = [IO.Path]::GetFullPath($env:QUOTA_STATE_DIR, $PWD.ProviderPath)
+    $stateArg = ' --state-dir ' + (Quote-Arg $env:QUOTA_STATE_DIR)
+}
+$state = if ($env:QUOTA_STATE_DIR) { $env:QUOTA_STATE_DIR } else { Join-Path $HOME '.claude-cli-accounts' }
+
+& $py $script --make-icons
+if ($LASTEXITCODE) { throw 'icon generation failed' }
 
 Remove-Task $oldTask
 Remove-Task $taskName
