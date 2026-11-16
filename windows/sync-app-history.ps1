@@ -17,10 +17,12 @@
   -------------------------------
   A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
   (default 7, UTC; 0 or less = off) is ARCHIVED on every seat, once. It is remembered in
-  .flag-state.json (autoArchived), so if you un-archive it, it stays un-archived. Not archived: a
-  session pinned (isStarred, as this run resolves it), written in the last 10 minutes, or held back
-  this run (a record that can't be read or written; retried next run). It runs in the flag step, so
-  only while the app is closed; otherwise it waits for the next run. Records are never moved or deleted.
+  .flag-state.json (autoArchived), so this sync does not archive it again for age. Un-archive it, or
+  let the app mark it autoArchiveExempt, before that run and it is left as you set it (and remembered).
+  Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes,
+  or held back this run (a record known from the last run that can't be read, or a record whose write
+  fails; retried next run). It runs in the flag step, so only while the app is closed; otherwise it
+  waits for the next run. Records are never moved or deleted.
 
   WHAT IS COPIED to the seats that lack it
   ----------------------------------------
@@ -59,7 +61,8 @@
   USAGE
     pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older once)
     pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl. how many sessions it would archive)
-    pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive)
+    pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
+                                                    # a smaller value archives the sessions older than it on every seat, once; later runs with the default do not un-archive them
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
     pwsh -File sync-app-history.ps1 -MinAssistant 10
     pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
@@ -89,7 +92,7 @@
 param(
   [string]$Cwd = 'C:\Dev\hameishiv',
   [int]$MinAssistant = 6,
-  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones once (0 = no age limit, no auto-archive)
+  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones once (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it, once; later runs with the default do not un-archive them
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
   [switch]$DryRun,
   [switch]$NoPrune,           # no-op, kept so old invocations still work (records are never removed)
@@ -445,7 +448,7 @@ if ($appUp) {
     if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xFFFF) -in 32, 33) {
       Write-Warning "flag state file $flagStatePath is in use ($($_.Exception.Message)); archive/pin flags not synced this run. This clears on its own; do not delete it."
     } else {
-      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all)"
+      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old session once more, un-archived ones included, because deleting it also forgets which sessions were archived for age)"
     }
   }
 }
@@ -463,8 +466,8 @@ $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 # Sessions archived once for age (cliSessionId -> ISO date), from .flag-state.json. One in here is never
 # auto-archived again, so an un-archive sticks. A state file from before this map simply has none yet.
 $autoArch = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
-if ($flagPrevAll -and $flagPrevAll['autoArchived']) { foreach ($k in $flagPrevAll['autoArchived'].Keys) { $autoArch[$k] = $flagPrevAll['autoArchived'][$k] } }
-$autoDone = 0; $autoFlipped = 0
+if ($flagPrevAll -and -not $flagSkip -and $flagPrevAll['autoArchived'] -is [hashtable]) { foreach ($k in $flagPrevAll['autoArchived'].Keys) { $autoArch[$k] = $flagPrevAll['autoArchived'][$k] } }
+$autoDone = 0; $autoFlipped = 0; $autoKept = 0   # $autoKept: due, but the user had it un-archived: remembered, not archived
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
 # newer one (the app writing as it starts or quits). A record found changed, or one pass 1.5 could not write, is skipped by the later
@@ -539,13 +542,17 @@ if (-not $flagSkip) {
       if (-not $flagWant.ContainsKey($cli)) { $flagWant[$cli] = @{ isArchived = $false; isStarred = $false } }
       # AUTO-ARCHIVE, once: a -Cwd session whose transcript is here and older than $MaxAgeDays, not pinned, not held
       # this run, and not archived for age before. Setting $want lets the writes and the baseline below do the rest.
+      # Unless the user turned archive off: un-archived since last run (a changed record, and the answer is off), or a
+      # record the app marked autoArchiveExempt (it sets that when you un-archive a session it archived). Such a session
+      # is not archived; it is only remembered, so no later run archives it either. Decided BEFORE $want is overridden.
       $autoDue = $false
+      $autoUserOff = $flag -eq 'isArchived' -and (($changed.Count -and -not $want) -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       if ($flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and -not $autoArch.ContainsKey($cli) -and $allT.Contains($cli) -and
           -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli") -and
           @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
         $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
-        if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; $autoOff = [bool]($rs | Where-Object { -not $_.v }); $want = $true }
+        if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = [bool]($rs | Where-Object { -not $_.v }); $want = $true } }
       }
       $flagWant[$cli][$flag] = $want
       foreach ($r in $rs) {
@@ -578,8 +585,9 @@ if (-not $flagSkip) {
           [void]$flagFailCli.Add("$flag|$cli")
         }
       }
-      # remembered only once every record is archived; a failed write leaves it to be retried next run
-      if ($autoDue -and -not $flagFailCli.Contains("isArchived|$cli")) { $autoArch[$cli] = $nowUtc.ToString('o'); $autoDone++; if ($autoOff) { $autoFlipped++ } }
+      # remembered only when the session is not held back this run (no failed write, no record known from the last
+      # run that can't be read); a held session is retried next run
+      if ($autoDue -and -not $flagFailCli.Contains("isArchived|$cli")) { $autoArch[$cli] = $nowUtc.ToString('o'); if ($autoUserOff) { $autoKept++ } else { $autoDone++; if ($autoOff) { $autoFlipped++ } } }
     }
     $flagNextAll[$flag] = $next
     if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
@@ -589,7 +597,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago, once (+$($autoDone - $autoFlipped) already archived, now remembered so an un-archive sticks)" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago, once (+$($autoDone - $autoFlipped) already archived, now remembered so an un-archive sticks$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" }))" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
