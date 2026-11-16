@@ -2082,7 +2082,7 @@ def parse_log_line(msg):
             v["f"] = _pct(m, 3)
         return {m.group(1): v}
     if msg.startswith("NO USABLE TARGET"):
-        return {lab: {"w": min(int(w), 100) / 100} for lab, w in re.findall(r"\b([A-Za-z]+)=s\d+%/w(\d+)%", msg)}
+        return {lab: {"w": min(int(w), 100) / 100} for lab, w in re.findall(r"\b([A-Za-z]+)=s(?:\d+%|n/a)/w(\d+)%", msg)}
     m = re.match(r"TRIGGER: active account '([A-Za-z]+)'", msg)
     if m:
         v = {}
@@ -4406,6 +4406,8 @@ def selftest():
     assert parse_log_line("ROTATED 'Personal' -> Work (w@x.org) session 0%, weekly 41%, fable 14%") == {"Work": {"w": 0.41, "f": 0.14}}
     assert parse_log_line("ROTATED 'F' -> Work (w@x.org) session 0%, weekly 41%") == {"Work": {"w": 0.41}} and parse_log_line("ROTATED 'Personal' -> A (a@x.org) session 0%, weekly 7%") == {"A": {"w": 0.07}}
     assert parse_log_line("NO USABLE TARGET - staying on 'Work'. Personal=s0%/w80% Work=s1%/w60% C=s0%/w5% (capped)") == {"Personal": {"w": 0.8}, "Work": {"w": 0.6}, "C": {"w": 0.05}}
+    # a seat whose session usage is unknown (the rotator prints n/a) still yields its weekly reading; an unknown weekly yields nothing
+    assert parse_log_line("NO USABLE TARGET - staying on 'Work'. A=sn/a/w10% (capped (cached cap in force)) B=sn/a/wn/a (capped (cached cap in force)) C=s5%/w20%") == {"A": {"w": 0.1}, "C": {"w": 0.2}}
     assert parse_log_line("TRIGGER: active account 'Personal' WEEKLY window CAPPED at 100% (session 20%) [via proxy]") == {"Personal": {"w": 1.0}}
     assert parse_log_line("TRIGGER: active account 'Work' at 49% (session 49%, weekly 49%) >= 1%") == {"Work": {"w": 0.49}}
     mlog = "\n".join([ts(L - 4 * 86400) + "  ROTATED 'Personal' -> Work (w@x.org) session 0%, weekly 41%, fable 14%",

@@ -37,11 +37,25 @@ $global:ClaudeRotatorProbeOverride = {
   $plan = $script:plan[$Label]
   if (-not $plan) { $plan = 'ok' }
   if ($Model -eq 'fable' -and $plan -notin @('network','http401')) {     # a seat the network or its token fails fails both probes, as Probe-Usage does
-    if ($plan -eq 'fable-500') {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
+    if ($plan -in @('fable-500','both-500','live-default+fable-500')) {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
     }
     if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; status='allowed'; s5_util=0.1; note='' }
+    }
+    if ($plan -eq 'default-500+live-fable') {     # a live Fable rejection beside a headerless default probe
+      return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; oi7_util=1.0; oi7_stat='rejected'; note='' }
+    }
+    if ($plan -like 'fable-only:*') {     # a non-2xx carrying exactly one oi7 field
+      $r = [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; note='' }
+      $f = $plan.Split(':')[1]; $r | Add-Member -NotePropertyName $f -NotePropertyValue $(if ($f -eq 'oi7_util') { 0.1 } else { 'allowed' })
+      return $r
+    }
+    if ($plan -eq 'fable-429-fields') {     # a non-2xx that still carries the oi7 window
+      return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; oi7_util=0.1; oi7_stat='allowed'; note='' }
+    }
+    if ($plan -eq 'fable-net') {     # the Fable probe alone fails on the network; the haiku one reads normally
+      return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network; not marking disabled' }
     }
     if ($plan -eq 'fable-disabled') {
       return [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code='oauth_org_not_allowed'; note='subscription disabled (403 oauth_org_not_allowed)' }
@@ -60,7 +74,21 @@ $global:ClaudeRotatorProbeOverride = {
   if ($plan -eq 'http401') {     # Probe-Usage's result for a dead token: an HTTP failure, not a network one
     return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$false; note='probe failed: http 401: authentication_error: invalid token; not marking disabled' }
   }
-  if ($plan -eq 'default-500') {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
+  if ($plan -like 'default-only:*') {     # a non-2xx carrying exactly one session/weekly field
+    $r = [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; note='' }
+    $f = $plan.Split(':')[1]; $r | Add-Member -NotePropertyName $f -NotePropertyValue $(if ($f -like '*_util') { 0.1 } else { 'allowed' })
+    return $r
+  }
+  if ($plan -in @('default-rejected-bare','live-default+fable-500')) {     # a live cap whose reading carries no utilisation
+    return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='rejected'; note='' }
+  }
+  if ($plan -eq 'default-2xx-bare') {     # a 2xx that carries no usage headers at all
+    return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; note='' }
+  }
+  if ($plan -eq 'default-429-fields') {     # a non-2xx that still carries the session/weekly window
+    return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='allowed'; s5_util=0.1; w7_util=0.2; s5_stat='allowed'; w7_stat='allowed'; note='' }
+  }
+  if ($plan -in @('default-500','both-500','default-500+live-fable')) {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
   }
   if ($plan -eq 'quota') {
@@ -523,6 +551,135 @@ Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = ($nowS - 60); 
 $script:plan['A'] = 'default-500'
 $null = Get-UsageCached 'A' $true 'haiku' ''
 Check 'a headerless default probe still replaces a cap that has reset' ((Get-Content (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Raw | ConvertFrom-Json).data.http -eq 500)
+
+# --- issue #11: the normal ranking and selection path honours a cached cap when the live probe is headerless ---
+# A is the only seat the other probes leave usable (401s), so selecting it can only be the cap being ignored.
+foreach ($case in @(
+    @{ word = 'session'; plan = 'default-500'; fable = $false; key = 's5' },
+    @{ word = 'weekly';  plan = 'default-500'; fable = $false; key = 'w7' },
+    @{ word = 'Fable';   plan = 'fable-500';   fable = $true;  key = 'oi7' })) {
+  foreach ($future in $true, $false) {
+    Reset-Case
+    Clear-AppIdentity
+    foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+    $script:plan['A'] = $case.plan
+    $reset = if ($future) { $nowS + 3600 } else { $nowS - 60 }
+    if ($case.fable) { Write-FableCache 'A' $stale ([string]$reset) }
+    else { Write-DefaultCache 'A' $stale @{ "$($case.key)_stat" = 'rejected'; "$($case.key)_reset" = $reset; status = 'rejected' } }
+    $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+    $script:UnknownProbeMemo = @{}
+    $pick = Select-RotationTarget -Bar 90
+    $pickL = if ($pick) { $pick.label } else { '(none)' }
+    if ($future) {
+      Check "a headerless 500 over a cached $($case.word) cap in force: not ranked usable" ($rowA -and -not $rowA.usable) "usable=$($rowA.usable) why=$($rowA.why)"
+      Check "a headerless 500 over a cached $($case.word) cap in force: not selected" ($pickL -eq '(none)') $pickL
+      if (-not $case.fable) {
+        Check "a headerless 500 over a cached $($case.word) cap in force: its unread usage is reported as unknown, not 0%" ($null -eq $rowA.s5 -and $null -eq $rowA.w7) "s5=$($rowA.s5) w7=$($rowA.w7)"
+        Check "a headerless 500 over a cached $($case.word) cap in force: labelled as a cached cap" ($rowA.why -eq 'capped (cached cap in force)') $rowA.why
+      } else {
+        Check "a headerless 500 over a cached Fable cap in force: labelled as a cached Fable cap" ($rowA.why -eq 'fable capped (cached cap in force, needed for Gate C)') $rowA.why
+        Check "a headerless 500 over a cached Fable cap in force: the skip is logged" ((Test-Path -LiteralPath $RotateLog) -and ((Get-Content -LiteralPath $RotateLog -Raw) -match "skipped 'A' as a target: its Fable probe \(http 500\)"))
+      }
+    } else {
+      Check "a headerless 500 over an expired cached $($case.word) cap: still ranked usable" ([bool]$rowA.usable) "why=$($rowA.why)"
+      Check "a headerless 500 over an expired cached $($case.word) cap: still selected" ($pickL -eq 'A') $pickL
+    }
+  }
+}
+
+# Blanking reports only what the reading lacks: a reading that carries w7_util alone keeps it next to a cache-only cap, and a live
+# cap keeps its numbers even when the reading carried no utilisation.
+Reset-Case
+Clear-AppIdentity
+foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+$script:plan['A'] = 'default-only:w7_util'
+Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' }
+$rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+Check 'a 429 carrying only w7_util over a cached cap in force: excluded as a cached cap' ($rowA -and -not $rowA.usable -and $rowA.why -eq 'capped (cached cap in force)') "usable=$($rowA.usable) why=$($rowA.why)"
+Check 'a 429 carrying only w7_util over a cached cap in force: s5 unknown, w7 kept' ($null -eq $rowA.s5 -and $rowA.w7 -eq 0.1) "s5=$($rowA.s5) w7=$($rowA.w7)"
+Reset-Case
+Clear-AppIdentity
+foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+$script:plan['A'] = 'default-rejected-bare'
+$rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+Check 'a live cap with no utilisation: labelled capped, numbers kept' ($rowA -and -not $rowA.usable -and $rowA.why -eq 'capped' -and $null -ne $rowA.s5 -and $null -ne $rowA.w7) "why=$($rowA.why) s5=$($rowA.s5) w7=$($rowA.w7)"
+
+# Both caps at once: the combined label says cached when either one came from the cache.
+Reset-Case
+Clear-AppIdentity
+foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+$script:plan['A'] = 'both-500'
+Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' }
+Write-FableCache 'A' $stale ([string]($nowS + 3600))
+$rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+Check 'cached session and Fable caps together: labelled as cached' ($rowA -and $rowA.why -eq 'capped + fable capped (cached cap in force)') $rowA.why
+foreach ($mix in @(
+    @{ word = 'a live session cap beside a cached Fable cap'; plan = 'live-default+fable-500'; dc = $false; fc = $true },
+    @{ word = 'a cached session cap beside a live Fable cap'; plan = 'default-500+live-fable'; dc = $true; fc = $false })) {
+  Reset-Case
+  Clear-AppIdentity
+  foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+  $script:plan['A'] = $mix.plan
+  if ($mix.dc) { Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' } }
+  if ($mix.fc) { Write-FableCache 'A' $stale ([string]($nowS + 3600)) }
+  $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+  Check "$($mix.word): labelled as cached" ($rowA -and $rowA.why -eq 'capped + fable capped (cached cap in force)') $rowA.why
+}
+
+# A cached Fable cap (in force, or with no reset) is replaced by a fresh 2xx reading, and a failed Fable probe over it stays
+# not-capped: either way A is the target. This is what keeps a cap with no reset from excluding a seat for good.
+foreach ($case in @(
+    @{ word = 'a fresh 2xx Fable reading'; plan = 'ok' },
+    @{ word = 'a Fable probe that fails on the network'; plan = 'fable-net' })) {
+  foreach ($reset in @([string]($nowS + 3600), $null)) {
+    $rw = if ($reset) { 'in force' } else { 'with no reset' }
+    Reset-Case
+    Clear-AppIdentity
+    foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+    $script:plan['A'] = $case.plan
+    Write-FableCache 'A' $stale $reset
+    $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+    $script:UnknownProbeMemo = @{}
+    $pick = Select-RotationTarget -Bar 90
+    $pickL = if ($pick) { $pick.label } else { '(none)' }
+    Check "$($case.word) over a cached Fable cap $($rw): still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
+    Check "$($case.word) over a cached Fable cap $($rw): still selected" ($pickL -eq 'A') $pickL
+  }
+}
+
+# Only the reading $keepCap keeps a cap for (an ok non-2xx with none of the window's fields) is checked against the cache: a 2xx
+# (with or without the window) or a non-2xx carrying the window decides, even when its cache write failed and the old cap is still
+# on disk. The old cache is past its TTL here, so the live reading is the one ranked.
+foreach ($case in @(
+    @{ word = '2xx session'; fable = $false; plan = 'ok' },
+    @{ word = 'bare 2xx session (no usage headers)'; fable = $false; plan = 'default-2xx-bare' },
+    @{ word = '429 session carrying the window'; fable = $false; plan = 'default-429-fields' },
+    @{ word = '2xx Fable'; fable = $true; plan = 'ok' },
+    @{ word = 'bare 2xx Fable (no oi7 window)'; fable = $true; plan = 'fable-2xx-bare' },
+    @{ word = '429 Fable carrying the oi7 window'; fable = $true; plan = 'fable-429-fields' },
+    @{ word = '429 session carrying only status'; fable = $false; plan = 'default-only:status' },
+    @{ word = '429 session carrying only s5_stat'; fable = $false; plan = 'default-only:s5_stat' },
+    @{ word = '429 session carrying only w7_stat'; fable = $false; plan = 'default-only:w7_stat' },
+    @{ word = '429 session carrying only s5_util'; fable = $false; plan = 'default-only:s5_util' },
+    @{ word = '429 Fable carrying only oi7_stat'; fable = $true; plan = 'fable-only:oi7_stat' },
+    @{ word = '429 Fable carrying only oi7_util'; fable = $true; plan = 'fable-only:oi7_util' })) {
+  Reset-Case
+  Clear-AppIdentity
+  foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+  $script:plan['A'] = $case.plan
+  if ($case.fable) { Write-FableCache 'A' $stale ([string]($nowS + 3600)); $cf = 'usage-cache-fable.json' }
+  else { Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' }; $cf = 'usage-cache.json' }
+  $cfp = Join-Path (Join-Path $Root 'A') $cf
+  Set-ItemProperty -LiteralPath $cfp -Name IsReadOnly -Value $true
+  $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+  $script:UnknownProbeMemo = @{}
+  $pick = Select-RotationTarget -Bar 90
+  $pickL = if ($pick) { $pick.label } else { '(none)' }
+  Set-ItemProperty -LiteralPath $cfp -Name IsReadOnly -Value $false
+  Check "a $($case.word) reading over a cached cap it could not overwrite: the old cap really is still on disk" (Test-CapCached 'A' $(if ($case.fable) { 'fable' } else { 'default' }))
+  Check "a $($case.word) reading over a cached cap it could not overwrite: still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
+  Check "a $($case.word) reading over a cached cap it could not overwrite: still selected" ($pickL -eq 'A') $pickL
+}
 
 # --- quota 429 is not an access refusal ---
 Reset-Case
