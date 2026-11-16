@@ -102,7 +102,6 @@ $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
 if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; return }
 
 $cwdJson = $Cwd -replace '\\', '\\'
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 # One run at a time: two runs share temp-file names and the flag baseline. Held until the script ends.
 $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
@@ -118,6 +117,7 @@ while (-not $runLock) {
     Start-Sleep -Seconds 2
   }
 }
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock, so two runs never share a backup folder
 try {
 # a run killed between writing a .sync-tmp and moving it into place leaves it in the app's index; the suffix is
 # only ours and the lock means no other run is mid-write, so any found now is a leftover
@@ -335,9 +335,14 @@ function Test-AppUp {
   # Fail closed: every process named claude counts as the app UNLESS its path is a known Claude Code CLI location.
   # So a new install layout, or a path that can't be read (e.g. an elevated CLI), skips the flag step rather than
   # writing under a running app.
-  $script:appBlockers = @(Get-Process -Name claude -ErrorAction SilentlyContinue | ForEach-Object {
+  # Also counted: any process, whatever its name, running from the app's install folders.
+  $script:appBlockers = @(Get-Process -ErrorAction SilentlyContinue | ForEach-Object {
     $pp = $null; try { $pp = $_.Path } catch { }
-    if (-not ($pp -and ($pp -like '*\.local\bin\claude.exe' -or $pp -like '*\Claude\claude-code\*\claude.exe'))) {
+    $isClaude = $_.ProcessName -eq 'claude'
+    $isCli = $pp -and ($pp -like '*\.local\bin\claude.exe' -or $pp -like '*\Claude\claude-code\*\claude.exe')
+    # the app's own executables, not the helpers under resources\ (chrome-native-host runs whenever Chrome is open)
+    $inApp = $pp -and ($pp -like '*\AnthropicClaude\app-*\*.exe' -or $pp -like '*\WindowsApps\Claude_*\app\*.exe') -and $pp -notlike '*\resources\*'
+    if ($inApp -or ($isClaude -and -not $isCli)) {
       "pid $($_.Id) $(if ($pp) { $pp } else { '(path unreadable)' })"
     }
   })
@@ -412,7 +417,11 @@ if ($appUp) {
     if ($flagPrevAll.ContainsKey('cli') -and $flagPrevAll['cli'] -isnot [hashtable]) { throw "'cli' is not an object" }
   } catch {
     $flagSkip = $true
-    Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. Delete it to start again (the next run then counts a flag set on any seat as set on all)"
+    if ($_.Exception -is [IO.IOException]) {
+      Write-Warning "flag state file $flagStatePath is in use ($($_.Exception.Message)); archive/pin flags not synced this run. This clears on its own; do not delete it."
+    } else {
+      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all)"
+    }
   }
 }
 $flagNextAll = @{}
@@ -429,6 +438,12 @@ $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
 # newer one (the app writing as it starts or quits). A record found changed is skipped by all of them.
 $changedOnDisk = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+# Write a record through a temp file and an atomic replace, so a killed run can't leave it truncated.
+function Write-RecordFile([string]$path, [string]$text) {
+  $tmp = "$path.sync-tmp"
+  try { Set-Content -LiteralPath $tmp -Value $text -Encoding UTF8 -NoNewline; [IO.File]::Move($tmp, $path, $true) }
+  catch { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue; throw }
+}
 function Test-ChangedSinceRead($rec) {
   if ($changedOnDisk.Contains($rec.file.FullName)) { return $true }
   $d = Get-Item -LiteralPath $rec.file.FullName -ErrorAction SilentlyContinue
@@ -577,18 +592,26 @@ foreach ($cli in @($byCli.Keys)) {
     $wasKnown = $changedOnDisk.Contains($r.file.FullName)
     if (Test-ChangedSinceRead $r) { if (-not $wasKnown) { Write-Warning "left $($r.file.FullName) alone: it changed since it was read (reconciled next run)" }; continue }
     if (-not $DryRun) {
-      $rel = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
-      $dest = Join-Path (Join-Path $env:USERPROFILE ".claude-app-seats\.reconcile-backups\$stamp") $rel
-      New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
-      Copy-Item -LiteralPath $r.file.FullName -Destination $dest -Force
-      foreach ($f in $StateFields) {
-        if ($null -eq $srcRec.j.PSObject.Properties[$f]) { continue }
-        $v = $srcRec.j.$f
-        if ($f -eq 'lastActivityAt' -or $f -eq 'lastFocusedAt') { $v = [Math]::Max([double]$v, [double]$r.j.$f) }
-        $r.j | Add-Member -NotePropertyName $f -NotePropertyValue $v -Force
+      try {
+        $rel = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
+        $dest = Join-Path (Join-Path $env:USERPROFILE ".claude-app-seats\.reconcile-backups\$stamp") $rel
+        New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
+        Copy-Item -LiteralPath $r.file.FullName -Destination $dest -Force
+        $upd = $r.j | ConvertTo-Json -Depth 100 | ConvertFrom-Json -DateKind String   # copy: a failed write leaves $r.j as on disk
+        foreach ($f in $StateFields) {
+          if ($null -eq $srcRec.j.PSObject.Properties[$f]) { continue }
+          $v = $srcRec.j.$f
+          if ($f -eq 'lastActivityAt' -or $f -eq 'lastFocusedAt') { $v = [Math]::Max([double]$v, [double]$r.j.$f) }
+          $upd | Add-Member -NotePropertyName $f -NotePropertyValue $v -Force
+        }
+        Write-RecordFile $r.file.FullName ($upd | ConvertTo-Json -Compress -Depth 100)
+        $r.j = $upd
+        $r.file = Get-Item -LiteralPath $r.file.FullName   # our own write: the retitle compares with this
+      } catch {
+        Write-Warning "could not reconcile $($r.file.FullName) ($($_.Exception.Message)); retried next run"
+        [void]$changedOnDisk.Add($r.file.FullName)   # no later step in this run writes it
+        continue
       }
-      ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $r.file.FullName -Encoding UTF8 -NoNewline
-      $r.file = Get-Item -LiteralPath $r.file.FullName   # our own write: the retitle compares with this
     }
     $reconciled++
   }
@@ -637,8 +660,10 @@ foreach ($acct in $accts) {
         if (-not $DryRun) {
           $rel = $f.FullName.Substring($ccs.Length).TrimStart('\')
           $dest = Join-Path $backupRoot $rel
-          New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
-          Move-Item -LiteralPath $f.FullName -Destination $dest -Force
+          try {
+            New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
+            Move-Item -LiteralPath $f.FullName -Destination $dest -Force
+          } catch { Write-Warning "could not prune $($f.FullName) ($($_.Exception.Message)); retried next run"; continue }
         }
         $pruned++
       }
@@ -646,12 +671,14 @@ foreach ($acct in $accts) {
     }
     if (-not $cli) { continue }
     [void]$present.Add($cli)
-    if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli) -and -not (Test-ChangedSinceRead $r)) {
+    if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli) -and -not $changedOnDisk.Contains($f.FullName)) {
       $bt = Get-TitleFor $cli
-      if ($bt) {
+      # checked right before the write, after the (slow) transcript read
+      if ($bt -and -not (Test-ChangedSinceRead $r)) {
         if (-not $DryRun) {
-          $j.title = $bt
-          ($j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $f.FullName -Encoding UTF8 -NoNewline
+          $old = $j.title; $j.title = $bt
+          try { Write-RecordFile $f.FullName ($j | ConvertTo-Json -Compress -Depth 100) }
+          catch { $j.title = $old; Write-Warning "could not retitle $($f.FullName) ($($_.Exception.Message)); retried next run"; continue }
         }
         $retitled++
       }

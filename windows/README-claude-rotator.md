@@ -565,7 +565,10 @@ record stopped at 09-29 while the transcript ran to 10-05). Every sync now finds
 points at the transcript's last assistant turn and copies its session state (`lastAssistantUuid`,
 `completedTurns`, `postTurnSummary*`, activity times) into every record pointing at an earlier
 turn. Originals are copied to `~/.claude-app-seats\.reconcile-backups\<timestamp>\`. Records
-whose uuid isn't in the transcript, and sessions touched in the last 10 minutes, are left alone.
+whose uuid isn't in the transcript, sessions touched in the last 10 minutes, and records that changed on disk
+since the sync read them are left alone. A record that can't be written is skipped with a warning and retried
+next run; the rest of the sync carries on. Records are written through a temp file, so a killed run can't leave
+one half-written.
 
 **Archive and pin flags follow you across seats (2026-11-03).** Each seat keeps its own record
 per session, with its own `isArchived` and `isStarred` (the record's pin flag). Every sync compares each
@@ -667,7 +670,8 @@ Consequently the first four now match **both** paths, so they keep working on ei
   The app's main process carries no `--type=` switch, so with only the `WindowsApps` test it
   passed every other filter and would have been killed and "resumed" as if it were a CLI TUI.
 - `sync-app-history.ps1` → `Test-AppUp` — the opposite way round: every `claude` process counts as the app
-  unless it is at a known Claude Code CLI location (`~\.local\bin`, `%APPDATA%\Claude\claude-code\*`), so an
+  (and so does any `.exe` run from the app's own folder, `AnthropicClaude\app-*` or `WindowsApps\Claude_*\app`,
+  whatever its name; helpers under `resources\` are not counted) unless it is at a known Claude Code CLI location (`~\.local\bin`, `%APPDATA%\Claude\claude-code\*`), so an
   unfamiliar install path skips the archive/pin sync instead of writing under a running app. Update the CLI
   locations there if the CLI moves.
 

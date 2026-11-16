@@ -8,7 +8,7 @@
   does not stop the save; with the app running (-AssumeAppRunning) nothing is changed or saved and a record
   it creates is neutral; a state file without the record->session map stops the whole save on an unreadable
   record; a held session's new record is neutral and set by the next good run; a record truncated to 0
-  bytes counts as unreadable; a leftover .sync-tmp is removed; a flag write in the same run as pass 1.5's reconcile does not stop the run;
+  bytes counts as unreadable; a leftover .sync-tmp is removed; a flag write in the same run as pass 1.5's reconcile reconciles the records it just wrote, and a record pass 1.5 can't write is skipped without stopping the run;
   archived-sessions.idx follows archive and
   un-archive; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
@@ -153,19 +153,30 @@ check 'readable again: un-archived on every seat, not re-archived' (@(ofSession 
 "--- a flag write in the same run as pass 1.5's reconcile: the records the flag pass just wrote are reconciled too"
 # give the transcript real turn ids and an age past pass 1.5's 10-minute window, for this scenario only
 $tPath = "$proj\$X.jsonl"; $tOrig = Get-Content $tPath -Raw
-$u = 1..7 | ForEach-Object { '00000000-0000-0000-0000-00000000000' + $_ }
-Set-Content $tPath (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + ($u | ForEach-Object { '{"parentUuid":null,"type":"assistant","uuid":"' + $_ + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}' }))
+$tu = 1..7 | ForEach-Object { '00000000-0000-0000-0000-00000000000' + $_ }
+Set-Content $tPath (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + ($tu | ForEach-Object { '{"parentUuid":null,"type":"assistant","uuid":"' + $_ + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok"}]}}' }))
 (Get-Item $tPath).LastWriteTime = (Get-Date).AddMinutes(-30)
 $xs = @(ofSession $X)
-setRec $xs[0].f 'lastAssistantUuid' $u[6]; foreach ($r in ($xs | Select-Object -Skip 1)) { setRec $r.f 'lastAssistantUuid' $u[2] }
+setRec $xs[0].f 'lastAssistantUuid' $tu[6]; foreach ($r in ($xs | Select-Object -Skip 1)) { setRec $r.f 'lastAssistantUuid' $tu[2] }
 setRec $xs[0].f 'isStarred' $true; run
 check 'flag write + pass 1.5: run exits 0' ($rc -eq 0)
 check 'flag write + pass 1.5: no error' (-not ($out -match 'Method invocation|op_Subtraction|xception'))
 check 'flag write + pass 1.5: pass 2 still ran' ([bool]($out -match '\badded \d+, cloned'))
 check 'flag write + pass 1.5: no record mistaken for an outside change' (-not ($out -match 'left .* alone'))
 $after = @(ofSession $X | ForEach-Object { Get-Content $_.f -Raw | ConvertFrom-Json })
-check "flag write + pass 1.5: every record reconciled to the last turn ($($after.Count) records)" ($after.Count -ge 2 -and -not ($after | Where-Object { $_.lastAssistantUuid -ne $u[6] }))
+check "flag write + pass 1.5: every record reconciled to the last turn ($($after.Count) records)" ($after.Count -ge 2 -and -not ($after | Where-Object { $_.lastAssistantUuid -ne $tu[6] }))
 check 'flag write + pass 1.5: every record pinned' (-not ($after | Where-Object { -not $_.isStarred }))
+"--- a record pass 1.5 can't write is skipped with a warning; the run still finishes and pass 2 still runs"
+$xs = @(ofSession $X)
+foreach ($r in ($xs | Select-Object -Skip 1)) { setRec $r.f 'lastAssistantUuid' $tu[2] }
+(Get-Item $tPath).LastWriteTime = (Get-Date).AddMinutes(-30)
+(Get-Item -LiteralPath $xs[1].f).IsReadOnly = $true; run
+check 'unwritable reconcile: run exits 0' ($rc -eq 0)
+check 'unwritable reconcile: warned' ([bool]($out -match 'could not reconcile'))
+check 'unwritable reconcile: pass 2 still ran' ([bool]($out -match '\badded \d+, cloned'))
+check 'unwritable reconcile: other records reconciled' (-not (@(ofSession $X | Where-Object { $_.f -ne $xs[1].f } | ForEach-Object { Get-Content $_.f -Raw | ConvertFrom-Json }) | Where-Object { $_.lastAssistantUuid -ne $tu[6] }))
+check 'unwritable reconcile: no temp file left' (-not (Get-ChildItem -LiteralPath (Split-Path $xs[1].f) -Filter '*.sync-tmp'))
+(Get-Item -LiteralPath $xs[1].f).IsReadOnly = $false
 Set-Content $tPath $tOrig -NoNewline
 foreach ($r in (ofSession $X)) { setRec $r.f 'lastAssistantUuid' ''; setRec $r.f 'isStarred' $false }; run
 
