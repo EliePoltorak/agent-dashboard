@@ -17,7 +17,9 @@
   saved baseline. Auto-archive (once): an old session is archived on every seat and no record moves or
   disappears; an un-archive after that sticks; the app being open defers it; a pinned old session is not
   archived; a held (unreadable record) session is retried and not marked done; a state file without the
-  autoArchived map loads, and a malformed one fails like the other maps.
+  autoArchived map loads, and a malformed one fails like the other maps; an old session the user
+  un-archived since the last run, or with autoArchiveExempt on a record, is not archived but is remembered; a session of
+  another cwd is left alone; a state file without the cli map plus an unreadable record auto-archives nothing.
   Copies the LIVE app session index into a fresh sandbox under C:\Dev\Temp and runs the sync there with
   %APPDATA% / %USERPROFILE% redirected, and -AssumeAppClosed (so the app-running check is skipped for the sandbox).
   The real files are only read. The sandbox is deleted on success and kept (path printed) on failure. Exit 1 on
@@ -355,6 +357,38 @@ check 'held: not archived, not marked done' (@(ofSession $O4 | Where-Object arch
 Set-Content -LiteralPath $r4[1].f $raw4 -NoNewline; run
 check 'retried: archived on every seat and marked done' (@(ofSession $O4 | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $O4))
 check 'run succeeds' ($rc -eq 0 -and -not ($out -match 'rror|xception'))
+
+"--- an old session the user un-archived since the last run is not archived, and is remembered"
+$O5 = mkOld; foreach ($r in (ofSession $O5)) { setRec $r.f 'isArchived' $true }; run '-MaxAgeDays 0'   # archived on every seat, all known, not marked done
+check 'user-off: setup: archived everywhere, not marked done' (@(ofSession $O5 | Where-Object { -not $_.arch }).Count -eq 0 -and -not (autoDone $O5))
+setRec (ofSession $O5)[0].f 'isArchived' $false; run
+check 'user-off: un-archived on every seat' (@(ofSession $O5 | Where-Object arch).Count -eq 0)
+check 'user-off: remembered as done' (autoDone $O5)
+check 'user-off: not counted as auto-archived' (-not ($out -match '^auto-archived [1-9]') -and [bool]($out -match 'left un-archived as the user chose'))
+run
+check 'user-off: still un-archived on a further run' (@(ofSession $O5 | Where-Object arch).Count -eq 0)
+
+"--- an old session with autoArchiveExempt on a record is not archived, and is remembered"
+$O6 = mkOld; setRec (ofSession $O6)[0].f 'autoArchiveExempt' $true; run
+check 'exempt: archived on no seat' (@(ofSession $O6 | Where-Object arch).Count -eq 0)
+check 'exempt: remembered as done' (autoDone $O6)
+run
+check 'exempt: still not archived on a further run' (@(ofSession $O6 | Where-Object arch).Count -eq 0)
+
+"--- the cwd guard: an old session whose records are for another cwd is not archived or remembered"
+$O7 = mkOld; foreach ($r in (ofSession $O7)) { setRec $r.f 'cwd' 'C:\Dev\somewhere-else' }; run
+check 'other cwd: not archived' (@(ofSession $O7 | Where-Object arch).Count -eq 0)
+check 'other cwd: not remembered as done' (-not (autoDone $O7))
+
+"--- a state file without the record->session map plus an unreadable record: nothing is auto-archived, autoArchived is not changed"
+$O8 = mkOld; run '-MaxAgeDays 0'                                     # its records join the baseline
+$st = state; $st.Remove('cli'); Set-Content $statePath ($st | ConvertTo-Json -Compress -Depth 5)
+$stBefore = Get-Content $statePath -Raw; $r8 = @(ofSession $O8); $raw8 = Get-Content -LiteralPath $r8[1].f -Raw
+Set-Content -LiteralPath $r8[1].f 'not json' -NoNewline; run
+check 'no cli map + unreadable record: not archived, not remembered' (@(ofSession $O8 | Where-Object arch).Count -eq 0 -and -not (autoDone $O8))
+check 'no cli map + unreadable record: state file (autoArchived) unchanged' ((Get-Content $statePath -Raw) -eq $stBefore)
+Set-Content -LiteralPath $r8[1].f $raw8 -NoNewline; run
+check 'no cli map, record readable again: archived on every seat and remembered' (@(ofSession $O8 | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $O8))
 
 "$fail failure(s)"
 if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }
