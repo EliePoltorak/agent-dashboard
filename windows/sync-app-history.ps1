@@ -2,7 +2,7 @@
 # (ConvertFrom-Json -DateKind needs 7.5; on an older pwsh every record would look unreadable)
 <#
   sync-app-history.ps1  --  make SUBSTANTIVE or UNFINISHED CLI / cross-account Claude Code
-  sessions show up in the Claude Code DESKTOP APP's session history, and prune trivial ones.
+  sessions show up in the Claude Code DESKTOP APP's session history, and archive old ones once.
 
   WHY THIS EXISTS
   ---------------
@@ -11,19 +11,22 @@
       %APPDATA%\Claude\claude-code-sessions\<account-uuid>\<workspace-guid>\local_<guid>.json
   This script creates pointer records for transcripts the app never recorded, in EVERY
   account bucket (an account that never tracked the workspace is seeded with the shared
-  workspace guid -- it is identical across accounts), and REMOVES records for
-  non-substantive sessions.
+  workspace guid -- it is identical across accounts). It never removes a record.
 
-  WHAT IS KEPT (synced) -- everything else is pruned
-  --------------------------------------------------
+  AUTO-ARCHIVE (once per session)
+  -------------------------------
+  A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
+  (default 7, UTC; 0 or less = off) is ARCHIVED on every seat, once. It is remembered in
+  .flag-state.json (autoArchived), so if you un-archive it, it stays un-archived. Not archived: a
+  session pinned (isStarred, as this run resolves it), written in the last 10 minutes, or held back
+  this run (a record that can't be read or written; retried next run). It runs in the flag step, so
+  only while the app is closed; otherwise it waits for the next run. Records are never moved or deleted.
+
+  WHAT IS COPIED to the seats that lack it
+  ----------------------------------------
   A session must be RECENT (last activity within -MaxAgeDays, default 7; 0 = no limit)
-  AND match a keep category below. Older sessions are pruned from the app view no matter
-  how substantive -- the transcript is never touched and `claude --resume` still lists it.
-  Exception: a session whose pin flag (isStarred), as this run resolves it, is on is never pruned,
-  and, if it belongs to -Cwd and its transcript is on this machine, is copied to the other seats like
-  a kept one. Unpinning it releases it once a run spreads the
-  unpin (a run that skips the flag step goes by the records as read: any still pinned keeps it).
-  A session whose transcript was written in the last 10 minutes is never pruned either (an open but idle one is not protected).
+  AND match a keep category below. A pinned session of -Cwd whose transcript is on this machine
+  is copied too, whatever its age.
 
   1. SUBSTANTIVE work (the only category kept by default): first instruction is NOT an
      automated-dispatch signature (merge-pr / address-pr, review agents, ping tests, bare
@@ -38,9 +41,7 @@
      misclassified as finished. ponytail: acceptable ceiling; tighten to tail-only match
      if it ever misfires.)
   Categories 2 and 3 are OFF by default -- pass -KeepResumable to enable them (they're
-  still CLI-resumable either way). They only keep files untouched for >10 minutes, so live
-  sessions don't churn in and out of the index; no session, in any category, is pruned within
-  10 minutes of its transcript's last write.
+  still CLI-resumable either way). They only count files untouched for >10 minutes.
 
   TITLES
   ------
@@ -56,13 +57,13 @@
   better title can be derived.
 
   USAGE
-    pwsh -File sync-app-history.ps1                 # sync+prune C:\Dev\hameishiv (default: recent 7d + substantive)
-    pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change, change nothing
-    pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the recency window (0 = keep all ages)
+    pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older once)
+    pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl. how many sessions it would archive)
+    pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive)
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
     pwsh -File sync-app-history.ps1 -MinAssistant 10
     pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
-    pwsh -File sync-app-history.ps1 -NoPrune        # only add/retitle; never remove
+    -NoPrune is still accepted and does nothing (records are never removed now)
     pwsh -File sync-app-history.ps1 -Quiet          # for the launcher hook / scheduled task
     pwsh -File sync-app-history.ps1 -AssumeAppRunning   # testing: act as if the app were open (flags not synced)
     pwsh -File sync-app-history.ps1 -AssumeAppClosed    # testing only: skip the app-running check (a sandbox index)
@@ -72,10 +73,10 @@
   Manage:  Disable-ScheduledTask / Enable-ScheduledTask -TaskName 'Claude app-history sync'
 
   SAFETY
-  - Pruned records are MOVED (not deleted) to ~/.claude-app-seats\.pruned-history-backups\<ts>\
-    preserving their path, so a prune is fully reversible. Transcripts are never touched.
-  - Only records whose transcript we can actually read + classify are eligible to prune;
-    records with no local transcript are left alone.
+  - No record is moved or deleted (pruning was removed 2026-11-16; older runs moved records to
+    ~/.claude-app-seats\.pruned-history-backups\). Transcripts are never touched.
+  - Only sessions whose transcript we can actually read are auto-archived; records with no local
+    transcript are left alone.
   - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
     changed records are backed up to ~/.claude-app-seats\.flag-sync-backups\<ts>\ (newest 10 kept).
     Sidebar groups and the pin list are not synced (claude-rotator issue #10).
@@ -88,10 +89,10 @@
 param(
   [string]$Cwd = 'C:\Dev\hameishiv',
   [int]$MinAssistant = 6,
-  [int]$MaxAgeDays = 7,       # prune anything whose last activity is older than this (0 = no age limit)
+  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones once (0 = no age limit, no auto-archive)
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
   [switch]$DryRun,
-  [switch]$NoPrune,
+  [switch]$NoPrune,           # no-op, kept so old invocations still work (records are never removed)
   [switch]$Quiet,
   [switch]$AssumeAppRunning,  # for the test: behave as if the desktop app were running
   [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); -AssumeAppRunning wins if both are given
@@ -145,7 +146,6 @@ if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; 
 if (-not $DryRun -and (Test-Path -LiteralPath $ccs)) {
   Get-ChildItem -LiteralPath $ccs -Recurse -File -Filter '*.sync-tmp' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
-$backupRoot = Join-Path $env:USERPROFILE ".claude-app-seats\.pruned-history-backups\$stamp"
 $cachePath  = Join-Path $env:USERPROFILE '.claude-app-seats\.sync-classify-cache.json'
 $DateTitleRx = '^Session \d{4}-\d{2}-\d{2}'
 
@@ -310,20 +310,17 @@ function Write-Record([string]$subDir, $file) {
 # ---- classify every transcript once ------------------------------------------
 $nowUtc = [DateTime]::UtcNow   # age checks compare UTC, so a DST change can't skew them
 $allT = New-Object System.Collections.Generic.HashSet[string]
-$liveT = New-Object System.Collections.Generic.HashSet[string]   # written in the last 10 min: never pruned
 $keep = New-Object System.Collections.Generic.HashSet[string]
 $nInterrupted = 0; $nUnfinishedMpr = 0; $nStale = 0
 foreach ($m in $transcripts) {
   # A transcript that can't be read (deleted since it was listed, access denied) is left out entirely: its
-  # session is neither kept nor pruned this run, and is retried next run.
+  # session is neither copied nor auto-archived this run, and is retried next run.
   try { $c = Get-Class $m }
   catch { Write-Warning "could not read transcript $($m.FullName) ($($_.Exception.Message)); its session is left alone this run"; continue }
   [void]$allT.Add($m.BaseName)
   $settled = ($nowUtc - $m.LastWriteTimeUtc).TotalMinutes -gt 10   # ignore still-running sessions
-  if (-not $settled) { [void]$liveT.Add($m.BaseName) }       # written in the last 10 min: never pruned
-  # RECENCY: keep only sessions whose last activity is within the window. Older ones are
-  # pruned from the app view no matter how substantive (unless pinned, see pass 2) -- the transcript
-  # is untouched and `claude --resume` still lists it. $MaxAgeDays <= 0 disables the age limit.
+  # RECENCY: copy only sessions whose last activity is within the window. Older ones are archived
+  # once instead (pass 1.4). $MaxAgeDays <= 0 disables the age limit.
   $recent  = ($MaxAgeDays -le 0) -or (($nowUtc - $m.LastWriteTimeUtc).TotalDays -le $MaxAgeDays)
   $substantive   = (-not $c.sig) -and ($c.asst -ge $MinAssistant)
   # Interrupted excludes automated dispatches: a dispatched agent's transcript simply ENDS
@@ -351,7 +348,7 @@ if ($cacheDirty) {
 if (-not $Quiet) {
   $ageNote = if ($MaxAgeDays -le 0) { 'no age limit' } else { "$nStale over ${MaxAgeDays}d" }
   $resNote = if ($KeepResumable) { "$nInterrupted interrupted + $nUnfinishedMpr unfinished merge-pr" } else { 'resumability off' }
-  "classified $($transcripts.Count) transcripts for ${Cwd}: $($keep.Count) kept ($resNote), $($allT.Count - $keep.Count) not kept ($ageNote; MinAssistant=$MinAssistant)"
+  "classified $($transcripts.Count) transcripts for ${Cwd}: $($keep.Count) copied to every seat ($resNote), $($allT.Count - $keep.Count) not ($ageNote; MinAssistant=$MinAssistant)"
 }
 
 # Is the desktop app running? Checked BEFORE any record is read, so a record the app writes as it quits
@@ -421,6 +418,7 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # cliSessionId, whatever their cwd. Each folder's archived-sessions.idx is kept in step with its records
 # (after pass 2). The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
+# Old sessions are archived here too, once (AUTO-ARCHIVE in the header), so they get the same writes and baseline.
 # Runs only while the app is closed: the live app holds its records in memory and rewrites them,
 # so a flag we set under it would be lost and then read back as the user's own change ($appUp, above pass 1).
 $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
@@ -432,7 +430,7 @@ if ($appUp) {
   $flagSkip = $true
   if (-not $Quiet) {
     $why = if ($AssumeAppRunning) { '-AssumeAppRunning' } else { "$(@($script:appBlockers)[0])$(if (@($script:appBlockers).Count -gt 1) { " and $(@($script:appBlockers).Count - 1) more" })" }
-    "archive/pin flags not synced: the desktop app (or a claude process not at a known CLI path) is running ($why; they sync at the next seat switch)"
+    "archive/pin flags not synced: the desktop app (or a claude process not at a known CLI path) is running ($why; they sync, and old sessions are auto-archived, at the next seat switch)"
   }
 } elseif (Test-Path -LiteralPath $flagStatePath) {
   # A present-but-unreadable state file is NOT a first run: a first run unions every flag, which
@@ -441,7 +439,7 @@ if ($appUp) {
     $flagPrevAll = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable
     if ($flagPrevAll -isnot [hashtable]) { throw 'not a JSON object' }
     foreach ($fk in 'isArchived', 'isStarred') { if ($flagPrevAll[$fk] -isnot [hashtable]) { throw "'$fk' is not an object" } }
-    if ($flagPrevAll.ContainsKey('cli') -and $flagPrevAll['cli'] -isnot [hashtable]) { throw "'cli' is not an object" }
+    foreach ($fk in 'cli', 'autoArchived') { if ($flagPrevAll.ContainsKey($fk) -and $flagPrevAll[$fk] -isnot [hashtable]) { throw "'$fk' is not an object" } }
   } catch {
     $flagSkip = $true
     if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xFFFF) -in 32, 33) {
@@ -462,7 +460,11 @@ $flagByCli = @{}
 # A record known last run that can't be read holds back its session the same way (see below).
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
-$heldCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # sessions held back this run: never pruned
+# Sessions archived once for age (cliSessionId -> ISO date), from .flag-state.json. One in here is never
+# auto-archived again, so an un-archive sticks. A state file from before this map simply has none yet.
+$autoArch = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
+if ($flagPrevAll -and $flagPrevAll['autoArchived']) { foreach ($k in $flagPrevAll['autoArchived'].Keys) { $autoArch[$k] = $flagPrevAll['autoArchived'][$k] } }
+$autoDone = 0; $autoFlipped = 0
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
 # newer one (the app writing as it starts or quits). A record found changed, or one pass 1.5 could not write, is skipped by the later
@@ -497,7 +499,7 @@ if (-not $flagSkip) {
       $flagByCli[$cli].Add($r)
     }
   }
-  foreach ($flag in 'isArchived', 'isStarred') {
+  foreach ($flag in 'isStarred', 'isArchived') {   # pins first: auto-archive skips a session pinned as resolved this run
     $prev = $null
     if ($flagPrevAll) {   # keys are paths: compare them case-insensitively, like $seenKeys
       $prev = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
@@ -535,6 +537,16 @@ if (-not $flagSkip) {
               elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
               else { [bool]($rs | Where-Object { $_.v }) }
       if (-not $flagWant.ContainsKey($cli)) { $flagWant[$cli] = @{ isArchived = $false; isStarred = $false } }
+      # AUTO-ARCHIVE, once: a -Cwd session whose transcript is here and older than $MaxAgeDays, not pinned, not held
+      # this run, and not archived for age before. Setting $want lets the writes and the baseline below do the rest.
+      $autoDue = $false
+      if ($flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and -not $autoArch.ContainsKey($cli) -and $allT.Contains($cli) -and
+          -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli") -and
+          @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count) {
+        # re-read the write time: the session may have been resumed since the transcripts were listed
+        $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
+        if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; $autoOff = [bool]($rs | Where-Object { -not $_.v }); $want = $true }
+      }
       $flagWant[$cli][$flag] = $want
       foreach ($r in $rs) {
         if ($r.v -eq $want) { $next[$r.key] = $want; continue }
@@ -566,6 +578,8 @@ if (-not $flagSkip) {
           [void]$flagFailCli.Add("$flag|$cli")
         }
       }
+      # remembered only once every record is archived; a failed write leaves it to be retried next run
+      if ($autoDue -and -not $flagFailCli.Contains("isArchived|$cli")) { $autoArch[$cli] = $nowUtc.ToString('o'); $autoDone++; if ($autoOff) { $autoFlipped++ } }
     }
     $flagNextAll[$flag] = $next
     if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
@@ -575,8 +589,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  # a held session's change is retried next run from its records, so none of them is pruned meanwhile
-  foreach ($fc in $flagFailCli) { [void]$heldCli.Add(($fc -split '\|', 2)[1]) }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago, once (+$($autoDone - $autoFlipped) already archived, now remembered so an un-archive sticks)" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
@@ -665,13 +678,11 @@ foreach ($cli in @($byCli.Keys)) {
 }
 if (-not $Quiet -and $reconciled -gt 0) { "$(if ($DryRun) { 'WOULD reconcile' } else { 'reconciled' }) $reconciled stale record(s) to their transcript tip (originals backed up under ~\.claude-app-seats\.reconcile-backups\$stamp)" }
 
-# ---- pass 2: per account -- seed, prune, retitle, add -------------------------
-$made = 0; $cloned = 0; $pruned = 0; $retitled = 0
-# A pinned session is never pruned (for any reason): pruning would drop the pin for good. "Pinned" is the records'
-# isStarred flag as this run resolved it ($pinResolved, set in a dry run too and for held sessions, so -DryRun
-# previews what a real run prunes), else as read; so an unpin on any seat that this run spreads releases it.
-# A pinned session of -Cwd whose transcript is on this machine is also copied to the seats that lack it,
-# like a kept one. A session whose transcript was written in the last 10 minutes is never pruned either.
+# ---- pass 2: per account -- seed, retitle, add (no record is ever removed) -----
+$made = 0; $cloned = 0; $retitled = 0
+# A pinned session of -Cwd whose transcript is on this machine is copied to the seats that lack it, like a kept
+# one, whatever its age. "Pinned" is the records' isStarred flag as this run resolved it ($pinResolved, set in a
+# dry run too and for held sessions), else as read.
 $pinnedCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $pc = [string]$r.j.cliSessionId; if (-not $pc) { continue }
@@ -700,9 +711,9 @@ foreach ($acct in $accts) {
   }
   $bestSub = Join-Path $acct.FullName $bestSubName
 
-  # Prune non-kept records; retitle datestamp-titled ones; index what's present.
-  # Walks EVERY sub of the account, not just the primary one: records for this cwd
-  # stranded in a secondary workspace-guid folder were never pruned (seat A had 35).
+  # Retitle datestamp-titled records; index what's present.
+  # Walks EVERY sub of the account, not just the primary one (records for this cwd can sit in a secondary
+  # workspace-guid folder).
   $present = New-Object System.Collections.Generic.HashSet[string]
   $recs = [System.Collections.Generic.List[object]]::new()
   foreach ($subName in @($subCounts[$acct.Name].Keys)) {
@@ -712,24 +723,6 @@ foreach ($acct in $accts) {
   foreach ($r in $recs) {
     $j = $r.j; $f = $r.file
     $cli = [string]$j.cliSessionId
-    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli) -and -not $liveT.Contains($cli) -and -not $heldCli.Contains($cli) -and -not $flagFail) {
-      if (-not $NoPrune) {
-        if (Test-ChangedSinceRead $r) { Write-Warning "$($f.FullName) left alone this run (changed on disk, or an earlier step could not write it); pruned next run if still due"; continue }
-        # the transcript may have been resumed since it was listed: re-read its write time before moving the record
-        $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
-        if ($tw -and ([DateTime]::UtcNow - $tw).TotalMinutes -le 10) { continue }
-        if (-not $DryRun) {
-          $rel = $f.FullName.Substring($ccs.Length).TrimStart('\')
-          $dest = Join-Path $backupRoot $rel
-          try {
-            New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
-            Move-Item -LiteralPath $f.FullName -Destination $dest -Force
-          } catch { Write-Warning "could not prune $($f.FullName) ($($_.Exception.Message)); retried next run"; continue }
-        }
-        $pruned++
-      }
-      continue
-    }
     if (-not $cli) { continue }
     [void]$present.Add($cli)
     if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli) -and -not $changedOnDisk.Contains($f.FullName)) {
@@ -854,6 +847,7 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
   foreach ($mr in $madeRecs) { $cliMap[$mr.path.Substring($ccs.Length).TrimStart('\')] = $mr.cli }
   foreach ($h in $flagHeld) { $null, $hc, $hk = $h -split '\|', 3; $cliMap[$hk] = $hc }
   $flagNextAll['cli'] = $cliMap
+  $flagNextAll['autoArchived'] = $autoArch
   $null = New-Item -ItemType Directory -Path (Split-Path $flagStatePath) -Force
   # Temp file, then an atomic replace: a crash mid-write must not leave a truncated file, and a failed
   # replace must not lose the old one ([IO.File]::Move keeps the destination; Move-Item -Force deletes it first).
@@ -871,8 +865,7 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
 
 if (-not $Quiet) {
   $verb = if ($DryRun) { 'WOULD: ' } else { '' }
-  "${verb}added $made, cloned $cloned, retitled $retitled, pruned $pruned record(s) for $Cwd"
-  if ($pruned -gt 0 -and -not $DryRun) { "pruned records backed up (reversible) at: $backupRoot" }
+  "${verb}added $made, cloned $cloned, retitled $retitled record(s) for $Cwd"
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
 }
 } finally { $runLock.Dispose(); try { $selfProc.PriorityClass = $prevPriority } catch { } }
