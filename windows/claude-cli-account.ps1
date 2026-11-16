@@ -726,14 +726,15 @@ function Rank-Accounts {
     $isApp   = ($appSeat -and ($l -ieq $appSeat))
     $why = if ($isApp) { 'claude-account (desktop app) is on this seat' }
            elseif ($fDenied) { 'Fable access refused (403)' }
-           elseif ($capped -and $fCapped) { 'capped + fable capped' }
+           elseif ($capped -and $fCapped) { if ($capLive -and $fCapLive) { 'capped + fable capped' } else { 'capped + fable capped (cached cap in force)' } }
            elseif ($capped) { if ($capLive) { 'capped' } else { 'capped (cached cap in force)' } }
            elseif ($fCapped) { if ($fCapLive) { 'fable capped (needed for Gate C)' } else { 'fable capped (cached cap in force, needed for Gate C)' } } else { '' }
     [pscustomobject]@{
       label = $l; usable = (-not $capped -and -not $fCapped -and -not $fDenied -and -not $isApp); why = $why; access = $(if ($fDenied) { 'disabled' } else { 'ok' })
       w7reset = $(if ($u.w7_reset) { [int64]$u.w7_reset } else { [int64]::MaxValue })
-      # A cap supplied only by the cache came with a reading that read no window: its 0s are not a reading (the NO USABLE TARGET
-      # line prints n/a for $null, and usage-history.py --backfill parses that line), so report them as unknown.
+      # A cap supplied only by the cache came with a reading that read no window: a number that reading did not carry is not a 0%
+      # reading (a missing s5_util or w7_util casts to 0), so report it as unknown. The NO USABLE TARGET line prints n/a for $null,
+      # and usage-history.py --backfill parses that line. A w7_util the reading did carry is kept, even beside a cached weekly cap.
       score = [math]::Max($s5, $w7)
       # (s5_util is always missing here: a cache-only cap needs $noWin, which requires it. w7_util is not part of $noWin.)
       s5 = $(if ($capped -and -not $capLive) { $null } else { $s5 })

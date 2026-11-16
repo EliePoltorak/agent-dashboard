@@ -37,7 +37,7 @@ $global:ClaudeRotatorProbeOverride = {
   $plan = $script:plan[$Label]
   if (-not $plan) { $plan = 'ok' }
   if ($Model -eq 'fable' -and $plan -notin @('network','http401')) {     # a seat the network or its token fails fails both probes, as Probe-Usage does
-    if ($plan -eq 'fable-500') {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
+    if ($plan -in @('fable-500','both-500')) {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
     }
     if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
@@ -85,7 +85,7 @@ $global:ClaudeRotatorProbeOverride = {
   if ($plan -eq 'default-429-fields') {     # a non-2xx that still carries the session/weekly window
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='allowed'; s5_util=0.1; w7_util=0.2; s5_stat='allowed'; w7_stat='allowed'; note='' }
   }
-  if ($plan -eq 'default-500') {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
+  if ($plan -in @('default-500','both-500')) {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
   }
   if ($plan -eq 'quota') {
@@ -600,6 +600,16 @@ foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
 $script:plan['A'] = 'default-rejected-bare'
 $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
 Check 'a live cap with no utilisation: labelled capped, numbers kept' ($rowA -and -not $rowA.usable -and $rowA.why -eq 'capped' -and $null -ne $rowA.s5 -and $null -ne $rowA.w7) "why=$($rowA.why) s5=$($rowA.s5) w7=$($rowA.w7)"
+
+# Both caps at once: the combined label says cached when either one came from the cache.
+Reset-Case
+Clear-AppIdentity
+foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+$script:plan['A'] = 'both-500'
+Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' }
+Write-FableCache 'A' $stale ([string]($nowS + 3600))
+$rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+Check 'cached session and Fable caps together: labelled as cached' ($rowA -and $rowA.why -eq 'capped + fable capped (cached cap in force)') $rowA.why
 
 # A cached Fable cap (in force, or with no reset) is replaced by a fresh 2xx reading, and a failed Fable probe over it stays
 # not-capped: either way A is the target. This is what keeps a cap with no reset from excluding a seat for good.
