@@ -280,7 +280,7 @@ function Write-Record([string]$subDir, $file) {
   $json = '{"sessionId":"' + $sid + '","cliSessionId":"' + $file.BaseName + '","cwd":"' + $cwdJson + '","originCwd":"' + $cwdJson + '","lastFocusedAt":' + $act + ',"createdAt":' + $created + ',"lastActivityAt":' + $act + ',"model":"' + $model + '","effort":"xhigh","isArchived":' + $arch + $starPart + ',"title":' + $tj + ',"titleSource":"auto","permissionMode":"default","remoteMcpServersConfig":[],"chromePermissionMode":"skip_all_permission_checks","completedTurns":1,"bridgeSessionIds":[],"alwaysAllowedReasons":[],"sessionPermissionUpdates":[],"classifierSummaryEnabled":true,"spawnSeed":{}}'
   try { $null = $json | ConvertFrom-Json } catch { return $false }
   $path = Join-Path $subDir "$sid.json"
-  Set-Content -LiteralPath $path -Value $json -Encoding UTF8 -NoNewline
+  Write-RecordFile $path $json
   $script:madeRecs.Add(@{ cli = $file.BaseName; path = $path; isArchived = [bool]($fw -and $fw.isArchived); isStarred = [bool]($fw -and $fw.isStarred) })
   return $true
 }
@@ -417,7 +417,7 @@ if ($appUp) {
     if ($flagPrevAll.ContainsKey('cli') -and $flagPrevAll['cli'] -isnot [hashtable]) { throw "'cli' is not an object" }
   } catch {
     $flagSkip = $true
-    if ($_.Exception -is [IO.IOException]) {
+    if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xFFFF) -in 32, 33) {
       Write-Warning "flag state file $flagStatePath is in use ($($_.Exception.Message)); archive/pin flags not synced this run. This clears on its own; do not delete it."
     } else {
       Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all)"
@@ -436,7 +436,7 @@ $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
-# newer one (the app writing as it starts or quits). A record found changed is skipped by all of them.
+# newer one (the app writing as it starts or quits). A record found changed, or whose write failed, is skipped by all of them.
 $changedOnDisk = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 # Write a record through a temp file and an atomic replace, so a killed run can't leave it truncated.
 function Write-RecordFile([string]$path, [string]$text) {
@@ -574,12 +574,16 @@ foreach ($kv in $bucketRecs.GetEnumerator()) {
   }
 }
 foreach ($cli in @($byCli.Keys)) {
+ try {   # one session's failure (a locked transcript or record) is warned about and skipped, not the whole run
   $rs = $byCli[$cli]
   if (@($rs | ForEach-Object { [string]$_.j.lastAssistantUuid } | Select-Object -Unique).Count -lt 2) { continue }
   $tf = $tFile[$cli]
   if (-not $tf -or ($now - $tf.LastWriteTime).TotalMinutes -le 10) { continue }   # no transcript / still running
   $pos = @{}; $tip = $null; $i = 0
-  foreach ($line in [IO.File]::ReadLines($tf.FullName)) {
+  # opened with ReadWrite sharing, so a CLI still appending to it is neither refused nor blocked
+  $tfs = [IO.FileStream]::new($tf.FullName, 'Open', 'Read', 'ReadWrite'); $tsr = [IO.StreamReader]::new($tfs)
+  try { $lines = while ($null -ne ($line = $tsr.ReadLine())) { $line } } finally { $tsr.Dispose() }
+  foreach ($line in $lines) {
     $i++
     if ($line.Contains(',"type":"assistant","uuid":"') -and $line -match ',"type":"assistant","uuid":"([0-9a-f-]{36})"') { $pos[$Matches[1]] = $i; $tip = $Matches[1] }
   }
@@ -619,6 +623,7 @@ foreach ($cli in @($byCli.Keys)) {
   if (-not $DryRun -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good -and -not ([string]$srcRec.j.title -match $DateTitleRx)) {
     $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $srcRec.file.FullName -Raw); good = $true }
   }
+ } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
 }
 if (-not $Quiet -and $reconciled -gt 0) { "$(if ($DryRun) { 'WOULD reconcile' } else { 'reconciled' }) $reconciled stale record(s) to their transcript tip (originals backed up under ~\.claude-app-seats\.reconcile-backups\$stamp)" }
 
@@ -703,13 +708,20 @@ foreach ($acct in $accts) {
             $cj.PSObject.Properties.Remove('isStarred')
           }
           $cpath = Join-Path $bestSub "$($cj.sessionId).json"
-          ($cj | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $cpath -Encoding UTF8 -NoNewline
+          Write-RecordFile $cpath ($cj | ConvertTo-Json -Compress -Depth 100)
           $madeRecs.Add(@{ cli = $m.BaseName; path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
           $cloned++
-        } catch { if (Write-Record $bestSub $m) { $made++ } }
+        } catch {
+          try { if (Write-Record $bestSub $m) { $made++ } }
+          catch { Write-Warning "could not add $($m.BaseName) to $bestSub ($($_.Exception.Message)); retried next run" }
+        }
       }
     } else {
-      if ($DryRun) { $made++ } elseif (Write-Record $bestSub $m) { $made++ }
+      if ($DryRun) { $made++ }
+      else {
+        try { if (Write-Record $bestSub $m) { $made++ } }
+        catch { Write-Warning "could not add $($m.BaseName) to $bestSub ($($_.Exception.Message)); retried next run" }
+      }
     }
   }
 }
