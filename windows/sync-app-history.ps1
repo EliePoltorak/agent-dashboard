@@ -436,7 +436,9 @@ $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
-# newer one (the app writing as it starts or quits). A record found changed, or whose write failed, is skipped by all of them.
+# newer one (the app writing as it starts or quits). A record found changed, or one pass 1.5 could not write, is skipped by the later
+# steps. A failed flag write (pass 1.4) is instead rolled back in memory, so a later step that writes the record puts
+# back the value on disk, which matches the held baseline.
 $changedOnDisk = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 # Write a record through a temp file and an atomic replace, so a killed run can't leave it truncated.
 function Write-RecordFile([string]$path, [string]$text) {
@@ -582,11 +584,12 @@ foreach ($cli in @($byCli.Keys)) {
   $pos = @{}; $tip = $null; $i = 0
   # opened with ReadWrite sharing, so a CLI still appending to it is neither refused nor blocked
   $tfs = [IO.FileStream]::new($tf.FullName, 'Open', 'Read', 'ReadWrite'); $tsr = [IO.StreamReader]::new($tfs)
-  try { $lines = while ($null -ne ($line = $tsr.ReadLine())) { $line } } finally { $tsr.Dispose() }
-  foreach ($line in $lines) {
-    $i++
-    if ($line.Contains(',"type":"assistant","uuid":"') -and $line -match ',"type":"assistant","uuid":"([0-9a-f-]{36})"') { $pos[$Matches[1]] = $i; $tip = $Matches[1] }
-  }
+  try {   # line by line, so a large transcript is never held whole
+    while ($null -ne ($line = $tsr.ReadLine())) {
+      $i++
+      if ($line.Contains(',"type":"assistant","uuid":"') -and $line -match ',"type":"assistant","uuid":"([0-9a-f-]{36})"') { $pos[$Matches[1]] = $i; $tip = $Matches[1] }
+    }
+  } finally { $tsr.Dispose() }
   if (-not $tip) { continue }
   $srcRec = $rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip } | Sort-Object { [double]$_.j.completedTurns } -Descending | Select-Object -First 1
   if (-not $srcRec) { continue }
@@ -621,7 +624,8 @@ foreach ($cli in @($byCli.Keys)) {
   }
   # clones for buckets that lack the session must start from the current state too
   if (-not $DryRun -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good -and -not ([string]$srcRec.j.title -match $DateTitleRx)) {
-    $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $srcRec.file.FullName -Raw); good = $true }
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $srcRec.file.FullName -Raw); good = $true } }
+    catch { Write-Warning "could not re-read $($srcRec.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
 }
@@ -643,7 +647,10 @@ foreach ($acct in $accts) {
     $seedDir = Join-Path $acct.FullName $wsGuid
     if (-not (Test-Path -LiteralPath $seedDir)) {
       if ($DryRun) { if (-not $Quiet) { "WOULD seed $($acct.Name)\$wsGuid" } }
-      else { New-Item -ItemType Directory -Path $seedDir -Force | Out-Null }
+      else {
+        try { New-Item -ItemType Directory -Path $seedDir -Force | Out-Null }
+        catch { Write-Warning "could not create $seedDir ($($_.Exception.Message)); this account is skipped, retried next run"; continue }
+      }
     }
   }
   $bestSub = Join-Path $acct.FullName $bestSubName

@@ -566,8 +566,10 @@ points at the transcript's last assistant turn and copies its session state (`la
 `completedTurns`, `postTurnSummary*`, activity times) into every record pointing at an earlier
 turn. Originals are copied to `~/.claude-app-seats\.reconcile-backups\<timestamp>\`. Records
 whose uuid isn't in the transcript, sessions touched in the last 10 minutes, and records that changed on disk
-since the sync read them are left alone. A record that can't be read, written, added or pruned (in any pass) is
-skipped with a warning and retried next run; the rest of the sync carries on. Every record the sync writes or
+since the sync read them are left alone. A record that can't be written, added or pruned, or an account folder
+that can't be created, is skipped with a warning and retried next run; the rest of the sync carries on. A record
+that can't be read is skipped too, but warned about only when the archive/pin step runs and the record was
+known from the last run; otherwise silently. Every record the sync writes or
 creates goes through a temp file and an atomic replace, so a killed run can't leave one half-written.
 
 **Archive and pin flags follow you across seats (2026-11-03).** Each seat keeps its own record
