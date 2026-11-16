@@ -23,6 +23,7 @@
   and, if it belongs to -Cwd and its transcript is on this machine, is copied to the other seats like
   a kept one. Unpinning it releases it once a run spreads the
   unpin (a run that skips the flag step goes by the records as read: any still pinned keeps it).
+  A session whose transcript was written in the last 10 minutes (still running) is never pruned either.
 
   1. SUBSTANTIVE work (the only category kept by default): first instruction is NOT an
      automated-dispatch signature (merge-pr / address-pr, review agents, ping tests, bare
@@ -37,8 +38,9 @@
      misclassified as finished. ponytail: acceptable ceiling; tighten to tail-only match
      if it ever misfires.)
   Categories 2 and 3 are OFF by default -- pass -KeepResumable to enable them (they're
-  still CLI-resumable either way). They only apply to files untouched for >10 minutes,
-  so live sessions don't churn in and out of the index.
+  still CLI-resumable either way). They only keep files untouched for >10 minutes, so live
+  sessions don't churn in and out of the index; no session, in any category, is pruned within
+  10 minutes of its transcript's last write.
 
   TITLES
   ------
@@ -303,6 +305,7 @@ function Write-Record([string]$subDir, $file) {
 
 # ---- classify every transcript once ------------------------------------------
 $now = Get-Date
+$nowUtc = [DateTime]::UtcNow   # age checks compare UTC, so a DST change can't skew them
 $allT = New-Object System.Collections.Generic.HashSet[string]
 $liveT = New-Object System.Collections.Generic.HashSet[string]   # written in the last 10 min: never pruned
 $keep = New-Object System.Collections.Generic.HashSet[string]
@@ -313,12 +316,12 @@ foreach ($m in $transcripts) {
   try { $c = Get-Class $m }
   catch { Write-Warning "could not read transcript $($m.FullName) ($($_.Exception.Message)); its session is left alone this run"; continue }
   [void]$allT.Add($m.BaseName)
-  $settled = ($now - $m.LastWriteTime).TotalMinutes -gt 10   # ignore still-running sessions
+  $settled = ($nowUtc - $m.LastWriteTimeUtc).TotalMinutes -gt 10   # ignore still-running sessions
   if (-not $settled) { [void]$liveT.Add($m.BaseName) }       # a session still running is never pruned
   # RECENCY: keep only sessions whose last activity is within the window. Older ones are
   # pruned from the app view no matter how substantive (unless pinned, see pass 2) -- the transcript
   # is untouched and `claude --resume` still lists it. $MaxAgeDays <= 0 disables the age limit.
-  $recent  = ($MaxAgeDays -le 0) -or (($now - $m.LastWriteTime).TotalDays -le $MaxAgeDays)
+  $recent  = ($MaxAgeDays -le 0) -or (($nowUtc - $m.LastWriteTimeUtc).TotalDays -le $MaxAgeDays)
   $substantive   = (-not $c.sig) -and ($c.asst -ge $MinAssistant)
   # Interrupted excludes automated dispatches: a dispatched agent's transcript simply ENDS
   # at its last tool_result (the harness stops it there), so an unclean tail on an automated
@@ -603,7 +606,7 @@ foreach ($cli in @($byCli.Keys)) {
   $rs = $byCli[$cli]
   if (@($rs | ForEach-Object { [string]$_.j.lastAssistantUuid } | Select-Object -Unique).Count -lt 2) { continue }
   $tf = $tFile[$cli]
-  if (-not $tf -or ($now - $tf.LastWriteTime).TotalMinutes -le 10) { continue }   # no transcript / still running
+  if (-not $tf -or ($nowUtc - $tf.LastWriteTimeUtc).TotalMinutes -le 10) { continue }   # no transcript / still running
   $pos = @{}; $tip = $null; $i = 0
   # opened with ReadWrite sharing, so a CLI still appending to it is neither refused nor blocked
   $tfs = [IO.FileStream]::new($tf.FullName, 'Open', 'Read', 'ReadWrite'); $tsr = [IO.StreamReader]::new($tfs)

@@ -534,7 +534,8 @@ another account/seat — never appear in the app's history on their own.
 matter how substantive — the transcript is untouched and `claude --resume` still lists it.
 A session pinned on any seat is never pruned, for any reason; if it belongs to the synced workspace (`-Cwd`) and its transcript is on this machine, it is also copied to the seats that lack it. This follows the records' `isStarred`
 flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
-on any seat releases it once a run spreads the unpin.
+on any seat releases it once a run spreads the unpin. A session whose transcript was written in the
+last 10 minutes (still running) is never pruned either, in any category.
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
    address-pr, review agents, ping tests, bare slash commands) and ≥ `-MinAssistant` assistant
@@ -548,8 +549,8 @@ on any seat releases it once a run spreads the unpin.
    without merging by design (PR parked for the owner) end cleanly and are pruned.
 
 Categories 2–3 are **OFF by default** — pass `-KeepResumable` to enable them (they stay
-CLI-resumable either way). When on, they skip files modified in the last 10 minutes
-(still-running sessions).
+CLI-resumable either way). When on, they only keep files not modified in the last 10 minutes
+(still-running sessions); no session is pruned within 10 minutes of its last write.
 
 **Titles:** records get real titles — an existing well-titled record from another bucket is
 cloned (preserving the app's own AI titles); otherwise `/rename` customTitle → your first
