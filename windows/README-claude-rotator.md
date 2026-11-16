@@ -543,13 +543,17 @@ spreads to every seat, not the sidebar's own pin list (see below).
 
 **Old sessions are archived once (2026-11-16).** A `-Cwd` session whose transcript is on this machine
 and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat, once. It is then
-remembered in `.flag-state.json` (`autoArchived`, session id → date), so if you un-archive it, it stays
-un-archived. Not archived: a session pinned as the run resolves it, one written in the last 10 minutes,
-or one held back that run (a record that can't be read or written; it is retried next run and not
-remembered until every record is archived). `-MaxAgeDays 0` turns it off. It runs in the archive/pin
-step below, so only while the app is closed; a run with the app open leaves it for the next one.
-`-DryRun` says how many sessions it would archive. Limit: if the state file is deleted, the next run
-archives every old session once more, un-archived ones included.
+remembered in `.flag-state.json` (`autoArchived`, session id → date), so this sync will not archive it
+again for age. If you un-archive it (or the app marks a record `autoArchiveExempt`) before the sync would
+archive it, it is left as you set it and remembered the same way. The app itself may still re-archive it on
+another seat, and the sync then spreads that (issue #16). Not archived: a session pinned as the run
+resolves it, one written in the last 10 minutes, or one held back that run (a record known from the last
+run that can't be read, or a record whose write fails; it is retried next run and not remembered until
+then). `-MaxAgeDays 0` turns it off. It runs in the archive/pin step below, so only while the app is
+closed; a run with the app open leaves it for the next one. `-DryRun` says how many sessions it would
+archive. Limits: if the state file is deleted, the next run archives every old session once more,
+un-archived ones included. An older copy of the script (from before this change) drops the `autoArchived`
+map when it saves and prunes again, so do not roll back the deployed copy without expecting a re-archive.
 The sync runs at Idle CPU priority and puts the caller's priority back when it ends (the rotator runs it in its own process).
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
@@ -611,7 +615,9 @@ app is closed** (checked before reading and again before writing; opening the ap
 `claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
 under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 timestamp-named backup folders are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
-as a first run; delete it to start again (the next run counts a flag set on any seat as set on all).
+as a first run; delete it to start again (the next run counts a flag set on any seat as set on all, and,
+with the app closed, archives every old session once more, un-archived ones included, because deleting it
+also forgets which sessions were archived for age).
 
 Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own
 storage, so a pin flag copied to a seat's record may not show as pinned there.
@@ -632,7 +638,8 @@ restarted (or the workspace reopened), not in an already-open window.
 ```
 claude-sync-history                      # sync the default project (copy recent 7d + substantive; archive older once)
 claude-sync-history -DryRun              # preview what would be added/archived, change nothing
-claude-sync-history -MaxAgeDays 14       # widen/narrow the window (0 = copy all ages, no auto-archive)
+claude-sync-history -MaxAgeDays 14       # widen/narrow the window (0 = copy all ages, no auto-archive); also the archive age:
+                                         # a smaller value archives the sessions older than it on every seat, once; later runs with the default do not un-archive them
 claude-sync-history -KeepResumable       # also keep interrupted / died-pre-merge runs
 claude-sync-history -MinAssistant 10     # stricter "substantive" bar
 claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
