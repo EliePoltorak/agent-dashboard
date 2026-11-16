@@ -465,7 +465,7 @@ if (-not $flagSkip) {
         $hc = $flagPrevCli[$k]
         if ($hc) {
           [void]$flagFailCli.Add("$flag|$hc"); [void]$flagHeld.Add("$flag|$hc|$k")
-          if ($flagWarned.Add($k)) { Write-Warning "could not read $(Join-Path $ccs $k); that session's archive/pin flags keep their last synced state until it can be read. If it is corrupt, restore or delete it; if it was only in use, this clears on its own" }
+          if ($flagWarned.Add($k)) { Write-Warning "could not read $(Join-Path $ccs $k); a change to that session still reaches its other records, but its saved state is held back until this one can be read, so changing it back meanwhile may not stick. If it is corrupt, restore or delete it; if it was only in use, this clears on its own" }
         } else {
           if (-not $flagFail) { Write-Warning "could not read $(Join-Path $ccs $k); the flag state $(if ($DryRun) { 'would not be' } else { 'is not' }) saved this run. If it is corrupt, restore or delete it; if it was only in use, this clears on its own" }
           $flagFail = $true
@@ -516,7 +516,7 @@ if (-not $flagSkip) {
           # undo the in-memory change too: a later write of this record (its other flag, pass 1.5, the retitle) must
           # not put the value that failed here on disk, or the held baseline no longer matches the file
           if ($oldProp) { if ($oldProp.had) { $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $oldProp.v -Force } else { $r.j.PSObject.Properties.Remove($flag) } }
-          Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
+          Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (the session's other records still get the change; its saved state is held back and this record is retried next run)"
           [void]$flagFailCli.Add("$flag|$cli")
         }
       }
@@ -699,7 +699,7 @@ if (-not $DryRun -and -not $flagSkip) {
     try {
       $idx = $null
       if (Test-Path -LiteralPath $idxPath) {
-        $idx = Get-Content -LiteralPath $idxPath -Raw | ConvertFrom-Json
+        $idx = Get-Content -LiteralPath $idxPath -Raw | ConvertFrom-Json -DateKind String
         if ($null -eq $idx -or $idx -isnot [System.Management.Automation.PSCustomObject] -or $null -eq $idx.PSObject.Properties['archived']) { Write-Warning "unexpected format in $idxPath; left as it is"; continue }
       }
       $have = New-Object System.Collections.Generic.List[string]
