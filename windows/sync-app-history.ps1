@@ -648,9 +648,11 @@ foreach ($cli in @($byCli.Keys)) {
     $reconciled++
   }
   # clones for buckets that lack the session must start from the current state too
-  if (-not $DryRun -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good -and -not ([string]$srcRec.j.title -match $DateTitleRx)) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $srcRec.file.FullName -Raw); good = $true } }
-    catch { Write-Warning "could not re-read $($srcRec.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
+  # (from a well-titled record now at the tip: the tip record itself, or one this pass just reconciled)
+  $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) }) | Select-Object -First 1
+  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good) {
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true } }
+    catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
 }
