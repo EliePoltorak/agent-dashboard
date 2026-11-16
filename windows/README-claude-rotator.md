@@ -532,9 +532,9 @@ another account/seat — never appear in the app's history on their own.
 (reversibly). A session is kept only if it is **recent** (last activity within `-MaxAgeDays`,
 **default 7**; `0` = no age limit) AND matches a keep category. Older sessions are pruned no
 matter how substantive — the transcript is untouched and `claude --resume` still lists it.
-A session pinned on any seat is never pruned, for any reason. This follows the records' `isStarred`
+A session pinned on any seat is never pruned, for any reason, and is copied to the seats that lack it. This follows the records' `isStarred`
 flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
-on any seat releases it.
+on any seat releases it once a run spreads the unpin.
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
    address-pr, review agents, ping tests, bare slash commands) and ≥ `-MinAssistant` assistant
@@ -664,8 +664,8 @@ launch again. That is what made "the app won't open until I completely reinstall
 weeks. The machine now runs the Squirrel build only; **Workspace/Cowork is unavailable**
 until an `.msix` is obtained direct from Anthropic.
 
-Consequently the first four now match **both** paths, so they keep working with either install
-(MSIX or Squirrel); the fifth lists the CLI's paths instead:
+Consequently all five match **both** app paths, so they keep working with either install
+(MSIX or Squirrel); the fifth also lists the CLI's paths and counts every other `claude` process as the app:
 
 - `rotator-functions.ps1` → `claude-kill` — *spares* the app; without the `AnthropicClaude`
   exclusion it would kill the desktop app it exists to protect.

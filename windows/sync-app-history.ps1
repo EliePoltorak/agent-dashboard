@@ -19,8 +19,9 @@
   A session must be RECENT (last activity within -MaxAgeDays, default 7; 0 = no limit)
   AND match a keep category below. Older sessions are pruned from the app view no matter
   how substantive -- the transcript is never touched and `claude --resume` still lists it.
-  Exception: a session whose pin flag (isStarred), as this run resolves it, is on is never pruned;
-  unpinning it on any seat releases it.
+  Exception: a session whose pin flag (isStarred), as this run resolves it, is on is never pruned,
+  and is copied to the other seats like a kept one. Unpinning it releases it once a run spreads the
+  unpin (a run that skips the flag step goes by the records as read: any still pinned keeps it).
 
   1. SUBSTANTIVE work (the only category kept by default): first instruction is NOT an
      automated-dispatch signature (merge-pr / address-pr, review agents, ping tests, bare
@@ -117,8 +118,15 @@ while (-not $runLock) {
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock, so two runs never share a backup folder
 try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
-$enc = $Cwd -replace '[^A-Za-z0-9]', '-'   # the CLI's project-folder name: every non-alphanumeric becomes '-'
-$projDir = Join-Path (Join-Path $env:USERPROFILE '.claude\projects') $enc
+# The CLI's project-folder name: every character other than A-Z, a-z, 0-9 becomes '-' (case-sensitive match, as
+# the CLI's regex is); a name over 200 characters is cut to 200 plus '-' and a hash, so look that one up by prefix.
+$enc = $Cwd -creplace '[^A-Za-z0-9]', '-'
+$projRoot = Join-Path $env:USERPROFILE '.claude\projects'
+$projDir = Join-Path $projRoot $enc
+if ($enc.Length -gt 200) {
+  $cand = @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($enc.Substring(0, 200) + '-', [StringComparison]::Ordinal) })
+  if ($cand.Count -eq 1) { $projDir = $cand[0].FullName }
+}
 if (-not (Test-Path -LiteralPath $projDir)) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
 $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
 if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; return }
@@ -432,6 +440,7 @@ if ($appUp) {
 }
 $flagNextAll = @{}
 $flagWant = @{}         # cliSessionId -> @{ isArchived; isStarred }: the resolved values, for records pass 2 creates
+$pinResolved = @{}      # cliSessionId -> resolved isStarred, kept even for held sessions (pass 2's pin exemption)
 $flagByCli = @{}
 # If a session's record can't be written, that SESSION keeps last run's baseline (as if this run never
 # happened for it), and its new clones are left out. The next run then compares it with that baseline: the
@@ -550,6 +559,7 @@ if (-not $flagSkip) {
   # A session held back this run (a record failed), or every session when no state is saved, gets no resolved
   # flags for the records pass 2 creates: those are written neutral (off), which the next run doesn't count as
   # a change, and the next good run then sets them like any other record.
+  foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
@@ -640,12 +650,13 @@ if (-not $Quiet -and $reconciled -gt 0) { "$(if ($DryRun) { 'WOULD reconcile' } 
 # ---- pass 2: per account -- seed, prune, retitle, add -------------------------
 $made = 0; $cloned = 0; $pruned = 0; $retitled = 0
 # A pinned session is never pruned (for any reason): pruning would drop the pin for good. "Pinned" is the records'
-# isStarred flag as this run resolved it ($flagWant, set in a dry run too), else as read; so an unpin on any seat
-# that this run spreads releases it.
+# isStarred flag as this run resolved it ($pinResolved, set in a dry run too and for held sessions, so -DryRun
+# previews what a real run prunes), else as read; so an unpin on any seat that this run spreads releases it.
+# A pinned session is also copied to the seats that lack it, like a kept one.
 $pinnedCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $pc = [string]$r.j.cliSessionId; if (-not $pc) { continue }
-  $pin = if ($flagWant.ContainsKey($pc)) { [bool]$flagWant[$pc]['isStarred'] } else { $r.j.isStarred -eq $true }
+  $pin = if ($pinResolved.ContainsKey($pc)) { $pinResolved[$pc] } else { $r.j.isStarred -eq $true }
   if ($pin) { [void]$pinnedCli.Add($pc) }
 } }
 foreach ($acct in $accts) {
@@ -716,7 +727,7 @@ foreach ($acct in $accts) {
   # Add kept transcripts missing from this sub: clone a well-titled record from another
   # bucket when one exists (preserves the app's own AI titles), else fabricate.
   foreach ($m in $transcripts) {
-    if (-not $keep.Contains($m.BaseName) -or $present.Contains($m.BaseName)) { continue }
+    if (-not ($keep.Contains($m.BaseName) -or ($allT.Contains($m.BaseName) -and $pinnedCli.Contains($m.BaseName))) -or $present.Contains($m.BaseName)) { continue }
     $src = $recIndex[$m.BaseName]
     if ($src -and $src.good) {
       if ($DryRun) { $cloned++ }
