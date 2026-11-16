@@ -598,6 +598,10 @@ Sidebar groups and the sidebar's own pinned list are not synced: the app keeps t
 storage, so a pin flag copied to a seat's record may not show as pinned there.
 Tracked in Hameishiv/claude-rotator#10 (issue #10).
 
+Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
+appears to set when you un-archive a session it archived by itself; that field is not copied, so on
+another seat the app may archive such a session again, and the next sync then spreads it.
+
 The script itself lives at `C:\Users\User\.grok\bin\sync-app-history.ps1` (the scheduled task and
 `claude-app-rotator.ps1` point there); `windows/sync-app-history.ps1` in this repo is its source: copy it
 there to deploy a change. `rotator-sync --pull` does not deploy it: it copies the file into the live rotator folder,
