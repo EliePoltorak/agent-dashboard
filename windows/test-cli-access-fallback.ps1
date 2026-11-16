@@ -37,11 +37,14 @@ $global:ClaudeRotatorProbeOverride = {
   $plan = $script:plan[$Label]
   if (-not $plan) { $plan = 'ok' }
   if ($Model -eq 'fable' -and $plan -notin @('network','http401')) {     # a seat the network or its token fails fails both probes, as Probe-Usage does
-    if ($plan -in @('fable-500','both-500')) {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
+    if ($plan -in @('fable-500','both-500','live-default+fable-500')) {     # Probe-Usage's ok=$true for a non-2xx with no usage headers
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
     }
     if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; status='allowed'; s5_util=0.1; note='' }
+    }
+    if ($plan -eq 'default-500+live-fable') {     # a live Fable rejection beside a headerless default probe
+      return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; oi7_util=1.0; oi7_stat='rejected'; note='' }
     }
     if ($plan -like 'fable-only:*') {     # a non-2xx carrying exactly one oi7 field
       $r = [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; note='' }
@@ -76,7 +79,7 @@ $global:ClaudeRotatorProbeOverride = {
     $f = $plan.Split(':')[1]; $r | Add-Member -NotePropertyName $f -NotePropertyValue $(if ($f -like '*_util') { 0.1 } else { 'allowed' })
     return $r
   }
-  if ($plan -eq 'default-rejected-bare') {     # a live cap whose reading carries no utilisation
+  if ($plan -in @('default-rejected-bare','live-default+fable-500')) {     # a live cap whose reading carries no utilisation
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='rejected'; note='' }
   }
   if ($plan -eq 'default-2xx-bare') {     # a 2xx that carries no usage headers at all
@@ -85,7 +88,7 @@ $global:ClaudeRotatorProbeOverride = {
   if ($plan -eq 'default-429-fields') {     # a non-2xx that still carries the session/weekly window
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='allowed'; s5_util=0.1; w7_util=0.2; s5_stat='allowed'; w7_stat='allowed'; note='' }
   }
-  if ($plan -in @('default-500','both-500')) {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
+  if ($plan -in @('default-500','both-500','default-500+live-fable')) {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
   }
   if ($plan -eq 'quota') {
@@ -610,6 +613,18 @@ Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; 
 Write-FableCache 'A' $stale ([string]($nowS + 3600))
 $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
 Check 'cached session and Fable caps together: labelled as cached' ($rowA -and $rowA.why -eq 'capped + fable capped (cached cap in force)') $rowA.why
+foreach ($mix in @(
+    @{ word = 'a live session cap beside a cached Fable cap'; plan = 'live-default+fable-500'; dc = $false; fc = $true },
+    @{ word = 'a cached session cap beside a live Fable cap'; plan = 'default-500+live-fable'; dc = $true; fc = $false })) {
+  Reset-Case
+  Clear-AppIdentity
+  foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+  $script:plan['A'] = $mix.plan
+  if ($mix.dc) { Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' } }
+  if ($mix.fc) { Write-FableCache 'A' $stale ([string]($nowS + 3600)) }
+  $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+  Check "$($mix.word): labelled as cached" ($rowA -and $rowA.why -eq 'capped + fable capped (cached cap in force)') $rowA.why
+}
 
 # A cached Fable cap (in force, or with no reset) is replaced by a fresh 2xx reading, and a failed Fable probe over it stays
 # not-capped: either way A is the target. This is what keeps a cap with no reset from excluding a seat for good.
