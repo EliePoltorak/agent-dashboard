@@ -43,6 +43,11 @@ $global:ClaudeRotatorProbeOverride = {
     if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; status='allowed'; s5_util=0.1; note='' }
     }
+    if ($plan -like 'fable-only:*') {     # a non-2xx carrying exactly one oi7 field
+      $r = [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; note='' }
+      $f = $plan.Split(':')[1]; $r | Add-Member -NotePropertyName $f -NotePropertyValue $(if ($f -eq 'oi7_util') { 0.1 } else { 'allowed' })
+      return $r
+    }
     if ($plan -eq 'fable-429-fields') {     # a non-2xx that still carries the oi7 window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; oi7_util=0.1; oi7_stat='allowed'; note='' }
     }
@@ -65,6 +70,11 @@ $global:ClaudeRotatorProbeOverride = {
   }
   if ($plan -eq 'http401') {     # Probe-Usage's result for a dead token: an HTTP failure, not a network one
     return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$false; note='probe failed: http 401: authentication_error: invalid token; not marking disabled' }
+  }
+  if ($plan -like 'default-only:*') {     # a non-2xx carrying exactly one session/weekly field
+    $r = [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; note='' }
+    $f = $plan.Split(':')[1]; $r | Add-Member -NotePropertyName $f -NotePropertyValue $(if ($f -eq 's5_util') { 0.1 } else { 'allowed' })
+    return $r
   }
   if ($plan -eq 'default-2xx-bare') {     # a 2xx that carries no usage headers at all
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; note='' }
@@ -594,7 +604,13 @@ foreach ($case in @(
     @{ word = '429 session carrying the window'; fable = $false; plan = 'default-429-fields' },
     @{ word = '2xx Fable'; fable = $true; plan = 'ok' },
     @{ word = 'bare 2xx Fable (no oi7 window)'; fable = $true; plan = 'fable-2xx-bare' },
-    @{ word = '429 Fable carrying the oi7 window'; fable = $true; plan = 'fable-429-fields' })) {
+    @{ word = '429 Fable carrying the oi7 window'; fable = $true; plan = 'fable-429-fields' },
+    @{ word = '429 session carrying only status'; fable = $false; plan = 'default-only:status' },
+    @{ word = '429 session carrying only s5_stat'; fable = $false; plan = 'default-only:s5_stat' },
+    @{ word = '429 session carrying only w7_stat'; fable = $false; plan = 'default-only:w7_stat' },
+    @{ word = '429 session carrying only s5_util'; fable = $false; plan = 'default-only:s5_util' },
+    @{ word = '429 Fable carrying only oi7_stat'; fable = $true; plan = 'fable-only:oi7_stat' },
+    @{ word = '429 Fable carrying only oi7_util'; fable = $true; plan = 'fable-only:oi7_util' })) {
   Reset-Case
   Clear-AppIdentity
   foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }

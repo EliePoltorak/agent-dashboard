@@ -717,7 +717,7 @@ function Rank-Accounts {
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
     # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
-    # probe (ok=$false: network, a model-catalog HTTP error, no token) stays unknown, so not-capped as above; a cap with no reset would
+    # probe (any ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token) stays unknown, so not-capped as above; a cap with no reset would
     # otherwise hold for good. Honouring a cap with a future reset there is an open question (#20).
     $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected') -or ($fNoWin -and (Test-FableCapCached $l))

@@ -124,11 +124,12 @@ regression.
 soonest weekly renewal first — and names the winner.
 `--switch best` / `--rotate best` switch straight to it. Capped and **Fable-capped** accounts are
 excluded outright, not merely ranked last — Fable runs merge-pr's Gate C. A cap still counts when
-the live probe answered without reading it (a non-2xx with none of that window's usage fields): the
-cap kept in the seat's `usage-cache[-fable].json` counts until its own reset, or until a reading
-replaces the file (a 2xx, or a non-2xx carrying that window's fields; see `Test-CapCached`). A
-Fable probe that fails (the network, a model-catalog HTTP error, no token) still reads as
-not-capped, as any unknown Fable reading does (see the inference note below; #20).
+the live probe answered without reading it: a non-2xx carrying none of `status`, `s5_stat`,
+`w7_stat` or `s5_util` (for Fable: none of `oi7_stat` or `oi7_util`). The cap kept in the seat's
+`usage-cache[-fable].json` then counts until its own reset, or until a reading replaces the file (a
+2xx, or a non-2xx carrying one of those fields; see `Test-CapCached`). A Fable probe that fails
+(any unknown reading, e.g. the network, a model-catalog HTTP or parse error, no token) still reads
+as not-capped, as any unknown Fable reading does (see the inference note below; #20).
 
 Weekly is shown but does **not** rank an account down: it is cap-only, and penalising a high-weekly
 account would be backwards when the goal is to burn that window through to 100%. This is the
