@@ -145,6 +145,14 @@ foreach ($r in (ofSession $X)) { setRec $r.f 'isStarred' $false }               
 Set-Content -LiteralPath $g1.f $keep1 -NoNewline; run                                # seat 1 readable again, still archived
 check 'readable again: un-archived on every seat, not re-archived' (@(ofSession $G.Name | Where-Object arch).Count -eq 0)
 
+"--- a flag write in the same run as a session whose records disagree on their last turn (pass 1.5 must still run)"
+$xs = @(ofSession $X); $i = 0; foreach ($r in $xs) { $i++; setRec $r.f 'lastAssistantUuid' "0000000$i-0000-0000-0000-000000000000" }
+setRec $xs[0].f 'isStarred' $true; run
+check 'flag write + pass 1.5: run exits 0' ($rc -eq 0)
+check 'flag write + pass 1.5: no error' (-not ($out -match 'Method invocation|op_Subtraction|xception'))
+check 'flag write + pass 1.5: pass 2 still ran' ([bool]($out -match '\badded \d+, cloned'))
+foreach ($r in (ofSession $X)) { setRec $r.f 'lastAssistantUuid' ''; setRec $r.f 'isStarred' $false }; run
+
 "--- a held session's new record is neutral (off) and not in the state; the next good run sets it"
 foreach ($r in (ofSession $X)) { setRec $r.f 'isArchived' $true }; run              # archived everywhere, all known
 $xs = @(ofSession $X); $keepX = Get-Content -LiteralPath $xs[1].f -Raw; $before = @(ofSession $X | ForEach-Object f)

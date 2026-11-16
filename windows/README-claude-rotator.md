@@ -608,8 +608,8 @@ launch again. That is what made "the app won't open until I completely reinstall
 weeks. The machine now runs the Squirrel build only; **Workspace/Cowork is unavailable**
 until an `.msix` is obtained direct from Anthropic.
 
-Consequently these five now match **both** paths, so they keep working on either machine
-(the other machine may still have the MSIX):
+Consequently the first four now match **both** paths, so they keep working on either machine
+(the other machine may still have the MSIX); the fifth lists the CLI's paths instead:
 
 - `rotator-functions.ps1` → `claude-kill` — *spares* the app; without the `AnthropicClaude`
   exclusion it would kill the desktop app it exists to protect.

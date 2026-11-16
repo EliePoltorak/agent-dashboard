@@ -328,10 +328,13 @@ function Test-AppUp {
   # Fail closed: every process named claude counts as the app UNLESS its path is a known Claude Code CLI location.
   # So a new install layout, or a path that can't be read (e.g. an elevated CLI), skips the flag step rather than
   # writing under a running app.
-  return @(Get-Process -Name claude -ErrorAction SilentlyContinue | Where-Object {
+  $script:appBlockers = @(Get-Process -Name claude -ErrorAction SilentlyContinue | ForEach-Object {
     $pp = $null; try { $pp = $_.Path } catch { }
-    -not ($pp -and ($pp -like '*\.local\bin\claude.exe' -or $pp -like '*\Claude\claude-code\*\claude.exe'))
-  }).Count -gt 0
+    if (-not ($pp -and ($pp -like '*\.local\bin\claude.exe' -or $pp -like '*\Claude\claude-code\*\claude.exe'))) {
+      "pid $($_.Id) $(if ($pp) { $pp } else { '(path unreadable)' })"
+    }
+  })
+  return $script:appBlockers.Count -gt 0
 }
 $appUp = Test-AppUp
 
@@ -388,7 +391,10 @@ $flagPrevAll = $null    # $null = first run (no state file yet)
 if (-not $appUp) { $appUp = Test-AppUp }   # again, just before the first write (pass 1 took a while)
 if ($appUp) {
   $flagSkip = $true
-  if (-not $Quiet) { 'archive/pin flags not synced: the desktop app is running (they sync at the next seat switch)' }
+  if (-not $Quiet) {
+    $why = if ($AssumeAppRunning) { '-AssumeAppRunning' } else { "$(@($script:appBlockers)[0])$(if (@($script:appBlockers).Count -gt 1) { " and $(@($script:appBlockers).Count - 1) more" })" }
+    "archive/pin flags not synced: the desktop app is running ($why; they sync at the next seat switch)"
+  }
 } elseif (Test-Path -LiteralPath $flagStatePath) {
   # A present-but-unreadable state file is NOT a first run: a first run unions every flag, which
   # would resurrect everything the user un-archived/unpinned since. Skip and say so.
@@ -474,8 +480,8 @@ if (-not $flagSkip) {
         # is Stop). Warn, and keep this session's last baseline, so the next run tries again from it.
         try {
           # pass 1 read this a while ago; if the file changed since, don't write our older copy over it
-          $now = Get-Item -LiteralPath $r.file.FullName
-          if ($now.LastWriteTimeUtc -ne $r.file.LastWriteTimeUtc -or $now.Length -ne $r.file.Length) { throw 'it changed since it was read' }
+          $onDisk = Get-Item -LiteralPath $r.file.FullName
+          if ($onDisk.LastWriteTimeUtc -ne $r.file.LastWriteTimeUtc -or $onDisk.Length -ne $r.file.Length) { throw 'it changed since it was read' }
           $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $r.key
           if (-not (Test-Path -LiteralPath $dest)) {
             New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
