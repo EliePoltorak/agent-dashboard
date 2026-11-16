@@ -118,7 +118,7 @@ while (-not $runLock) {
     Start-Sleep -Seconds 2
   }
 }
-$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock, so two runs never share a backup folder
+$stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock; local time, so the repeated hour at a DST fall-back can reuse a name
 try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
 # The CLI's project-folder name: every character other than A-Z, a-z, 0-9 becomes '-' (case-sensitive match, as
@@ -706,6 +706,9 @@ foreach ($acct in $accts) {
     if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli) -and -not $liveT.Contains($cli)) {
       if (-not $NoPrune) {
         if (Test-ChangedSinceRead $r) { Write-Warning "$($f.FullName) left alone this run (changed on disk, or an earlier step could not write it); pruned next run if still due"; continue }
+        # the transcript may have been resumed since it was listed: re-read its write time before moving the record
+        $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
+        if ($tw -and ([DateTime]::UtcNow - $tw).TotalMinutes -le 10) { continue }
         if (-not $DryRun) {
           $rel = $f.FullName.Substring($ccs.Length).TrimStart('\')
           $dest = Join-Path $backupRoot $rel
