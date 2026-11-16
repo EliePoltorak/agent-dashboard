@@ -118,6 +118,10 @@ while (-not $runLock) {
     Start-Sleep -Seconds 2
   }
 }
+# Run at Idle CPU priority so a long scan yields to anything else; the rotator runs this in its own process,
+# so the caller's priority is put back when the run ends.
+$selfProc = Get-Process -Id $PID; $prevPriority = $selfProc.PriorityClass
+try { $selfProc.PriorityClass = 'Idle' } catch { }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock; local time, so the repeated hour at a DST fall-back can reuse a name
 try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
@@ -868,4 +872,4 @@ if (-not $Quiet) {
   if ($pruned -gt 0 -and -not $DryRun) { "pruned records backed up (reversible) at: $backupRoot" }
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
 }
-} finally { $runLock.Dispose() }
+} finally { $runLock.Dispose(); try { $selfProc.PriorityClass = $prevPriority } catch { } }

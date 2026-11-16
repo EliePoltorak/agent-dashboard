@@ -536,6 +536,7 @@ A session pinned on any seat is never pruned, for any reason; if it belongs to t
 flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
 on any seat releases it once a run spreads the unpin. A session whose transcript was written in the
 last 10 minutes is never pruned either, in any category (a session open but idle for longer is not protected).
+The sync runs at Idle CPU priority and puts the caller's priority back when it ends (the rotator runs it in its own process).
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
    address-pr, review agents, ping tests, bare slash commands) and ≥ `-MinAssistant` assistant
