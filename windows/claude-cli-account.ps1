@@ -454,8 +454,9 @@ function Get-UsageCached {
     if ($Model -like '*fable*' -and $proved) { Clear-AccessDisabled $Label }
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
     # A probe that read no window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not overwrite a
-    # cached cap still in force: the fallback reads that file until the cap's own reset (Test-CapCached). For a Fable probe the
-    # window is oi7; for any other model it is the session or weekly one (no status, s5_stat, w7_stat or s5_util).
+    # cached cap still in force: ranking, selection and the fallback read that file through Test-CapCached, until the cap's own
+    # reset or, with none, until a reading replaces it. For a Fable probe the window is oi7 (no oi7_stat or oi7_util); for any
+    # other model it is the session or weekly one (no status, s5_stat, w7_stat or s5_util).
     $non2xx = -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300)
     $keepCap = if ($Model -like '*fable*') { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
                else { ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and (Test-CapCached $Label 'default')) }
@@ -705,18 +706,18 @@ function Rank-Accounts {
       continue
     }
     $s5 = [double]$u.s5_util; $w7 = [double]$u.w7_util
-    # A reading that read no session/weekly window (a headerless non-2xx: the same test as $keepCap in Get-UsageCached) left any cap
-    # in force on disk, so the cached cap counts then. A reading that did read the window decides on its own.
+    # The cached cap counts only for the reading $keepCap in Get-UsageCached leaves a cap on disk for (the same test): an ok non-2xx
+    # carrying none of the session/weekly window's fields. Any other reading decides on its own.
     $capLive = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or ($u.status -eq 'rejected')
-    $noWin   = (-not $u.status -and -not $u.s5_stat -and -not $u.w7_stat -and $null -eq $u.s5_util)
+    $noWin   = (-not ([int]$u.http -ge 200 -and [int]$u.http -lt 300) -and -not $u.status -and -not $u.s5_stat -and -not $u.w7_stat -and $null -eq $u.s5_util)
     $capped  = $capLive -or ($noWin -and (Test-CapCached $l 'default'))
     # A fable-capped account is NOT a rotation target (owner, 2026-08-16): Fable is what runs
     # merge-pr's Gate C, so landing on a seat that cannot run Fable trades one blocked pipeline
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
-    # The cached Fable cap counts only when this pass's Fable probe answered without reading the oi7 window ($fu.ok, no oi7_*: it kept
-    # the cap on disk). A failed Fable probe stays unknown, so not-capped as above: it would otherwise hold a cap with no reset for good.
-    $fNoWin  = ($fu.ok -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
+    # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
+    # probe stays unknown, so not-capped as above: it would otherwise hold a cap with no reset for good.
+    $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected') -or ($fNoWin -and (Test-FableCapCached $l))
     $fDenied = ($fu.access -eq 'disabled')     # Fable's explicit access refusal rules the seat out, like Haiku's does above
     $isApp   = ($appSeat -and ($l -ieq $appSeat))
@@ -1126,8 +1127,8 @@ function Invoke-EnsureCliSeat {
 # (usage-cache-fable.json, oi7_*); 'default' reads the default-model reading (usage-cache.json): the session window (s5_*), the weekly
 # window (w7_*), or an overall status of rejected with neither window named. Reads the cache file whatever its age: the cache TTL is
 # how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until its own reset (epoch seconds); with
-# that reset missing or unreadable, until a newer reading replaces the file: a 2xx, or a non-2xx carrying that file's window headers
-# (oi7_* for Fable; status, s5_*, w7_* or s5_util otherwise). One that carries none does not: see $keepCap in Get-UsageCached.
+# that reset missing or unreadable, until a newer reading replaces the file: a 2xx, or a non-2xx carrying one of the fields $keepCap
+# in Get-UsageCached tests (oi7_stat or oi7_util for Fable; status, s5_stat, w7_stat or s5_util otherwise).
 # Never probes.
 function Test-CapCached {
   param([string]$Label, [string]$Which = 'default')
@@ -1167,7 +1168,7 @@ function Select-RotationTarget {
     # The access-refusal fallback: usage unknown (network), so no session bar, but every other exclusion
     # still holds - the active seat, the desktop-app seat, a seat marked disabled, and a seat whose cached
     # reading says a capped window (the default-model session or weekly window, or the weekly Fable one) until that cap's own
-    # reset, however old the reading (cache only: the network is what failed, so no probe; see Test-CapCached). Only a seat whose probe failed on the
+    # reset (or, with none, until a reading replaces it), however old the reading (cache only: the network is what failed, so no probe; see Test-CapCached). Only a seat whose probe failed on the
     # network qualifies: a 401 (dead token), a 5xx, or a missing token is a seat the CLI cannot use, not an unknown one.
     $appSeat = Get-AppSeatLabel
     $unknown = @(Rank-Accounts $false $false | Where-Object {
@@ -1195,7 +1196,8 @@ function Select-RotationTarget {
     $fu = Get-UsageCached $c.label $true 'fable' '-fable'
     if ($fu.access -eq 'disabled') { continue }                       # the Fable probe was an explicit access refusal: never a target
     if ($fu.ok -and $fu.oi7_stat -eq 'rejected') { continue }         # Gate C needs Fable
-    if ($fu.ok -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util -and (Test-FableCapCached $c.label)) { continue }   # a probe that read no Fable window left a cap in force on disk
+    $fNoWin = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
+    if ($fNoWin -and (Test-FableCapCached $c.label)) { continue }    # an ok non-2xx that read no Fable window left a cap in force on disk ($keepCap)
     $c | Add-Member -NotePropertyName fable -NotePropertyValue $(if ($fu.ok -and $null -ne $fu.oi7_util) { [double]$fu.oi7_util } else { $null }) -Force
     return $c
   }

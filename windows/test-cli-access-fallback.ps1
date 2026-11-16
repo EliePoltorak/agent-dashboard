@@ -577,11 +577,14 @@ foreach ($case in @(
 }
 
 # A live reading that read the window decides, even when the cache write after it failed and the old cap is still on disk
-foreach ($case in @(@{ word = 'session'; fable = $false }, @{ word = 'Fable'; fable = $true })) {
+foreach ($case in @(
+    @{ word = 'session'; fable = $false; plan = 'ok' },
+    @{ word = 'Fable'; fable = $true; plan = 'ok' },
+    @{ word = 'bare Fable (no oi7 window)'; fable = $true; plan = 'fable-2xx-bare' })) {
   Reset-Case
   Clear-AppIdentity
   foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
-  $script:plan['A'] = 'ok'
+  $script:plan['A'] = $case.plan
   if ($case.fable) { Write-FableCache 'A' $stale ([string]($nowS + 3600)); $cf = 'usage-cache-fable.json' }
   else { Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' }; $cf = 'usage-cache.json' }
   $cfp = Join-Path (Join-Path $Root 'A') $cf
@@ -591,6 +594,7 @@ foreach ($case in @(@{ word = 'session'; fable = $false }, @{ word = 'Fable'; fa
   $pick = Select-RotationTarget -Bar 90
   $pickL = if ($pick) { $pick.label } else { '(none)' }
   Set-ItemProperty -LiteralPath $cfp -Name IsReadOnly -Value $false
+  Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: the old cap really is still on disk" (Test-CapCached 'A' $(if ($case.fable) { 'fable' } else { 'default' }))
   Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
   Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: still selected" ($pickL -eq 'A') $pickL
 }
