@@ -10,7 +10,7 @@ the auth token changes.
 
 ## Quick start
 
-**You need:** Windows 10 or 11; [PowerShell 7](https://aka.ms/powershell) (`pwsh`); Python 3.10+ with the `py` launcher;
+**You need:** Windows 10 or 11; [PowerShell 7.5 or later](https://aka.ms/powershell) (`pwsh`); Python 3.10+ with the `py` launcher;
 the Claude Code CLI (`claude`); Git, only for updates. Optional, each for its own tab or feature: the Claude desktop app,
 the Codex CLI, the Grok CLI, the Antigravity app (Gemini).
 
@@ -573,7 +573,7 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 (archive/un-archive, pin/unpin) is copied to every seat's record of that session, and "on" wins if two
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
-can't be written, changed on disk after the sync read it (no step writes the sync's older copy over it), or a record the sync knew from its last run can't be read, the sync warns (naming the file) and that session keeps its last saved state, so
+can't be written, changed on disk after the sync read it (no step writes the sync's older copy over it; a skipped reconcile or retitle is just retried), or a record the sync knew from its last run can't be read, the sync warns (naming the file) and that session keeps its last saved state, so
 the next run tries again from it. Until it succeeds, changing that session back to how it was (archiving or
 un-archiving, pinning or unpinning) may not stick (the same holds after a run whose state save failed); an unreadable record (including an empty one) holds its
 session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or

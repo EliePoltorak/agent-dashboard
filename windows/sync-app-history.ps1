@@ -113,7 +113,7 @@ while (-not $runLock) {
   try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
   catch [IO.IOException] {
     if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
-    if ((Get-Date) -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run is still writing session records: opening the app before it finishes can undo an archive or pin change.'; return }
+    if ((Get-Date) -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run may still be writing session records: opening the app before it finishes can undo an archive or pin change.'; return }
     if (-not $lockSaid) { 'another history sync is running; waiting for it (up to 3 min)...'; $lockSaid = $true }
     Start-Sleep -Seconds 2
   }
@@ -495,6 +495,7 @@ if (-not $flagSkip) {
         if ($DryRun) { $flipped++; $next[$r.key] = $want; continue }
         # One unwritable record (locked, read-only, ...) must not abort the whole run ($ErrorActionPreference
         # is Stop). Warn, and keep this session's last baseline, so the next run tries again from it.
+        $oldProp = $null
         try {
           # pass 1 read this a while ago; if the file changed since, don't write our older copy over it
           if (Test-ChangedSinceRead $r) { throw 'it changed since it was read' }
@@ -503,6 +504,7 @@ if (-not $flagSkip) {
             New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
             Copy-Item -LiteralPath $r.file.FullName -Destination $dest -Force
           }
+          $oldProp = @{ had = ($null -ne $r.j.PSObject.Properties[$flag]); v = $r.j.$flag }
           $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $want -Force
           # temp file + replace: a run killed mid-write must not leave a truncated (unreadable) record
           ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath "$($r.file.FullName).sync-tmp" -Encoding UTF8 -NoNewline
@@ -511,6 +513,9 @@ if (-not $flagSkip) {
           $flipped++; $next[$r.key] = $want
         } catch {
           Remove-Item -LiteralPath "$($r.file.FullName).sync-tmp" -Force -ErrorAction SilentlyContinue   # don't leave it in the app's index
+          # undo the in-memory change too: a later write of this record (its other flag, pass 1.5, the retitle) must
+          # not put the value that failed here on disk, or the held baseline no longer matches the file
+          if ($oldProp) { if ($oldProp.had) { $r.j | Add-Member -NotePropertyName $flag -NotePropertyValue $oldProp.v -Force } else { $r.j.PSObject.Properties.Remove($flag) } }
           Write-Warning "could not set $flag on $($r.file.FullName): $($_.Exception.Message) (this session keeps its last flag state; it is retried next run)"
           [void]$flagFailCli.Add("$flag|$cli")
         }
@@ -569,7 +574,8 @@ foreach ($cli in @($byCli.Keys)) {
   foreach ($r in $rs) {
     $u = [string]$r.j.lastAssistantUuid
     if ($u -eq $tip -or -not $pos.ContainsKey($u)) { continue }
-    if (Test-ChangedSinceRead $r) { Write-Warning "left $($r.file.FullName) alone: it changed since it was read (reconciled next run)"; continue }
+    $wasKnown = $changedOnDisk.Contains($r.file.FullName)
+    if (Test-ChangedSinceRead $r) { if (-not $wasKnown) { Write-Warning "left $($r.file.FullName) alone: it changed since it was read (reconciled next run)" }; continue }
     if (-not $DryRun) {
       $rel = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
       $dest = Join-Path (Join-Path $env:USERPROFILE ".claude-app-seats\.reconcile-backups\$stamp") $rel
