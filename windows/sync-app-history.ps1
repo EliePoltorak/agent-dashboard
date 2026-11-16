@@ -108,12 +108,12 @@ $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
 # Interactive runs (a seat switch, claude-sync-history) wait up to 3 min for a run already in progress, so the
 # user isn't told to reopen the app while it is still writing; -Quiet (the scheduled task) skips at once.
-$runLock = $null; $lockUntil = (Get-Date).AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
+$runLock = $null; $lockUntil = [DateTime]::UtcNow.AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
 while (-not $runLock) {
   try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
   catch [IO.IOException] {
     if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
-    if ((Get-Date) -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run may still be writing session records: opening the app before it finishes can undo an archive or pin change.'; return }
+    if ([DateTime]::UtcNow -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run may still be writing session records: opening the app before it finishes can undo an archive or pin change.'; return }
     if (-not $lockSaid) { 'another history sync is running; waiting for it (up to 3 min)...'; $lockSaid = $true }
     Start-Sleep -Seconds 2
   }
@@ -304,7 +304,6 @@ function Write-Record([string]$subDir, $file) {
 }
 
 # ---- classify every transcript once ------------------------------------------
-$now = Get-Date
 $nowUtc = [DateTime]::UtcNow   # age checks compare UTC, so a DST change can't skew them
 $allT = New-Object System.Collections.Generic.HashSet[string]
 $liveT = New-Object System.Collections.Generic.HashSet[string]   # written in the last 10 min: never pruned
