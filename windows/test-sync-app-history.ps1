@@ -8,7 +8,8 @@
   does not stop the save; with the app running (-AssumeAppRunning) nothing is changed or saved and a record
   it creates is neutral; a state file without the record->session map stops the whole save on an unreadable
   record; a held session's new record is neutral and set by the next good run; a record truncated to 0
-  bytes counts as unreadable; archived-sessions.idx follows archive and
+  bytes counts as unreadable; a flag write in the same run as pass 1.5's reconcile does not stop the run;
+  archived-sessions.idx follows archive and
   un-archive; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
@@ -179,7 +180,7 @@ check 'empty record, restored: un-archived on every seat, not re-archived' (@(of
 "--- the desktop app is running: no record is changed and the state is not saved"
 setRec $g0.f 'isArchived' $true
 $h = recHash; $stBefore = Get-Content $statePath -Raw; run '-AssumeAppRunning'
-check 'app running: says flags are not synced' ($out -match 'not synced: the desktop app is running')
+check 'app running: says flags are not synced' ($out -match 'not synced: the desktop app .*is running')
 check 'app running: no record changed' ((recHash) -eq $h)
 check 'app running: state file not saved' ((Get-Content $statePath -Raw) -eq $stBefore)
 setRec $g0.f 'isArchived' $false

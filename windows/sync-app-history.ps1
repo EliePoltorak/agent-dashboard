@@ -393,7 +393,7 @@ if ($appUp) {
   $flagSkip = $true
   if (-not $Quiet) {
     $why = if ($AssumeAppRunning) { '-AssumeAppRunning' } else { "$(@($script:appBlockers)[0])$(if (@($script:appBlockers).Count -gt 1) { " and $(@($script:appBlockers).Count - 1) more" })" }
-    "archive/pin flags not synced: the desktop app is running ($why; they sync at the next seat switch)"
+    "archive/pin flags not synced: the desktop app (or a claude process not at a known CLI path) is running ($why; they sync at the next seat switch)"
   }
 } elseif (Test-Path -LiteralPath $flagStatePath) {
   # A present-but-unreadable state file is NOT a first run: a first run unions every flag, which
@@ -418,6 +418,9 @@ $flagByCli = @{}
 # A record known last run that can't be read holds back its session the same way (see below).
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
+# records pass 1.4 found changed on disk since pass 1 read them: pass 1.5 and the pass 2 retitle must not
+# write their older in-memory copy over them either
+$changedOnDisk = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 $flagHeld = New-Object 'System.Collections.Generic.HashSet[string]'   # "flag|cli|key" of unreadable known records
 $flagWarned = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # warn once per record
 $flagPrevCli = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)   # key -> cliSessionId, last run
@@ -481,7 +484,7 @@ if (-not $flagSkip) {
         try {
           # pass 1 read this a while ago; if the file changed since, don't write our older copy over it
           $onDisk = Get-Item -LiteralPath $r.file.FullName
-          if ($onDisk.LastWriteTimeUtc -ne $r.file.LastWriteTimeUtc -or $onDisk.Length -ne $r.file.Length) { throw 'it changed since it was read' }
+          if ($onDisk.LastWriteTimeUtc -ne $r.file.LastWriteTimeUtc -or $onDisk.Length -ne $r.file.Length) { [void]$changedOnDisk.Add($r.file.FullName); throw 'it changed since it was read' }
           $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $r.key
           if (-not (Test-Path -LiteralPath $dest)) {
             New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
@@ -553,6 +556,7 @@ foreach ($cli in @($byCli.Keys)) {
   foreach ($r in $rs) {
     $u = [string]$r.j.lastAssistantUuid
     if ($u -eq $tip -or -not $pos.ContainsKey($u)) { continue }
+    if ($changedOnDisk.Contains($r.file.FullName)) { continue }
     if (-not $DryRun) {
       $rel = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
       $dest = Join-Path (Join-Path $env:USERPROFILE ".claude-app-seats\.reconcile-backups\$stamp") $rel
@@ -622,7 +626,7 @@ foreach ($acct in $accts) {
     }
     if (-not $cli) { continue }
     [void]$present.Add($cli)
-    if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli)) {
+    if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli) -and -not $changedOnDisk.Contains($f.FullName)) {
       $bt = Get-TitleFor $cli
       if ($bt) {
         if (-not $DryRun) {
