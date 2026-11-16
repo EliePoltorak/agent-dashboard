@@ -34,8 +34,8 @@ Set-Content "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","conten
 "sandbox: $sb"
 $ccs = "$sb\app\Claude\claude-code-sessions"; $statePath = "$sb\home\.claude-app-seats\.flag-state.json"
 $fail = 0; $script:out = @(); $script:rc = 0
-function run([string]$extra = '') {
-  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -NoPrune -AssumeAppClosed $extra *>&1" 2>&1 | ForEach-Object { "$_" })
+function run([string]$extra = '', [switch]$prune) {
+  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' $(if (-not $prune) { '-NoPrune' }) -AssumeAppClosed $extra *>&1" 2>&1 | ForEach-Object { "$_" })
   $script:rc = $LASTEXITCODE
   $script:out | Where-Object { $_ -match '^set |^WOULD |isArchived|isStarred|not synced|rror|xception|WARNING|added \d' } | ForEach-Object { "    $_" }
 }
@@ -286,6 +286,20 @@ if ($RX.Count -ge 1) {
   $st = state
   check 'fabricated records are in the saved baseline' (@($made | Where-Object { $st['isArchived'][(key $_.f)] -ne $true -or $st['isStarred'][(key $_.f)] -ne $true }).Count -eq 0)
 }
+
+"--- an unpin held back by an unreadable record is not pruned (pruning on)"
+$RX = ofSession $X
+if ($RX.Count -ge 3) {
+  (Get-Item -LiteralPath "$proj\$X.jsonl").LastWriteTime = (Get-Date).AddDays(-30)   # old: not kept, not live
+  foreach ($r in $RX) { setRec $r.f 'isStarred' $true }; run   # baseline: pinned on every seat
+  setRec $RX[0].f 'isStarred' $false                            # unpin on seat 0
+  $raw1 = Get-Content -LiteralPath $RX[1].f -Raw; Set-Content -LiteralPath $RX[1].f 'not json' -NoNewline   # seat 1 unreadable
+  run -prune
+  check 'held unpin: no record of the session is pruned' (@($RX | Where-Object { -not (Test-Path -LiteralPath $_.f) }).Count -eq 0)
+  Set-Content -LiteralPath $RX[1].f $raw1 -NoNewline; run -prune
+  check 'readable again: the unpin wins and the old session is pruned' ((ofSession $X).Count -eq 0)
+  check 'run succeeds' ($rc -eq 0 -and -not ($out -match 'rror|xception'))
+} else { "SKIP held-unpin prune scenario: fewer than 3 records of the synthetic session" }
 
 "$fail failure(s)"
 if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }

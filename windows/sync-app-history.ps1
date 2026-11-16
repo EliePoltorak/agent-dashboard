@@ -462,6 +462,7 @@ $flagByCli = @{}
 # A record known last run that can't be read holds back its session the same way (see below).
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
+$heldCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # sessions held back this run: never pruned
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
 # newer one (the app writing as it starts or quits). A record found changed, or one pass 1.5 could not write, is skipped by the later
@@ -574,6 +575,8 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
+  # a held session's change is retried next run from its records, so none of them is pruned meanwhile
+  foreach ($fc in $flagFailCli) { [void]$heldCli.Add(($fc -split '\|', 2)[1]) }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
@@ -709,7 +712,7 @@ foreach ($acct in $accts) {
   foreach ($r in $recs) {
     $j = $r.j; $f = $r.file
     $cli = [string]$j.cliSessionId
-    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli) -and -not $liveT.Contains($cli)) {
+    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli) -and -not $liveT.Contains($cli) -and -not $heldCli.Contains($cli) -and -not $flagFail) {
       if (-not $NoPrune) {
         if (Test-ChangedSinceRead $r) { Write-Warning "$($f.FullName) left alone this run (changed on disk, or an earlier step could not write it); pruned next run if still due"; continue }
         # the transcript may have been resumed since it was listed: re-read its write time before moving the record
