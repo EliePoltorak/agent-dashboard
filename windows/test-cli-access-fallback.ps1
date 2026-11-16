@@ -524,6 +524,34 @@ $script:plan['A'] = 'default-500'
 $null = Get-UsageCached 'A' $true 'haiku' ''
 Check 'a headerless default probe still replaces a cap that has reset' ((Get-Content (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Raw | ConvertFrom-Json).data.http -eq 500)
 
+# --- issue #11: the normal ranking and selection path honours a cached cap when the live probe is headerless ---
+# A is the only seat the other probes leave usable (401s), so selecting it can only be the cap being ignored.
+foreach ($case in @(
+    @{ word = 'session'; plan = 'default-500'; fable = $false; key = 's5' },
+    @{ word = 'weekly';  plan = 'default-500'; fable = $false; key = 'w7' },
+    @{ word = 'Fable';   plan = 'fable-500';   fable = $true;  key = 'oi7' })) {
+  foreach ($future in $true, $false) {
+    Reset-Case
+    Clear-AppIdentity
+    foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+    $script:plan['A'] = $case.plan
+    $reset = if ($future) { $nowS + 3600 } else { $nowS - 60 }
+    if ($case.fable) { Write-FableCache 'A' $stale ([string]$reset) }
+    else { Write-DefaultCache 'A' $stale @{ "$($case.key)_stat" = 'rejected'; "$($case.key)_reset" = $reset; status = 'rejected' } }
+    $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+    $script:UnknownProbeMemo = @{}
+    $pick = Select-RotationTarget -Bar 90
+    $pickL = if ($pick) { $pick.label } else { '(none)' }
+    if ($future) {
+      Check "a headerless 500 over a cached $($case.word) cap in force: not ranked usable" (-not $rowA.usable) "usable=$($rowA.usable) why=$($rowA.why)"
+      Check "a headerless 500 over a cached $($case.word) cap in force: not selected" ($pickL -ne 'A') $pickL
+    } else {
+      Check "a headerless 500 over an expired cached $($case.word) cap: still ranked usable" ([bool]$rowA.usable) "why=$($rowA.why)"
+      Check "a headerless 500 over an expired cached $($case.word) cap: still selected" ($pickL -eq 'A') $pickL
+    }
+  }
+}
+
 # --- quota 429 is not an access refusal ---
 Reset-Case
 Clear-AppIdentity

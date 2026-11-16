@@ -705,12 +705,14 @@ function Rank-Accounts {
       continue
     }
     $s5 = [double]$u.s5_util; $w7 = [double]$u.w7_util
-    $capped = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or ($u.status -eq 'rejected')
+    # Test-CapCached also catches a cap a headerless non-2xx probe could not see but left on disk ($keepCap in Get-UsageCached).
+    $capped = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or ($u.status -eq 'rejected') -or (Test-CapCached $l 'default')
     # A fable-capped account is NOT a rotation target (owner, 2026-08-16): Fable is what runs
     # merge-pr's Gate C, so landing on a seat that cannot run Fable trades one blocked pipeline
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
-    $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected')
+    # The cached Fable cap only when Fable was read this pass: without a fresh reading a cap with no reset would never be replaced.
+    $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected') -or ($WithFable -and (Test-FableCapCached $l))
     $fDenied = ($fu.access -eq 'disabled')     # Fable's explicit access refusal rules the seat out, like Haiku's does above
     $isApp   = ($appSeat -and ($l -ieq $appSeat))
     $why = if ($isApp) { 'claude-account (desktop app) is on this seat' }
@@ -1187,6 +1189,7 @@ function Select-RotationTarget {
     $fu = Get-UsageCached $c.label $true 'fable' '-fable'
     if ($fu.access -eq 'disabled') { continue }                       # the Fable probe was an explicit access refusal: never a target
     if ($fu.ok -and $fu.oi7_stat -eq 'rejected') { continue }         # Gate C needs Fable
+    if (Test-FableCapCached $c.label) { continue }                    # a headerless probe left a Fable cap in force on disk
     $c | Add-Member -NotePropertyName fable -NotePropertyValue $(if ($fu.ok -and $null -ne $fu.oi7_util) { [double]$fu.oi7_util } else { $null }) -Force
     return $c
   }
