@@ -717,7 +717,7 @@ function Rank-Accounts {
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
     # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
-    # probe (an unknown ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token; an explicit 403 is $fDenied below) stays unknown, so not-capped as above; a cap with no reset would
+    # probe (an unknown ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token; a subscription-refusal 403 is $fDenied below, any other 403 on the messages call is an ok non-2xx, so the cached cap applies) stays unknown, so not-capped as above; a cap with no reset would
     # otherwise hold for good. Honouring a cap with a future reset there is an open question (#20).
     $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected') -or ($fNoWin -and (Test-FableCapCached $l))
@@ -734,7 +734,8 @@ function Rank-Accounts {
       # A cap supplied only by the cache came with a reading that read no window: its 0s are not a reading (the NO USABLE TARGET
       # line prints n/a for $null, and usage-history.py --backfill parses that line), so report them as unknown.
       score = [math]::Max($s5, $w7)
-      s5 = $(if ($capped -and -not $capLive) { $null } else { $s5 }); w7 = $(if ($capped -and -not $capLive) { $null } else { $w7 })
+      s5 = $(if ($capped -and -not $capLive -and $null -eq $u.s5_util) { $null } else { $s5 })
+      w7 = $(if ($capped -and -not $capLive -and $null -eq $u.w7_util) { $null } else { $w7 })
       fable = $(if ($fu.ok -and $null -ne $fu.oi7_util) { [double]$fu.oi7_util } else { $null })
       fableCapped = $fCapped
     }
@@ -1133,7 +1134,8 @@ function Invoke-EnsureCliSeat {
 # window (w7_*), or an overall status of rejected with neither window named. Reads the cache file whatever its age: the cache TTL is
 # how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until its own reset (epoch seconds); with
 # that reset missing or unreadable, until a newer reading replaces the file: a 2xx, or a non-2xx carrying one of the fields $keepCap
-# in Get-UsageCached tests (oi7_stat or oi7_util for Fable; status, s5_stat, w7_stat or s5_util otherwise).
+# in Get-UsageCached tests (oi7_stat or oi7_util for Fable; status, s5_stat, w7_stat or s5_util otherwise). That is the probe path;
+# claude-rotate-proxy.py write_cache also rewrites these files (see its own rules).
 # Never probes.
 function Test-CapCached {
   param([string]$Label, [string]$Which = 'default')
