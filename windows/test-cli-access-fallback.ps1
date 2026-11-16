@@ -43,6 +43,9 @@ $global:ClaudeRotatorProbeOverride = {
     if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; status='allowed'; s5_util=0.1; note='' }
     }
+    if ($plan -eq 'fable-net') {     # the Fable probe alone fails on the network; the haiku one reads normally
+      return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network; not marking disabled' }
+    }
     if ($plan -eq 'fable-disabled') {
       return [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code='oauth_org_not_allowed'; note='subscription disabled (403 oauth_org_not_allowed)' }
     }
@@ -543,14 +546,42 @@ foreach ($case in @(
     $pick = Select-RotationTarget -Bar 90
     $pickL = if ($pick) { $pick.label } else { '(none)' }
     if ($future) {
-      Check "a headerless 500 over a cached $($case.word) cap in force: not ranked usable" (-not $rowA.usable) "usable=$($rowA.usable) why=$($rowA.why)"
-      Check "a headerless 500 over a cached $($case.word) cap in force: not selected" ($pickL -ne 'A') $pickL
+      Check "a headerless 500 over a cached $($case.word) cap in force: not ranked usable" ($rowA -and -not $rowA.usable) "usable=$($rowA.usable) why=$($rowA.why)"
+      Check "a headerless 500 over a cached $($case.word) cap in force: not selected" ($pickL -eq '(none)') $pickL
     } else {
       Check "a headerless 500 over an expired cached $($case.word) cap: still ranked usable" ([bool]$rowA.usable) "why=$($rowA.why)"
       Check "a headerless 500 over an expired cached $($case.word) cap: still selected" ($pickL -eq 'A') $pickL
     }
   }
 }
+
+# A cached Fable cap (in force, or with no reset) is replaced by a fresh 2xx reading, and a failed Fable probe over it stays
+# not-capped: either way A is the target. This is what keeps a cap with no reset from excluding a seat for good.
+foreach ($case in @(
+    @{ word = 'a fresh 2xx Fable reading'; plan = 'ok' },
+    @{ word = 'a Fable probe that fails on the network'; plan = 'fable-net' })) {
+  foreach ($reset in @([string]($nowS + 3600), $null)) {
+    $rw = if ($reset) { 'in force' } else { 'with no reset' }
+    Reset-Case
+    Clear-AppIdentity
+    foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+    $script:plan['A'] = $case.plan
+    Write-FableCache 'A' $stale $reset
+    $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+    $script:UnknownProbeMemo = @{}
+    $pick = Select-RotationTarget -Bar 90
+    $pickL = if ($pick) { $pick.label } else { '(none)' }
+    Check "$($case.word) over a cached Fable cap $($rw): still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
+    Check "$($case.word) over a cached Fable cap $($rw): still selected" ($pickL -eq 'A') $pickL
+  }
+}
+
+# A rejected Fable window the proxy wrote to usage-cache.json is not a default-window cap
+Reset-Case
+Write-DefaultCache 'A' 10 @{ status = 'rejected'; oi7_stat = 'rejected'; oi7_reset = $nowS - 60 }
+Check 'a Fable-only rejection in usage-cache.json is not a default cap' (-not (Test-CapCached 'A' 'default'))
+Write-DefaultCache 'A' 10 @{ status = 'rejected' }
+Check 'an overall rejection naming no window is still a default cap' (Test-CapCached 'A' 'default')
 
 # --- quota 429 is not an access refusal ---
 Reset-Case
