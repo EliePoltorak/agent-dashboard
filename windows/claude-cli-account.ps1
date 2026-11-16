@@ -717,7 +717,7 @@ function Rank-Accounts {
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
     # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
-    # probe (any ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token) stays unknown, so not-capped as above; a cap with no reset would
+    # probe (an unknown ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token; an explicit 403 is $fDenied below) stays unknown, so not-capped as above; a cap with no reset would
     # otherwise hold for good. Honouring a cap with a future reset there is an open question (#20).
     $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected') -or ($fNoWin -and (Test-FableCapCached $l))
@@ -731,7 +731,10 @@ function Rank-Accounts {
     [pscustomobject]@{
       label = $l; usable = (-not $capped -and -not $fCapped -and -not $fDenied -and -not $isApp); why = $why; access = $(if ($fDenied) { 'disabled' } else { 'ok' })
       w7reset = $(if ($u.w7_reset) { [int64]$u.w7_reset } else { [int64]::MaxValue })
-      score = [math]::Max($s5, $w7); s5 = $s5; w7 = $w7
+      # A cap supplied only by the cache came with a reading that read no window: its 0s are not a reading (the NO USABLE TARGET
+      # line prints n/a for $null, and usage-history.py --backfill parses that line), so report them as unknown.
+      score = [math]::Max($s5, $w7)
+      s5 = $(if ($capped -and -not $capLive) { $null } else { $s5 }); w7 = $(if ($capped -and -not $capLive) { $null } else { $w7 })
       fable = $(if ($fu.ok -and $null -ne $fu.oi7_util) { [double]$fu.oi7_util } else { $null })
       fableCapped = $fCapped
     }

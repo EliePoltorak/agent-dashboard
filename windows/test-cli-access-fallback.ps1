@@ -567,6 +567,9 @@ foreach ($case in @(
     if ($future) {
       Check "a headerless 500 over a cached $($case.word) cap in force: not ranked usable" ($rowA -and -not $rowA.usable) "usable=$($rowA.usable) why=$($rowA.why)"
       Check "a headerless 500 over a cached $($case.word) cap in force: not selected" ($pickL -eq '(none)') $pickL
+      if (-not $case.fable) {
+        Check "a headerless 500 over a cached $($case.word) cap in force: its unread usage is reported as unknown, not 0%" ($null -eq $rowA.s5 -and $null -eq $rowA.w7) "s5=$($rowA.s5) w7=$($rowA.w7)"
+      }
     } else {
       Check "a headerless 500 over an expired cached $($case.word) cap: still ranked usable" ([bool]$rowA.usable) "why=$($rowA.why)"
       Check "a headerless 500 over an expired cached $($case.word) cap: still selected" ($pickL -eq 'A') $pickL
