@@ -43,6 +43,9 @@ $global:ClaudeRotatorProbeOverride = {
     if ($plan -eq 'fable-2xx-bare') {     # a 2xx that carries the session headers but no 7d_oi window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; status='allowed'; s5_util=0.1; note='' }
     }
+    if ($plan -eq 'fable-429-fields') {     # a non-2xx that still carries the oi7 window
+      return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; oi7_util=0.1; oi7_stat='allowed'; note='' }
+    }
     if ($plan -eq 'fable-net') {     # the Fable probe alone fails on the network; the haiku one reads normally
       return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$true; note='probe failed: network; not marking disabled' }
     }
@@ -62,6 +65,12 @@ $global:ClaudeRotatorProbeOverride = {
   }
   if ($plan -eq 'http401') {     # Probe-Usage's result for a dead token: an HTTP failure, not a network one
     return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; http=$null; code=$null; net=$false; note='probe failed: http 401: authentication_error: invalid token; not marking disabled' }
+  }
+  if ($plan -eq 'default-2xx-bare') {     # a 2xx that carries no usage headers at all
+    return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; note='' }
+  }
+  if ($plan -eq 'default-429-fields') {     # a non-2xx that still carries the session/weekly window
+    return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='allowed'; s5_util=0.1; w7_util=0.2; s5_stat='allowed'; w7_stat='allowed'; note='' }
   }
   if ($plan -eq 'default-500') {     # Probe-Usage's ok=$true for a non-2xx default-model probe with no usage headers
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=500; note='http 500: api_error: Overloaded' }
@@ -576,11 +585,16 @@ foreach ($case in @(
   }
 }
 
-# A live reading that read the window decides, even when the cache write after it failed and the old cap is still on disk
+# Only the reading $keepCap keeps a cap for (an ok non-2xx with none of the window's fields) is checked against the cache: a 2xx
+# (with or without the window) or a non-2xx carrying the window decides, even when its cache write failed and the old cap is still
+# on disk. The old cache is past its TTL here, so the live reading is the one ranked.
 foreach ($case in @(
-    @{ word = 'session'; fable = $false; plan = 'ok' },
-    @{ word = 'Fable'; fable = $true; plan = 'ok' },
-    @{ word = 'bare Fable (no oi7 window)'; fable = $true; plan = 'fable-2xx-bare' })) {
+    @{ word = '2xx session'; fable = $false; plan = 'ok' },
+    @{ word = 'bare 2xx session (no usage headers)'; fable = $false; plan = 'default-2xx-bare' },
+    @{ word = '429 session carrying the window'; fable = $false; plan = 'default-429-fields' },
+    @{ word = '2xx Fable'; fable = $true; plan = 'ok' },
+    @{ word = 'bare 2xx Fable (no oi7 window)'; fable = $true; plan = 'fable-2xx-bare' },
+    @{ word = '429 Fable carrying the oi7 window'; fable = $true; plan = 'fable-429-fields' })) {
   Reset-Case
   Clear-AppIdentity
   foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
@@ -594,9 +608,9 @@ foreach ($case in @(
   $pick = Select-RotationTarget -Bar 90
   $pickL = if ($pick) { $pick.label } else { '(none)' }
   Set-ItemProperty -LiteralPath $cfp -Name IsReadOnly -Value $false
-  Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: the old cap really is still on disk" (Test-CapCached 'A' $(if ($case.fable) { 'fable' } else { 'default' }))
-  Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
-  Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: still selected" ($pickL -eq 'A') $pickL
+  Check "a $($case.word) reading over a cached cap it could not overwrite: the old cap really is still on disk" (Test-CapCached 'A' $(if ($case.fable) { 'fable' } else { 'default' }))
+  Check "a $($case.word) reading over a cached cap it could not overwrite: still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
+  Check "a $($case.word) reading over a cached cap it could not overwrite: still selected" ($pickL -eq 'A') $pickL
 }
 
 # --- quota 429 is not an access refusal ---

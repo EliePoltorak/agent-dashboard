@@ -707,7 +707,8 @@ function Rank-Accounts {
     }
     $s5 = [double]$u.s5_util; $w7 = [double]$u.w7_util
     # The cached cap counts only for the reading $keepCap in Get-UsageCached leaves a cap on disk for (the same test): an ok non-2xx
-    # carrying none of the session/weekly window's fields. Any other reading decides on its own.
+    # carrying none of the session/weekly window's fields. Any other reading is not checked against the cache (though within the TTL,
+    # $u itself may be the cached reading: Get-UsageCached serves a fresh-enough file).
     $capLive = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or ($u.status -eq 'rejected')
     $noWin   = (-not ([int]$u.http -ge 200 -and [int]$u.http -lt 300) -and -not $u.status -and -not $u.s5_stat -and -not $u.w7_stat -and $null -eq $u.s5_util)
     $capped  = $capLive -or ($noWin -and (Test-CapCached $l 'default'))
@@ -716,7 +717,8 @@ function Rank-Accounts {
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
     # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
-    # probe stays unknown, so not-capped as above: it would otherwise hold a cap with no reset for good.
+    # probe (ok=$false: network, a model-catalog HTTP error, no token) stays unknown, so not-capped as above; a cap with no reset would
+    # otherwise hold for good. Honouring a cap with a future reset there is an open question (#20).
     $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     $fCapped = ($fu.ok -and $fu.oi7_stat -eq 'rejected') -or ($fNoWin -and (Test-FableCapCached $l))
     $fDenied = ($fu.access -eq 'disabled')     # Fable's explicit access refusal rules the seat out, like Haiku's does above
