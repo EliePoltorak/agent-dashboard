@@ -349,10 +349,10 @@ check 'pinned old session: archived on none, not marked done' (@(ofSession $O3 |
 "--- a held session (a record it had can't be read) is not auto-archived or marked done, and is retried"
 $O4 = mkOld; run '-MaxAgeDays 0'                                      # its records join the baseline; 0 = auto-archive off
 check '-MaxAgeDays 0: not archived' (@(ofSession $O4 | Where-Object arch).Count -eq 0 -and -not (autoDone $O4))
-$o4 = @(ofSession $O4); $raw4 = Get-Content -LiteralPath $o4[1].f -Raw; Set-Content -LiteralPath $o4[1].f 'not json' -NoNewline; run
+$r4 = @(ofSession $O4); $raw4 = Get-Content -LiteralPath $r4[1].f -Raw; Set-Content -LiteralPath $r4[1].f 'not json' -NoNewline; run   # not $o4: PowerShell names ignore case
 check 'held: warns' ([bool]($out -match 'could not read'))
 check 'held: not archived, not marked done' (@(ofSession $O4 | Where-Object arch).Count -eq 0 -and -not (autoDone $O4))
-Set-Content -LiteralPath $o4[1].f $raw4 -NoNewline; run
+Set-Content -LiteralPath $r4[1].f $raw4 -NoNewline; run
 check 'retried: archived on every seat and marked done' (@(ofSession $O4 | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $O4))
 check 'run succeeds' ($rc -eq 0 -and -not ($out -match 'rror|xception'))
 

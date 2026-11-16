@@ -534,14 +534,22 @@ lists only sessions it has a small *pointer record* for, in its own private inde
 `%APPDATA%\Claude\claude-code-sessions`. So CLI sessions — and sessions started under
 another account/seat — never appear in the app's history on their own.
 
-`claude-sync-history` adds pointer records for sessions worth keeping and **prunes** the rest
-(reversibly). A session is kept only if it is **recent** (last activity within `-MaxAgeDays`,
-**default 7**; `0` = no age limit) AND matches a keep category. Older sessions are pruned no
-matter how substantive — the transcript is untouched and `claude --resume` still lists it.
-A session pinned on any seat is never pruned, for any reason; if it belongs to the synced workspace (`-Cwd`) and its transcript is on this machine, it is also copied to the seats that lack it. This follows the records' `isStarred`
-flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
-on any seat releases it once a run spreads the unpin. A session whose transcript was written in the
-last 10 minutes is never pruned either, in any category (a session open but idle for longer is not protected).
+`claude-sync-history` adds pointer records for sessions worth keeping and **never removes a record**
+(pruning was removed 2026-11-16). A session is copied to the seats that lack it only if it is **recent**
+(last activity within `-MaxAgeDays`, **default 7**; `0` = no age limit) AND matches a keep category.
+A session pinned on any seat that belongs to the synced workspace (`-Cwd`), with its transcript on this
+machine, is copied too, whatever its age. This follows the records' `isStarred` flag, which the sync
+spreads to every seat, not the sidebar's own pin list (see below).
+
+**Old sessions are archived once (2026-11-16).** A `-Cwd` session whose transcript is on this machine
+and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat, once. It is then
+remembered in `.flag-state.json` (`autoArchived`, session id → date), so if you un-archive it, it stays
+un-archived. Not archived: a session pinned as the run resolves it, one written in the last 10 minutes,
+or one held back that run (a record that can't be read or written; it is retried next run and not
+remembered until every record is archived). `-MaxAgeDays 0` turns it off. It runs in the archive/pin
+step below, so only while the app is closed; a run with the app open leaves it for the next one.
+`-DryRun` says how many sessions it would archive. Limit: if the state file is deleted, the next run
+archives every old session once more, un-archived ones included.
 The sync runs at Idle CPU priority and puts the caller's priority back when it ends (the rotator runs it in its own process).
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
@@ -553,11 +561,11 @@ The sync runs at Idle CPU priority and puts the caller's priority back when it e
    transcripts routinely end at a tool_result even when they finished normally;
 3. **Died-pre-merge merge-pr / address-pr** — no merge-success marker AND an unclean tail
    (≥ 2 turns): the run crashed before merging, so it stays findable. Runs that finished
-   without merging by design (PR parked for the owner) end cleanly and are pruned.
+   without merging by design (PR parked for the owner) end cleanly and are not copied.
 
 Categories 2–3 are **OFF by default** — pass `-KeepResumable` to enable them (they stay
-CLI-resumable either way). When on, they only keep files not modified in the last 10 minutes
-(still-running sessions); no session is pruned within 10 minutes of its last write.
+CLI-resumable either way). When on, they only count files not modified in the last 10 minutes
+(still-running sessions).
 
 **Titles:** records get real titles — an existing well-titled record from another bucket is
 cloned (preserving the app's own AI titles); otherwise `/rename` customTitle → your first
@@ -577,7 +585,7 @@ points at the transcript's last assistant turn and copies its session state (`la
 `completedTurns`, `postTurnSummary*`, activity times) into every record pointing at an earlier
 turn. Originals are copied to `~/.claude-app-seats\.reconcile-backups\<timestamp>\`. Records
 whose uuid isn't in the transcript, sessions touched in the last 10 minutes, and records that changed on disk
-since the sync read them are left alone. A record that can't be written, added or pruned, or an account folder
+since the sync read them are left alone. A record that can't be written or added, or an account folder
 that can't be created, is skipped with a warning and retried next run; the rest of the sync carries on. A record
 that can't be read is skipped too, but warned about only when the archive/pin step runs and the record was
 known from the last run; otherwise silently. Every record the sync writes or
@@ -590,7 +598,7 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
 can't be written, changed on disk after the sync read it, or a record the sync knew from its last run can't be read, the sync warns (naming the file). The change still reaches that session's other records, but its saved state is held back, so
-the next run tries again from it. (No step writes the sync's older copy over a record changed on disk; a reconcile, retitle or prune skipped for that reason is just retried next run, without holding the session.) Until it succeeds, changing that session back to how it was (archiving or
+the next run tries again from it. (No step writes the sync's older copy over a record changed on disk; a reconcile or retitle skipped for that reason is just retried next run, without holding the session.) Until it succeeds, changing that session back to how it was (archiving or
 un-archiving, pinning or unpinning) may not stick (the same holds after a run whose state save failed); an unreadable record (including an empty one) holds its
 session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or
 deleted). One exception: a state file from before this version has no record-to-session map, so until its first
@@ -622,9 +630,9 @@ which nothing runs it from, so a clean `rotator-sync --check` does not mean the 
 restarted (or the workspace reopened), not in an already-open window.
 
 ```
-claude-sync-history                      # sync + prune the default project (default: recent 7d + substantive)
-claude-sync-history -DryRun              # preview what would add/prune, change nothing
-claude-sync-history -MaxAgeDays 14       # widen/narrow the recency window (0 = keep all ages)
+claude-sync-history                      # sync the default project (copy recent 7d + substantive; archive older once)
+claude-sync-history -DryRun              # preview what would be added/archived, change nothing
+claude-sync-history -MaxAgeDays 14       # widen/narrow the window (0 = copy all ages, no auto-archive)
 claude-sync-history -KeepResumable       # also keep interrupted / died-pre-merge runs
 claude-sync-history -MinAssistant 10     # stricter "substantive" bar
 claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
@@ -632,10 +640,10 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
 
 - Script: `C:\Users\User\.grok\bin\sync-app-history.ps1`
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
-- **Pruned records are MOVED, not deleted** (reversible) to
-  `~/.claude-app-seats\.pruned-history-backups\<timestamp>\` — restore by copying them back
-  into `%APPDATA%\Claude\claude-code-sessions`. Tune what's "substantive" via `-MinAssistant`
-  and the `$AutoSignature` list at the top of the script; `-NoPrune` adds without removing.
+- **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
+  `~/.claude-app-seats\.pruned-history-backups\<timestamp>\`. Tune what's "substantive" via
+  `-MinAssistant` and the `$AutoSignature` list at the top of the script; `-NoPrune` is still
+  accepted and does nothing.
 - Runs automatically after every `claude-account --switch`/`--rotate`, **and every 30 minutes
   when enabled** via the Windows scheduled task `Claude app-history sync` (hidden window, via
   `sync-app-history-hidden.vbs`; classification cached in
