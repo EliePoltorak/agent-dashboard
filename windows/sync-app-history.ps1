@@ -23,7 +23,7 @@
   and, if it belongs to -Cwd and its transcript is on this machine, is copied to the other seats like
   a kept one. Unpinning it releases it once a run spreads the
   unpin (a run that skips the flag step goes by the records as read: any still pinned keeps it).
-  A session whose transcript was written in the last 10 minutes (still running) is never pruned either.
+  A session whose transcript was written in the last 10 minutes is never pruned either (an open but idle one is not protected).
 
   1. SUBSTANTIVE work (the only category kept by default): first instruction is NOT an
      automated-dispatch signature (merge-pr / address-pr, review agents, ping tests, bare
@@ -316,7 +316,7 @@ foreach ($m in $transcripts) {
   catch { Write-Warning "could not read transcript $($m.FullName) ($($_.Exception.Message)); its session is left alone this run"; continue }
   [void]$allT.Add($m.BaseName)
   $settled = ($nowUtc - $m.LastWriteTimeUtc).TotalMinutes -gt 10   # ignore still-running sessions
-  if (-not $settled) { [void]$liveT.Add($m.BaseName) }       # a session still running is never pruned
+  if (-not $settled) { [void]$liveT.Add($m.BaseName) }       # written in the last 10 min: never pruned
   # RECENCY: keep only sessions whose last activity is within the window. Older ones are
   # pruned from the app view no matter how substantive (unless pinned, see pass 2) -- the transcript
   # is untouched and `claude --resume` still lists it. $MaxAgeDays <= 0 disables the age limit.
