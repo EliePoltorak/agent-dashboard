@@ -304,6 +304,7 @@ function Write-Record([string]$subDir, $file) {
 # ---- classify every transcript once ------------------------------------------
 $now = Get-Date
 $allT = New-Object System.Collections.Generic.HashSet[string]
+$liveT = New-Object System.Collections.Generic.HashSet[string]   # written in the last 10 min: never pruned
 $keep = New-Object System.Collections.Generic.HashSet[string]
 $nInterrupted = 0; $nUnfinishedMpr = 0; $nStale = 0
 foreach ($m in $transcripts) {
@@ -313,6 +314,7 @@ foreach ($m in $transcripts) {
   catch { Write-Warning "could not read transcript $($m.FullName) ($($_.Exception.Message)); its session is left alone this run"; continue }
   [void]$allT.Add($m.BaseName)
   $settled = ($now - $m.LastWriteTime).TotalMinutes -gt 10   # ignore still-running sessions
+  if (-not $settled) { [void]$liveT.Add($m.BaseName) }       # a session still running is never pruned
   # RECENCY: keep only sessions whose last activity is within the window. Older ones are
   # pruned from the app view no matter how substantive (unless pinned, see pass 2) -- the transcript
   # is untouched and `claude --resume` still lists it. $MaxAgeDays <= 0 disables the age limit.
@@ -657,7 +659,8 @@ $made = 0; $cloned = 0; $pruned = 0; $retitled = 0
 # A pinned session is never pruned (for any reason): pruning would drop the pin for good. "Pinned" is the records'
 # isStarred flag as this run resolved it ($pinResolved, set in a dry run too and for held sessions, so -DryRun
 # previews what a real run prunes), else as read; so an unpin on any seat that this run spreads releases it.
-# A pinned session is also copied to the seats that lack it, like a kept one.
+# A pinned session of -Cwd whose transcript is on this machine is also copied to the seats that lack it,
+# like a kept one. A session whose transcript was written in the last 10 minutes is never pruned either.
 $pinnedCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $pc = [string]$r.j.cliSessionId; if (-not $pc) { continue }
@@ -698,7 +701,7 @@ foreach ($acct in $accts) {
   foreach ($r in $recs) {
     $j = $r.j; $f = $r.file
     $cli = [string]$j.cliSessionId
-    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli)) {
+    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli) -and -not $liveT.Contains($cli)) {
       if (-not $NoPrune) {
         if (Test-ChangedSinceRead $r) { Write-Warning "$($f.FullName) left alone this run (changed on disk, or an earlier step could not write it); pruned next run if still due"; continue }
         if (-not $DryRun) {
