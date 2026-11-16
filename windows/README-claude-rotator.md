@@ -10,7 +10,7 @@ the auth token changes.
 
 ## Quick start
 
-**You need:** Windows 10 or 11; [PowerShell 7](https://aka.ms/powershell) (`pwsh`); Python 3.10+ with the `py` launcher;
+**You need:** Windows 10 or 11; [PowerShell 7.5 or later](https://aka.ms/powershell) (`pwsh`); Python 3.10+ with the `py` launcher;
 the Claude Code CLI (`claude`); Git, only for updates. Optional, each for its own tab or feature: the Claude desktop app,
 the Codex CLI, the Grok CLI, the Antigravity app (Gemini).
 
@@ -532,6 +532,11 @@ another account/seat — never appear in the app's history on their own.
 (reversibly). A session is kept only if it is **recent** (last activity within `-MaxAgeDays`,
 **default 7**; `0` = no age limit) AND matches a keep category. Older sessions are pruned no
 matter how substantive — the transcript is untouched and `claude --resume` still lists it.
+A session pinned on any seat is never pruned, for any reason; if it belongs to the synced workspace (`-Cwd`) and its transcript is on this machine, it is also copied to the seats that lack it. This follows the records' `isStarred`
+flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
+on any seat releases it once a run spreads the unpin. A session whose transcript was written in the
+last 10 minutes is never pruned either, in any category (a session open but idle for longer is not protected).
+The sync runs at Idle CPU priority and puts the caller's priority back when it ends (the rotator runs it in its own process).
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
    address-pr, review agents, ping tests, bare slash commands) and ≥ `-MinAssistant` assistant
@@ -545,8 +550,8 @@ matter how substantive — the transcript is untouched and `claude --resume` sti
    without merging by design (PR parked for the owner) end cleanly and are pruned.
 
 Categories 2–3 are **OFF by default** — pass `-KeepResumable` to enable them (they stay
-CLI-resumable either way). When on, they skip files modified in the last 10 minutes
-(still-running sessions).
+CLI-resumable either way). When on, they only keep files not modified in the last 10 minutes
+(still-running sessions); no session is pruned within 10 minutes of its last write.
 
 **Titles:** records get real titles — an existing well-titled record from another bucket is
 cloned (preserving the app's own AI titles); otherwise `/rename` customTitle → your first
@@ -565,27 +570,47 @@ record stopped at 09-29 while the transcript ran to 10-05). Every sync now finds
 points at the transcript's last assistant turn and copies its session state (`lastAssistantUuid`,
 `completedTurns`, `postTurnSummary*`, activity times) into every record pointing at an earlier
 turn. Originals are copied to `~/.claude-app-seats\.reconcile-backups\<timestamp>\`. Records
-whose uuid isn't in the transcript, and sessions touched in the last 10 minutes, are left alone.
+whose uuid isn't in the transcript, sessions touched in the last 10 minutes, and records that changed on disk
+since the sync read them are left alone. A record that can't be written, added or pruned, or an account folder
+that can't be created, is skipped with a warning and retried next run; the rest of the sync carries on. A record
+that can't be read is skipped too, but warned about only when the archive/pin step runs and the record was
+known from the last run; otherwise silently. Every record the sync writes or
+creates goes through a temp file and an atomic replace, so a killed run can't leave one half-written.
 
-**Archives, pins and groups follow you across seats (2026-11-03).** Each seat keeps its own record
-per session, with its own `isArchived` and `isStarred` (a sidebar pin). Every sync compares each
+**Archive and pin flags follow you across seats (2026-11-03).** Each seat keeps its own record
+per session, with its own `isArchived` and `isStarred` (the record's pin flag). Every sync compares each
 record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`): a changed flag
 (archive/un-archive, pin/unpin) is copied to every seat's record of that session, and "on" wins if two
-seats changed opposite ways. The first run, and any session never seen before, use "on for any seat →
-on for all". Originals backed up under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\`.
+seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
+used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
+can't be written, changed on disk after the sync read it, or a record the sync knew from its last run can't be read, the sync warns (naming the file). The change still reaches that session's other records, but its saved state is held back, so
+the next run tries again from it. (No step writes the sync's older copy over a record changed on disk; a reconcile, retitle or prune skipped for that reason is just retried next run, without holding the session.) Until it succeeds, changing that session back to how it was (archiving or
+un-archiving, pinning or unpinning) may not stick (the same holds after a run whose state save failed); an unreadable record (including an empty one) holds its
+session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or
+deleted). One exception: a state file from before this version has no record-to-session map, so until its first
+good save an unreadable record stops the whole save. The first run, and any session never seen before, use
+"on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
+are made while the app is open, the state file is unreadable, their session is held back, or the state file predates the record-to-session map and a record can't be read). The app also lists each folder's archived
+records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the
+app is closed** (checked before reading and again before writing; opening the app while the sync is writing can still undo a change) (the live app holds its records in memory and rewrites them), so in practice at a
+`claude-account --switch`/`--rotate`. A run while the app is open (the 30-minute task, when it is enabled, or a manual
+`claude-sync-history`) skips it; it says so only without `-Quiet`, and the scheduled task runs `-Quiet`. Originals are backed up
+under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 timestamp-named backup folders are kept). If the state
+file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
+as a first run; delete it to start again (the next run counts a flag set on any seat as set on all).
 
-The shared pin list and each seat's sidebar groups live in `%APPDATA%\Claude\claude_desktop_config.json`
-(`preferences.epitaxyPrefs`: `starred-local-code-sessions`, `dframe-group-scopes`,
-`dframe-code-sections`), keyed by each seat's own record ids. The sync rebuilds the pin list from the
-records' `isStarred` and copies every group, its sidebar section and its sessions to every seat
-(sessions matched across seats by `cliSessionId`). A group created, renamed or deleted, or a session
-moved in or out of one, on any seat since the last run (`.sidebar-state.json`) is applied to all.
-**This step runs only while the app is closed** (the live app rewrites that file from memory), so in
-practice at a `claude-account --switch`/`--rotate`; the 30-minute task skips it and says so. The file
-is backed up to `~/.claude-app-seats\.sidebar-sync-backups\<timestamp>\` before each write. A seat
-shows only the group members it has a record for, so sessions pruned from a seat's history (older
-than `-MaxAgeDays`) don't appear in its groups. This uses the app's undocumented internal format: an
-app update that renames these keys makes the step silently do nothing until it is updated.
+Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own
+storage, so a pin flag copied to a seat's record may not show as pinned there.
+Tracked in Hameishiv/claude-rotator#10 (issue #10).
+
+Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
+appears to set when you un-archive a session it archived by itself; that field is not copied, so on
+another seat the app may archive such a session again, and the next sync then spreads it.
+
+The script itself lives at `%USERPROFILE%\.grok\bin\sync-app-history.ps1` (the scheduled task and
+`claude-app-rotator.ps1` point there); `windows/sync-app-history.ps1` in this repo is its source: copy it
+there to deploy a change. `rotator-sync --pull` does not deploy it: it copies the file into the live rotator folder,
+which nothing runs it from, so a clean `rotator-sync --check` does not mean the running copy is current.
 
 **The app reads its index at launch** — after a sync, new records appear when the app is
 restarted (or the workspace reopened), not in an already-open window.
@@ -605,8 +630,8 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
   `~/.claude-app-seats\.pruned-history-backups\<timestamp>\` — restore by copying them back
   into `%APPDATA%\Claude\claude-code-sessions`. Tune what's "substantive" via `-MinAssistant`
   and the `$AutoSignature` list at the top of the script; `-NoPrune` adds without removing.
-- Runs automatically after every `claude-account --switch`/`--rotate`, **and every 30 minutes**
-  via the Windows scheduled task `Claude app-history sync` (hidden window, via
+- Runs automatically after every `claude-account --switch`/`--rotate`, **and every 30 minutes
+  when enabled** via the Windows scheduled task `Claude app-history sync` (hidden window, via
   `sync-app-history-hidden.vbs`; classification cached in
   `~/.claude-app-seats\.sync-classify-cache.json` so periodic runs only re-read changed
   transcripts). Manage: `Disable-ScheduledTask` / `Enable-ScheduledTask -TaskName 'Claude app-history sync'`.
@@ -624,7 +649,7 @@ assume data loss.
 
 ## Desktop-app install flavour (MSIX vs Squirrel) — why path matching is doubled
 
-The desktop app ships in two packaging formats, and **three scripts detect the app by
+The desktop app ships in two packaging formats, and **five scripts detect the app by
 executable path**, so the format matters to them:
 
 | | MSIX (packaged) | Squirrel (plain install) |
@@ -641,8 +666,8 @@ launch again. That is what made "the app won't open until I completely reinstall
 weeks. The machine now runs the Squirrel build only; **Workspace/Cowork is unavailable**
 until an `.msix` is obtained direct from Anthropic.
 
-Consequently these four now match **both** paths, so they keep working on either machine
-(the other machine may still have the MSIX):
+Consequently all five match **both** app paths, so they keep working with either install
+(MSIX or Squirrel); the fifth also lists the CLI's paths and counts every other `claude` process as the app:
 
 - `rotator-functions.ps1` → `claude-kill` — *spares* the app; without the `AnthropicClaude`
   exclusion it would kill the desktop app it exists to protect.
@@ -655,6 +680,11 @@ Consequently these four now match **both** paths, so they keep working on either
 - `claude-resume-sessions.ps1` — *excludes* the app from the interactive sessions it resumes.
   The app's main process carries no `--type=` switch, so with only the `WindowsApps` test it
   passed every other filter and would have been killed and "resumed" as if it were a CLI TUI.
+- `sync-app-history.ps1` → `Test-AppUp` — the opposite way round: every `claude` process counts as the app
+  (and so does any `.exe` run from the app's own folder, `AnthropicClaude\app-*` or `WindowsApps\Claude_*\app`,
+  whatever its name; helpers under `resources\` are not counted) unless it is at a known Claude Code CLI location (`~\.local\bin`, `%APPDATA%\Claude\claude-code\*`), so an
+  unfamiliar install path skips the archive/pin sync instead of writing under a running app. Update the CLI
+  locations there if the CLI moves.
 
 ## Notes
 
