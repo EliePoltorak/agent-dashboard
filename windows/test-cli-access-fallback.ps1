@@ -576,12 +576,24 @@ foreach ($case in @(
   }
 }
 
-# A rejected Fable window the proxy wrote to usage-cache.json is not a default-window cap
-Reset-Case
-Write-DefaultCache 'A' 10 @{ status = 'rejected'; oi7_stat = 'rejected'; oi7_reset = $nowS - 60 }
-Check 'a Fable-only rejection in usage-cache.json is not a default cap' (-not (Test-CapCached 'A' 'default'))
-Write-DefaultCache 'A' 10 @{ status = 'rejected' }
-Check 'an overall rejection naming no window is still a default cap' (Test-CapCached 'A' 'default')
+# A live reading that read the window decides, even when the cache write after it failed and the old cap is still on disk
+foreach ($case in @(@{ word = 'session'; fable = $false }, @{ word = 'Fable'; fable = $true })) {
+  Reset-Case
+  Clear-AppIdentity
+  foreach ($l in @('B','C','D','E','F')) { $script:plan[$l] = 'http401' }
+  $script:plan['A'] = 'ok'
+  if ($case.fable) { Write-FableCache 'A' $stale ([string]($nowS + 3600)); $cf = 'usage-cache-fable.json' }
+  else { Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = $nowS + 3600; status = 'rejected' }; $cf = 'usage-cache.json' }
+  $cfp = Join-Path (Join-Path $Root 'A') $cf
+  Set-ItemProperty -LiteralPath $cfp -Name IsReadOnly -Value $true
+  $rowA = @(Rank-Accounts $true $true) | Where-Object label -eq 'A'
+  $script:UnknownProbeMemo = @{}
+  $pick = Select-RotationTarget -Bar 90
+  $pickL = if ($pick) { $pick.label } else { '(none)' }
+  Set-ItemProperty -LiteralPath $cfp -Name IsReadOnly -Value $false
+  Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: still ranked usable" ($rowA -and [bool]$rowA.usable) "why=$($rowA.why)"
+  Check "a 2xx $($case.word) reading over a cached cap it could not overwrite: still selected" ($pickL -eq 'A') $pickL
+}
 
 # --- quota 429 is not an access refusal ---
 Reset-Case
