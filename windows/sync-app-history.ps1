@@ -20,7 +20,8 @@
   AND match a keep category below. Older sessions are pruned from the app view no matter
   how substantive -- the transcript is never touched and `claude --resume` still lists it.
   Exception: a session whose pin flag (isStarred), as this run resolves it, is on is never pruned,
-  and is copied to the other seats like a kept one. Unpinning it releases it once a run spreads the
+  and, if it belongs to -Cwd and its transcript is on this machine, is copied to the other seats like
+  a kept one. Unpinning it releases it once a run spreads the
   unpin (a run that skips the flag step goes by the records as read: any still pinned keeps it).
 
   1. SUBSTANTIVE work (the only category kept by default): first instruction is NOT an
@@ -124,8 +125,11 @@ $enc = $Cwd -creplace '[^A-Za-z0-9]', '-'
 $projRoot = Join-Path $env:USERPROFILE '.claude\projects'
 $projDir = Join-Path $projRoot $enc
 if ($enc.Length -gt 200) {
-  $cand = @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($enc.Substring(0, 200) + '-', [StringComparison]::Ordinal) })
+  # The hash can't be recomputed here, so a single folder with that prefix is taken as this one; with
+  # more than one the run cannot tell them apart and stops. Case-insensitive, as the filesystem is.
+  $cand = @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($enc.Substring(0, 200) + '-', [StringComparison]::OrdinalIgnoreCase) })
   if ($cand.Count -eq 1) { $projDir = $cand[0].FullName }
+  elseif ($cand.Count -gt 1) { if (-not $Quiet) { "no transcripts for ${Cwd}: $($cand.Count) project folders share its 200-character prefix; can't tell which is this one" }; return }
 }
 if (-not (Test-Path -LiteralPath $projDir)) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
 $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
@@ -220,6 +224,7 @@ function Get-Class($file) {
   $hit = $cache[$file.BaseName]
   if ($hit -and $hit.k -eq $key) { return $hit }
   $raw = Get-Content -LiteralPath $file.FullName -Raw
+  if ($null -eq $raw) { $raw = '' }   # an empty transcript is readable: 0 turns, not kept
   $fi = Get-FirstInstruction $raw 40
   $entry = [pscustomobject]@{
     k      = $key

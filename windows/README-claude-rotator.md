@@ -532,7 +532,7 @@ another account/seat — never appear in the app's history on their own.
 (reversibly). A session is kept only if it is **recent** (last activity within `-MaxAgeDays`,
 **default 7**; `0` = no age limit) AND matches a keep category. Older sessions are pruned no
 matter how substantive — the transcript is untouched and `claude --resume` still lists it.
-A session pinned on any seat is never pruned, for any reason, and is copied to the seats that lack it. This follows the records' `isStarred`
+A session pinned on any seat is never pruned, for any reason; if it belongs to the synced workspace (`-Cwd`) and its transcript is on this machine, it is also copied to the seats that lack it. This follows the records' `isStarred`
 flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
 on any seat releases it once a run spreads the unpin.
 
