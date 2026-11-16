@@ -598,7 +598,7 @@ Sidebar groups and the sidebar's own pinned list are not synced: the app keeps t
 storage, so a pin flag copied to a seat's record may not show as pinned there.
 Tracked in Hameishiv/claude-rotator#10 (issue #10).
 
-Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
+A session pinned on any seat is never pruned by age, so its pin is not lost. Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
 appears to set when you un-archive a session it archived by itself; that field is not copied, so on
 another seat the app may archive such a session again, and the next sync then spreads it.
 
@@ -661,8 +661,8 @@ launch again. That is what made "the app won't open until I completely reinstall
 weeks. The machine now runs the Squirrel build only; **Workspace/Cowork is unavailable**
 until an `.msix` is obtained direct from Anthropic.
 
-Consequently the first four now match **both** paths, so they keep working on either machine
-(the other machine may still have the MSIX); the fifth lists the CLI's paths instead:
+Consequently the first four now match **both** paths, so they keep working with either install
+(MSIX or Squirrel); the fifth lists the CLI's paths instead:
 
 - `rotator-functions.ps1` → `claude-kill` — *spares* the app; without the `AnthropicClaude`
   exclusion it would kill the desktop app it exists to protect.

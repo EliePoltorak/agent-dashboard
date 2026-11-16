@@ -291,8 +291,11 @@ $allT = New-Object System.Collections.Generic.HashSet[string]
 $keep = New-Object System.Collections.Generic.HashSet[string]
 $nInterrupted = 0; $nUnfinishedMpr = 0; $nStale = 0
 foreach ($m in $transcripts) {
+  # A transcript that can't be read (deleted since it was listed, access denied) is left out entirely: its
+  # session is neither kept nor pruned this run, and is retried next run.
+  try { $c = Get-Class $m }
+  catch { Write-Warning "could not read transcript $($m.FullName) ($($_.Exception.Message)); its session is left alone this run"; continue }
   [void]$allT.Add($m.BaseName)
-  $c = Get-Class $m
   $settled = ($now - $m.LastWriteTime).TotalMinutes -gt 10   # ignore still-running sessions
   # RECENCY: keep only sessions whose last activity is within the window. Older ones are
   # pruned from the app view no matter how substantive -- the transcript is untouched and
@@ -633,6 +636,9 @@ if (-not $Quiet -and $reconciled -gt 0) { "$(if ($DryRun) { 'WOULD reconcile' } 
 
 # ---- pass 2: per account -- seed, prune, retitle, add -------------------------
 $made = 0; $cloned = 0; $pruned = 0; $retitled = 0
+# A session pinned on any seat is never pruned by age: pruning would drop the pin for good.
+$pinnedCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { if ($r.j.cliSessionId -and $r.j.isStarred -eq $true) { [void]$pinnedCli.Add([string]$r.j.cliSessionId) } } }
 foreach ($acct in $accts) {
   # primary sub for this workspace = the one holding the most of this cwd's records
   $bestSubName = $null; $bestCount = 0
@@ -667,7 +673,7 @@ foreach ($acct in $accts) {
   foreach ($r in $recs) {
     $j = $r.j; $f = $r.file
     $cli = [string]$j.cliSessionId
-    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli)) {
+    if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli)) {
       if (-not $NoPrune) {
         if (-not $DryRun) {
           $rel = $f.FullName.Substring($ccs.Length).TrimStart('\')
