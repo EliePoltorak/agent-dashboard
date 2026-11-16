@@ -532,6 +532,9 @@ another account/seat — never appear in the app's history on their own.
 (reversibly). A session is kept only if it is **recent** (last activity within `-MaxAgeDays`,
 **default 7**; `0` = no age limit) AND matches a keep category. Older sessions are pruned no
 matter how substantive — the transcript is untouched and `claude --resume` still lists it.
+A session pinned on any seat is never pruned, for any reason. This follows the records' `isStarred`
+flag, which the sync spreads to every seat, not the sidebar's own pin list (see below): unpinning it
+on any seat releases it.
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
    address-pr, review agents, ping tests, bare slash commands) and ≥ `-MinAssistant` assistant
@@ -598,7 +601,7 @@ Sidebar groups and the sidebar's own pinned list are not synced: the app keeps t
 storage, so a pin flag copied to a seat's record may not show as pinned there.
 Tracked in Hameishiv/claude-rotator#10 (issue #10).
 
-A session pinned on any seat is never pruned by age, so its pin is not lost. Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
+Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
 appears to set when you un-archive a session it archived by itself; that field is not copied, so on
 another seat the app may archive such a session again, and the next sync then spreads it.
 
