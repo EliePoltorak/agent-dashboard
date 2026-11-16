@@ -8,7 +8,7 @@
   does not stop the save; with the app running (-AssumeAppRunning) nothing is changed or saved and a record
   it creates is neutral; a state file without the record->session map stops the whole save on an unreadable
   record; a held session's new record is neutral and set by the next good run; a record truncated to 0
-  bytes counts as unreadable; a flag write in the same run as pass 1.5's reconcile does not stop the run;
+  bytes counts as unreadable; a leftover .sync-tmp is removed; a flag write in the same run as pass 1.5's reconcile does not stop the run;
   archived-sessions.idx follows archive and
   un-archive; idle run changes nothing; pin / unpin and archive / un-archive on one seat reach
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
@@ -65,6 +65,10 @@ check "synthetic session got records ($(@($R | Where-Object cli -eq $X).Count))"
 "--- run 2 (idle)"; $h = recHash; run
 check 'idle run changes no record file' ((recHash) -eq $h)
 check "idle run prints no 'set ' line, no error" (-not ($out -match '^set |rror|xception') -and $rc -eq 0)
+
+"--- a .sync-tmp left by a killed run is removed"
+$leftover = "$((Get-ChildItem $ccs -Recurse -Filter local_*.json | Select-Object -First 1).FullName).sync-tmp"; Set-Content $leftover 'x' -NoNewline; run
+check 'leftover .sync-tmp removed' (-not (Test-Path $leftover))
 
 # a real multi-seat session, nothing flagged, for the pin / archive tests
 $G = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Sort-Object Count -Descending | Select-Object -First 1

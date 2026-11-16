@@ -1,3 +1,5 @@
+#Requires -Version 7.5
+# (ConvertFrom-Json -DateKind needs 7.5; on an older pwsh every record would look unreadable)
 <#
   sync-app-history.ps1  --  make SUBSTANTIVE or UNFINISHED CLI / cross-account Claude Code
   sessions show up in the Claude Code DESKTOP APP's session history, and prune trivial ones.
@@ -111,12 +113,17 @@ while (-not $runLock) {
   try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
   catch [IO.IOException] {
     if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
-    if ((Get-Date) -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped (wait for it to finish before reopening the app)'; return }
+    if ((Get-Date) -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run is still writing session records: opening the app before it finishes can undo an archive or pin change.'; return }
     if (-not $lockSaid) { 'another history sync is running; waiting for it (up to 3 min)...'; $lockSaid = $true }
     Start-Sleep -Seconds 2
   }
 }
 try {
+# a run killed between writing a .sync-tmp and moving it into place leaves it in the app's index; the suffix is
+# only ours and the lock means no other run is mid-write, so any found now is a leftover
+if (-not $DryRun -and (Test-Path -LiteralPath $ccs)) {
+  Get-ChildItem -LiteralPath $ccs -Recurse -File -Filter '*.sync-tmp' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+}
 $backupRoot = Join-Path $env:USERPROFILE ".claude-app-seats\.pruned-history-backups\$stamp"
 $cachePath  = Join-Path $env:USERPROFILE '.claude-app-seats\.sync-classify-cache.json'
 $DateTitleRx = '^Session \d{4}-\d{2}-\d{2}'
@@ -418,9 +425,16 @@ $flagByCli = @{}
 # A record known last run that can't be read holds back its session the same way (see below).
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
-# records pass 1.4 found changed on disk since pass 1 read them: pass 1.5 and the pass 2 retitle must not
-# write their older in-memory copy over them either
+# Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
+# copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
+# newer one (the app writing as it starts or quits). A record found changed is skipped by all of them.
 $changedOnDisk = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+function Test-ChangedSinceRead($rec) {
+  if ($changedOnDisk.Contains($rec.file.FullName)) { return $true }
+  $d = Get-Item -LiteralPath $rec.file.FullName -ErrorAction SilentlyContinue
+  if ($d -and $d.LastWriteTimeUtc -eq $rec.file.LastWriteTimeUtc -and $d.Length -eq $rec.file.Length) { return $false }
+  [void]$changedOnDisk.Add($rec.file.FullName); return $true
+}
 $flagHeld = New-Object 'System.Collections.Generic.HashSet[string]'   # "flag|cli|key" of unreadable known records
 $flagWarned = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # warn once per record
 $flagPrevCli = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)   # key -> cliSessionId, last run
@@ -483,8 +497,7 @@ if (-not $flagSkip) {
         # is Stop). Warn, and keep this session's last baseline, so the next run tries again from it.
         try {
           # pass 1 read this a while ago; if the file changed since, don't write our older copy over it
-          $onDisk = Get-Item -LiteralPath $r.file.FullName
-          if ($onDisk.LastWriteTimeUtc -ne $r.file.LastWriteTimeUtc -or $onDisk.Length -ne $r.file.Length) { [void]$changedOnDisk.Add($r.file.FullName); throw 'it changed since it was read' }
+          if (Test-ChangedSinceRead $r) { throw 'it changed since it was read' }
           $dest = Join-Path (Join-Path $flagBackupRoot $stamp) $r.key
           if (-not (Test-Path -LiteralPath $dest)) {
             New-Item -ItemType Directory -Path (Split-Path $dest) -Force | Out-Null
@@ -556,7 +569,7 @@ foreach ($cli in @($byCli.Keys)) {
   foreach ($r in $rs) {
     $u = [string]$r.j.lastAssistantUuid
     if ($u -eq $tip -or -not $pos.ContainsKey($u)) { continue }
-    if ($changedOnDisk.Contains($r.file.FullName)) { continue }
+    if (Test-ChangedSinceRead $r) { Write-Warning "left $($r.file.FullName) alone: it changed since it was read (reconciled next run)"; continue }
     if (-not $DryRun) {
       $rel = $r.file.FullName.Substring($ccs.Length).TrimStart('\')
       $dest = Join-Path (Join-Path $env:USERPROFILE ".claude-app-seats\.reconcile-backups\$stamp") $rel
@@ -569,6 +582,7 @@ foreach ($cli in @($byCli.Keys)) {
         $r.j | Add-Member -NotePropertyName $f -NotePropertyValue $v -Force
       }
       ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath $r.file.FullName -Encoding UTF8 -NoNewline
+      $r.file = Get-Item -LiteralPath $r.file.FullName   # our own write: the retitle compares with this
     }
     $reconciled++
   }
@@ -626,7 +640,7 @@ foreach ($acct in $accts) {
     }
     if (-not $cli) { continue }
     [void]$present.Add($cli)
-    if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli) -and -not $changedOnDisk.Contains($f.FullName)) {
+    if (([string]$j.title -match $DateTitleRx) -and $keep.Contains($cli) -and $allT.Contains($cli) -and -not (Test-ChangedSinceRead $r)) {
       $bt = Get-TitleFor $cli
       if ($bt) {
         if (-not $DryRun) {
@@ -673,7 +687,8 @@ foreach ($acct in $accts) {
 # that aren't in the folder, or can't be read, are left as they are.
 if (-not $DryRun -and -not $flagSkip) {
   $idxChanged = 0
-  foreach ($dir in @(Get-ChildItem -LiteralPath $ccs -Directory | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory })) {
+  $idxDirs = @(); try { $idxDirs = @(Get-ChildItem -LiteralPath $ccs -Directory | ForEach-Object { Get-ChildItem -LiteralPath $_.FullName -Directory }) } catch { Write-Warning "could not list the session folders for archived-sessions.idx: $($_.Exception.Message)" }
+  foreach ($dir in $idxDirs) {
     $idxPath = Join-Path $dir.FullName 'archived-sessions.idx'
     try {
       $idx = $null
