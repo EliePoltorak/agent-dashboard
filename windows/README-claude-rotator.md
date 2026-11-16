@@ -582,7 +582,7 @@ record's flags with what it saw last run (`~/.claude-app-seats\.flag-state.json`
 seats changed opposite ways. A record the sync has not seen before (the app made it since, say on a newly
 used seat) counts as a change only if it is on, since a record the app creates starts off. If a record
 can't be written, changed on disk after the sync read it, or a record the sync knew from its last run can't be read, the sync warns (naming the file). The change still reaches that session's other records, but its saved state is held back, so
-the next run tries again from it. (No step writes the sync's older copy over a record changed on disk; a reconcile or retitle skipped for that reason is just retried next run, without holding the session.) Until it succeeds, changing that session back to how it was (archiving or
+the next run tries again from it. (No step writes the sync's older copy over a record changed on disk; a reconcile, retitle or prune skipped for that reason is just retried next run, without holding the session.) Until it succeeds, changing that session back to how it was (archiving or
 un-archiving, pinning or unpinning) may not stick (the same holds after a run whose state save failed); an unreadable record (including an empty one) holds its
 session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or
 deleted). One exception: a state file from before this version has no record-to-session map, so until its first
@@ -605,7 +605,7 @@ Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiv
 appears to set when you un-archive a session it archived by itself; that field is not copied, so on
 another seat the app may archive such a session again, and the next sync then spreads it.
 
-The script itself lives at `C:\Users\User\.grok\bin\sync-app-history.ps1` (the scheduled task and
+The script itself lives at `%USERPROFILE%\.grok\bin\sync-app-history.ps1` (the scheduled task and
 `claude-app-rotator.ps1` point there); `windows/sync-app-history.ps1` in this repo is its source: copy it
 there to deploy a change. `rotator-sync --pull` does not deploy it: it copies the file into the live rotator folder,
 which nothing runs it from, so a clean `rotator-sync --check` does not mean the running copy is current.

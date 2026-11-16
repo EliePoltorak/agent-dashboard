@@ -19,7 +19,8 @@
   A session must be RECENT (last activity within -MaxAgeDays, default 7; 0 = no limit)
   AND match a keep category below. Older sessions are pruned from the app view no matter
   how substantive -- the transcript is never touched and `claude --resume` still lists it.
-  Exception: a session whose record is pinned (isStarred) on any seat is never pruned.
+  Exception: a session whose pin flag (isStarred), as this run resolves it, is on is never pruned;
+  unpinning it on any seat releases it.
 
   1. SUBSTANTIVE work (the only category kept by default): first instruction is NOT an
      automated-dispatch signature (merge-pr / address-pr, review agents, ping tests, bare
@@ -116,7 +117,7 @@ while (-not $runLock) {
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock, so two runs never share a backup folder
 try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
-$enc = ($Cwd -replace '[:\\]', '-')
+$enc = $Cwd -replace '[^A-Za-z0-9]', '-'   # the CLI's project-folder name: every non-alphanumeric becomes '-'
 $projDir = Join-Path (Join-Path $env:USERPROFILE '.claude\projects') $enc
 if (-not (Test-Path -LiteralPath $projDir)) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
 $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
@@ -638,8 +639,9 @@ if (-not $Quiet -and $reconciled -gt 0) { "$(if ($DryRun) { 'WOULD reconcile' } 
 
 # ---- pass 2: per account -- seed, prune, retitle, add -------------------------
 $made = 0; $cloned = 0; $pruned = 0; $retitled = 0
-# A session pinned on any seat is never pruned (for any reason): pruning would drop the pin for good. It follows
-# the records' isStarred flag as this run resolved it ($flagWant, set in a dry run too), else as read.
+# A pinned session is never pruned (for any reason): pruning would drop the pin for good. "Pinned" is the records'
+# isStarred flag as this run resolved it ($flagWant, set in a dry run too), else as read; so an unpin on any seat
+# that this run spreads releases it.
 $pinnedCli = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $pc = [string]$r.j.cliSessionId; if (-not $pc) { continue }
@@ -681,8 +683,8 @@ foreach ($acct in $accts) {
     $j = $r.j; $f = $r.file
     $cli = [string]$j.cliSessionId
     if ($j.cwd -eq $Cwd -and $cli -and $allT.Contains($cli) -and -not $keep.Contains($cli) -and -not $pinnedCli.Contains($cli)) {
-      if (Test-ChangedSinceRead $r) { Write-Warning "$($f.FullName) changed since it was read; not pruned this run"; continue }
       if (-not $NoPrune) {
+        if (Test-ChangedSinceRead $r) { Write-Warning "$($f.FullName) left alone this run (changed on disk, or an earlier step could not write it); pruned next run if still due"; continue }
         if (-not $DryRun) {
           $rel = $f.FullName.Substring($ccs.Length).TrimStart('\')
           $dest = Join-Path $backupRoot $rel
