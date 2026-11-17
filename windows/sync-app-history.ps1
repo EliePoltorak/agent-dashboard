@@ -17,22 +17,19 @@
   ------------
   A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
   (default 7, UTC; 0 or less = off) is ARCHIVED on every seat. It is remembered in .flag-state.json (autoArchived:
-  session id -> value), so this sync does not archive it again for age. The value is one of three kinds:
-    <iso date>   the age rule archived it (it was archived on no seat before). If it is then resumed (its transcript
-                 written after that date, and recent), it is un-archived on every seat once and the entry is removed,
-                 so it is archived again when it goes stale. A revive that was held (a record write failed) or whose
-                 state save failed is finished by the next run (the entry is removed), not read as the user's un-archive.
-    kept <iso>   the user un-archived it (a change the sync sees, at any age and in any run, also with -MaxAgeDays 0 or
-                 another -Cwd), or a record the app marked autoArchiveExempt (the app appears to set it: inferred,
-                 issue #16). Never archived for age, never revived.
-    seen <iso>   it was already archived (by the user or the app) on some seat when it came due, so the age rule changed
-                 nothing; the sync archived its other records. Never archived again for age, never revived.
+  session id -> value), so this sync does not archive it again for age. The value is one of four kinds:
+    <iso date>   archived for age by this sync. If you resume it (transcript written after that date, and recent) it is
+                 un-archived once and archived again when stale.
+    kept <iso>   you un-archived it (a change the sync sees, at any age and in any run), or a record carries autoArchiveExempt
+                 (the app appears to set it: inferred, issue #16). Never archived for age again.
+    seen <iso>   it was already archived on some seat when it became due: left alone, never revived.
+    revive <iso> an un-archive the sync started and is finishing (a record write failed part way); the next run resolves it.
+  If a write or the state save fails, the sync errs toward leaving the session as it is (a failed state save after an
+  archive or revive may leave it recorded as seen or kept; both keep it as it is).
   Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
   file deleted) is not known.
   Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes,
-  or held back this run: a record known from the last run that can't be read (the session is not archived and
-  nothing about it is saved), or a record whose write fails (the session's other records are archived, it is not
-  remembered, and the failed record is retried next run). With a state file from before the record map (no 'cli'
+  or held back this run (a record that can't be read or written). With a state file from before the record map (no 'cli'
   map), any unreadable known record holds every session and nothing is saved. It runs in the flag step, so only
   while the app is closed; otherwise it waits for the next run. Records are never moved or deleted.
 
@@ -337,7 +334,7 @@ foreach ($m in $transcripts) {
   [void]$allT.Add($m.BaseName)
   $settled = ($nowUtc - $m.LastWriteTimeUtc).TotalMinutes -gt 10   # ignore still-running sessions
   # RECENCY: copy only sessions whose last activity is within the window. Older ones are archived
-  # once instead (pass 1.4). $MaxAgeDays <= 0 disables the age limit.
+  # instead (pass 1.4, AUTO-ARCHIVE in the header). $MaxAgeDays <= 0 disables the age limit.
   $recent  = ($MaxAgeDays -le 0) -or (($nowUtc - $m.LastWriteTimeUtc).TotalDays -le $MaxAgeDays)
   $substantive   = (-not $c.sig) -and ($c.asst -ge $MinAssistant)
   # Interrupted excludes automated dispatches: a dispatched agent's transcript simply ENDS
@@ -478,17 +475,14 @@ $flagByCli = @{}
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 # Sessions the age rule has handled (cliSessionId -> value), from .flag-state.json. A session is not archived for
-# age while it stays in here. The value is a plain ISO date (archived for age by this sync; REVIVED, and the entry removed,
-# when the session is resumed, so it can be archived again), "kept <iso>" (the user un-archived it; never archived for age,
-# never revived) or "seen <iso>" (already archived when due; never archived again for age, never revived). A state file
-# from before this map simply has none yet.
+# age while it stays in here. The four value kinds are listed in the header (AUTO-ARCHIVE): a plain ISO date, "kept <iso>",
+# "seen <iso>" and "revive <iso>". A state file from before this map simply has none yet.
 $autoArch = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
 if ($flagPrevAll -and -not $flagSkip -and $flagPrevAll['autoArchived'] -is [hashtable]) { foreach ($k in $flagPrevAll['autoArchived'].Keys) { $autoArch[$k] = $flagPrevAll['autoArchived'][$k] } }
-# An autoArchived value is the ISO date of the run that archived the session for age (it was archived on no seat before), "kept <iso>" for
-# a session the user un-archived (or the app marked autoArchiveExempt), or "seen <iso>" for one already archived when it came due.
-# Returns the date of the first kind (UTC), $null for the other two (they do not parse).
+# Returns the date of a plain-date entry (UTC), $null for kept / seen / revive entries.
 function Get-AutoArchDate($v) {
   if ($v -is [datetime]) { return $v.ToUniversalTime() }
+  if ([string]$v -match '^(kept|seen|revive) ') { return $null }
   $d = [datetime]::MinValue
   if ([datetime]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$d)) { return $d }
   return $null
@@ -566,43 +560,33 @@ if (-not $flagSkip) {
               elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
               else { [bool]($rs | Where-Object { $_.v }) }
       if (-not $flagWant.ContainsKey($cli)) { $flagWant[$cli] = @{ isArchived = $false; isStarred = $false } }
-      # AUTO-ARCHIVE: a -Cwd session whose transcript is here and older than $MaxAgeDays, not pinned, not held
-      # this run, and not remembered before. Setting $want lets the writes and the baseline below do the rest. What is
-      # remembered: a plain date if the age rule changed the answer ($want was off before the override), else "seen <date>"
-      # (already archived on some seat; no later resume revives it).
-      # Unless the user turned archive off: un-archived since last run (a changed record, and the answer is off), or a
-      # record the app marked autoArchiveExempt (the app appears to set it when you un-archive a session it archived;
-      # inferred, issue #16). Such a session is not archived; it is only remembered ("kept <date>"), so no later run
-      # archives it either. An un-archive seen on a session that is not old yet is remembered too (see $autoKeep). A
-      # session archived for age (a plain date) and resumed since is un-archived once (see REVIVE). Decided BEFORE $want is overridden.
-      $autoDue = $false; $autoKeep = $false; $autoRevive = $false
+      # AUTO-ARCHIVE (the four entry kinds are in the header): a -Cwd session whose transcript is here and older than
+      # $MaxAgeDays, not pinned, not held this run, and with no entry. Setting $want lets the writes and the baseline below do
+      # the rest; what is remembered is decided after the writes (below). Decided BEFORE $want is overridden:
+      # $autoKeep   an un-archive seen this run (a changed record, and the answer is off), at any age and in any run; or a record
+      #             the app marked autoArchiveExempt (inferred, issue #16). The session is only remembered ("kept"), never archived for age.
+      # $autoDue    old enough: archive it, or just remember it ("seen") if it was already archived on some seat.
+      # $autoRevive a plain-date entry resumed since and recent, no change this run, every record archived: un-archive it everywhere.
+      # $autoRevFin a "revive" entry left by a held revive: resolved by $want once the session is not held (see the save below).
+      $autoDue = $false; $autoKeep = $false; $autoRevive = $false; $autoRevFin = $false; $sessFlips = 0
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
       $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
       # An un-archive seen this run is remembered at ANY age, and in ANY run (also with -MaxAgeDays 0, another -Cwd, or no
       # transcript here: the baseline is saved for it either way, so a later run could not see it as a change), or the
-      # session would be archived once it grows old. (One already remembered as archived for age becomes a kept entry, so
-      # a resume later does not revive it.)
+      # session would be archived once it grows old. (A plain-date entry the user un-archived becomes a kept entry.)
       if ($userOffChange -and -not $flagFail -and -not $flagFailCli.Contains("isArchived|$cli") -and (-not $autoArch.ContainsKey($cli) -or (Get-AutoArchDate $autoArch[$cli]))) { $autoKeep = $true }
-      # ...unless it is a REVIVE that did not finish: a record write that failed (the session was held, so the
-      # plain date stayed), or a state save that failed, leaves some records un-archived against an all-archived baseline,
-      # which reads as the user's un-archive. A plain date, a transcript written after it and recent: the revive's own
-      # conditions apart from "no change" and "all archived". Finish it (forget the entry) instead of making it a kept entry.
-      if ($autoKeep -and $inScope -and $autoArch.ContainsKey($cli)) {
-        $archD = Get-AutoArchDate $autoArch[$cli]
-        $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
-        if ($archD -and $tw -and $tw -gt $archD -and ([DateTime]::UtcNow - $tw).TotalDays -le $MaxAgeDays) { $autoKeep = $false; $autoRevive = $true }
-      }
       if ($inScope -and -not $autoArch.ContainsKey($cli) -and
           -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli")) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
         $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
         if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = -not $want; $want = $true } }
       }
-      # REVIVE: a session this sync archived for age (a plain date in autoArch; never a kept or seen entry) that was written
-      # again since and is recent again, with no change this run and every record still archived, is un-archived on
-      # every seat; once that is written it is forgotten here, so it is archived again when it goes stale.
+      # REVIVE: a session this sync archived for age (a plain date in autoArch) that was written again since and is recent
+      # again, with no change this run and every record still archived, is un-archived on every seat; once every record is
+      # written the entry is forgotten, so it is archived again when it goes stale. If a write fails the entry becomes
+      # "revive <iso>" (below), so the next run does not read the sync's own writes as the user's un-archive.
       if ($inScope -and $autoArch.ContainsKey($cli) -and -not $changed.Count -and -not $flagFailCli.Contains("isArchived|$cli") -and -not @($rs | Where-Object { -not $_.v }).Count) {
         $archD = Get-AutoArchDate $autoArch[$cli]
         if ($archD) {
@@ -610,6 +594,7 @@ if (-not $flagSkip) {
           if ($tw -and $tw -gt $archD -and ([DateTime]::UtcNow - $tw).TotalDays -le $MaxAgeDays) { $autoRevive = $true; $want = $false }
         }
       }
+      if ($flag -eq 'isArchived' -and $autoArch.ContainsKey($cli) -and ([string]$autoArch[$cli]) -like 'revive *') { $autoRevFin = $true }   # in ANY run: $want is whatever the records say
       $flagWant[$cli][$flag] = $want
       foreach ($r in $rs) {
         if ($r.v -eq $want) { $next[$r.key] = $want; continue }
@@ -631,7 +616,7 @@ if (-not $flagSkip) {
           ($r.j | ConvertTo-Json -Compress -Depth 100) | Set-Content -LiteralPath "$($r.file.FullName).sync-tmp" -Encoding UTF8 -NoNewline
           [System.IO.File]::Move("$($r.file.FullName).sync-tmp", $r.file.FullName, $true)
           $r.file = Get-Item -LiteralPath $r.file.FullName   # our own write: the next flag compares with this, not with pass 1
-          $flipped++; $next[$r.key] = $want
+          $flipped++; $sessFlips++; $next[$r.key] = $want
         } catch {
           Remove-Item -LiteralPath "$($r.file.FullName).sync-tmp" -Force -ErrorAction SilentlyContinue   # don't leave it in the app's index
           # undo the in-memory change too: a later write of this record (its other flag, pass 1.5, the retitle) must
@@ -647,6 +632,14 @@ if (-not $flagSkip) {
         if ($autoDue) { if ($autoUserOff) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))"; if (-not $want) { $autoKept++ } } else { $autoArch[$cli] = if ($autoOff) { $nowUtc.ToString('o') } else { "seen $($nowUtc.ToString('o'))" }; $autoDone++; if ($autoOff) { $autoFlipped++ } } }
         elseif ($autoKeep) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))" }
         elseif ($autoRevive) { $autoArch.Remove($cli); $autoRevived++ }
+        elseif ($autoRevFin) { if ($want) { $autoArch[$cli] = "seen $($nowUtc.ToString('o'))" } else { $autoArch.Remove($cli); $autoRevived++ } }   # still archived: someone archived it again
+      }
+      # Held (a write failed) after at least one record was written: the next run reads the sync's own writes as a change, so
+      # say what they were. A revive becomes "revive <iso>"; an age archive stores its plain date (the failed record is then
+      # written through the normal change path). Nothing written: the baseline is held, nothing to say, store nothing.
+      elseif ($flag -eq 'isArchived' -and $sessFlips -gt 0) {
+        if ($autoRevive) { $autoArch[$cli] = "revive $($nowUtc.ToString('o'))" }
+        elseif ($autoDue -and -not $autoUserOff -and $autoOff) { $autoArch[$cli] = $nowUtc.ToString('o'); $autoDone++; $autoFlipped++ }
       }
     }
     $flagNextAll[$flag] = $next
