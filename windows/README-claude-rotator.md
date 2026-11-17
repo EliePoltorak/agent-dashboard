@@ -545,7 +545,7 @@ spreads to every seat, not the sidebar's own pin list (see below).
 and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat. It is then remembered in
 `.flag-state.json` (`autoArchived`, session id → value), so this sync will not archive it again for age while the entry stays. The value is one of four kinds:
 
-- a plain date: archived for age by this sync; if you resume it (its transcript written after that date, and recent) it is un-archived once, and archived again when it goes stale;
+- a plain date: archived for age by this sync; if its transcript is written again after that date and is recent (a resume, or a CLI process exiting after a long idle, which appends a few lines) it is un-archived once, and archived again when it goes stale;
 - `kept <date>`: you un-archived it (a change the sync sees, at any age and in any run, also with `-MaxAgeDays 0` or another `-Cwd`, when the entry is absent or a date), or a record carries `autoArchiveExempt` (the app appears to set it when you un-archive a session it archived; inferred, issue #16); never archived for age again;
 - `seen <date>`: it was already archived on some seat (by you or the app) when it became due; left alone, never revived;
 - `revive <date>`: an un-archive the sync started and is finishing (a record write failed); the next run that is not held resolves it: un-archived, the entry is removed (archived for age again when stale); archived again, it becomes `seen`.
@@ -648,7 +648,7 @@ restarted (or the workspace reopened), not in an already-open window.
 claude-sync-history                      # sync the default project (copy recent 7d + substantive; archive older)
 claude-sync-history -DryRun              # preview what would be added/archived, change nothing
 claude-sync-history -MaxAgeDays 14       # widen/narrow the window (0 = copy all ages, no auto-archive); also the archive age:
-                                         # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless you resume one: then it is revived)
+                                         # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
 claude-sync-history -KeepResumable       # also keep interrupted / died-pre-merge runs
 claude-sync-history -MinAssistant 10     # stricter "substantive" bar
 claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace

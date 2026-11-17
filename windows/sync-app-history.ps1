@@ -18,7 +18,8 @@
   A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
   (default 7, UTC; 0 or less = off) is ARCHIVED on every seat. It is remembered in .flag-state.json (autoArchived:
   session id -> value), so this sync does not archive it again for age while the entry stays. The value is one of four kinds:
-    <iso date>   archived for age by this sync. If you resume it (transcript written after that date, and recent) it is
+    <iso date>   archived for age by this sync. If its transcript is written again after that date and is recent (a resume, or a CLI
+                 process exiting after a long idle: it appends a few lines) it is
                  un-archived once and archived again when stale.
     kept <iso>   you un-archived it (a change the sync sees, at any age and in any run, when the entry is absent or a date), or a record carries autoArchiveExempt
                  (the app appears to set it: inferred, issue #16). Never archived for age again.
@@ -73,7 +74,7 @@
     pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older)
     pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl. how many sessions it would archive)
     pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
-                                                    # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless you resume one: then it is revived)
+                                                    # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
     pwsh -File sync-app-history.ps1 -MinAssistant 10
     pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
@@ -105,7 +106,7 @@
 param(
   [string]$Cwd = 'C:\Dev\hameishiv',
   [int]$MinAssistant = 6,
-  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it; later runs with the default do not un-archive them (unless you resume one: then it is revived)
+  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
   [switch]$DryRun,
   [switch]$NoPrune,           # no-op, kept so old invocations still work (records are never removed)
@@ -446,7 +447,7 @@ if ($appUp) {
   $flagSkip = $true
   if (-not $Quiet) {
     $why = if ($AssumeAppRunning) { '-AssumeAppRunning' } else { "$(@($script:appBlockers)[0])$(if (@($script:appBlockers).Count -gt 1) { " and $(@($script:appBlockers).Count - 1) more" })" }
-    "archive/pin flags not synced: the desktop app (or a claude process not at a known CLI path) is running ($why; they sync, and old sessions are auto-archived, at the next seat switch)"
+    "archive/pin flags not synced: the desktop app (or a claude process not at a known CLI path) is running ($why; they sync$(if ($MaxAgeDays -gt 0) { ', and old sessions are auto-archived,' }) at the next seat switch)"
   }
 } elseif (Test-Path -LiteralPath $flagStatePath) {
   # A present-but-unreadable state file is NOT a first run: a first run unions every flag, which
@@ -568,7 +569,7 @@ if (-not $flagSkip) {
       # $autoKeep   an un-archive seen this run (a changed record, and the answer is off), at any age and in any run; or a record
       #             the app marked autoArchiveExempt (inferred, issue #16). The session is only remembered ("kept"), never archived for age.
       # $autoDue    old enough: archive it, or just remember it ("seen") if it was already archived on some seat.
-      # $autoRevive a plain-date entry resumed since and recent, no change this run, every record archived: un-archive it everywhere.
+      # $autoRevive a plain-date entry whose transcript was written since and is recent, no change this run, every record archived: un-archive it everywhere.
       # $autoRevFin a "revive" entry left by a held revive: resolved by $want once the session is not held (see the save below).
       $autoDue = $false; $autoKeep = $false; $autoRevive = $false; $autoRevFin = $false; $sessFlips = 0
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
@@ -645,14 +646,14 @@ if (-not $flagSkip) {
       }
     }
     $flagNextAll[$flag] = $next
-    if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if ($flag -eq 'isArchived') { ' or for the age rule (see auto-archived below)' })$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
+    if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if ($flag -eq 'isArchived') { ' or for the age rule' })$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
   }
   # A session held back this run (a record failed), or every session when no state is saved, gets no resolved
   # flags for the records pass 2 creates: those are written neutral (off), which the next run doesn't count as
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, now remembered$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because resumed" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, now remembered$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because their transcript was written again" }))" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {

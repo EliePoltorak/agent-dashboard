@@ -433,7 +433,7 @@ touch $RV 0; run
 check 'revive: resumed: un-archived on every seat' (@(ofSession $RV | Where-Object arch).Count -eq 0)
 check "revive: resumed: removed from every folder's archived-sessions.idx" (@(ofSession $RV | Where-Object { inIdx $_ }).Count -eq 0)
 check 'revive: resumed: no longer remembered' (-not (autoDone $RV))
-check 'revive: says it un-archived one because resumed' ([bool]($out -match '\+1 un-archived because resumed'))
+check 'revive: says it un-archived one because its transcript was written again' ([bool]($out -match '\+1 un-archived because their transcript was written again'))
 run
 check 'revive: a further run leaves it un-archived' (@(ofSession $RV | Where-Object arch).Count -eq 0 -and -not (autoDone $RV))
 touch $RV 30; run
@@ -448,7 +448,7 @@ check 'held revive: remembered as a revive entry (not the plain date)' ((autoDon
 (Get-Item -LiteralPath $rhRec[1].f).IsReadOnly = $false; run
 check 'held revive, next run: un-archived on every seat' (@(ofSession $HR | Where-Object arch).Count -eq 0)
 check 'held revive, next run: finished (no longer remembered), not a kept entry' (-not (autoDone $HR))
-check 'held revive, next run: says it un-archived one because resumed' ([bool]($out -match '\+1 un-archived because resumed'))
+check 'held revive, next run: says it un-archived one because its transcript was written again' ([bool]($out -match '\+1 un-archived because their transcript was written again'))
 run
 check 'held revive: a further run leaves it un-archived and forgotten' (@(ofSession $HR | Where-Object arch).Count -eq 0 -and -not (autoDone $HR))
 
