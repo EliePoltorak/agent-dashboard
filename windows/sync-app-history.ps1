@@ -17,7 +17,7 @@
   ------------
   A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
   (default 7, UTC; 0 or less = off) is ARCHIVED on every seat. It is remembered in .flag-state.json (autoArchived:
-  session id -> value), so this sync does not archive it again for age. The value is one of four kinds:
+  session id -> value), so this sync does not archive it again for age while the entry stays. The value is one of four kinds:
     <iso date>   archived for age by this sync. If you resume it (transcript written after that date, and recent) it is
                  un-archived once and archived again when stale.
     kept <iso>   you un-archived it (a change the sync sees, at any age and in any run, when the entry is absent or a date), or a record carries autoArchiveExempt
@@ -25,8 +25,8 @@
     seen <iso>   it was already archived on some seat when it became due: left alone, never revived.
     revive <iso> an un-archive the sync started and is finishing (a record write failed part way); the next run that is not held
                  resolves it: un-archived -> entry removed (so it is archived for age again when stale); archived -> seen.
-  If a write or the state save fails, the sync errs toward leaving the session as it is (a failed state save after an
-  archive or revive may leave it recorded as seen or kept; both keep it as it is).
+  If the state save fails, the sync errs toward leaving the session as it is (after an archive or revive it may then
+  be recorded as seen or kept; both keep it as it is). A failed record write is finished on the next run (below).
   Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
   file deleted) is not known.
   Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes, one with a
@@ -652,7 +652,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, now remembered$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because resumed" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, now remembered$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because resumed" }))" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
