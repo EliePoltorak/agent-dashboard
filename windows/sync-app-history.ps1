@@ -2,7 +2,7 @@
 # (ConvertFrom-Json -DateKind needs 7.5; on an older pwsh every record would look unreadable)
 <#
   sync-app-history.ps1  --  make SUBSTANTIVE or UNFINISHED CLI / cross-account Claude Code
-  sessions show up in the Claude Code DESKTOP APP's session history, and archive old ones once.
+  sessions show up in the Claude Code DESKTOP APP's session history, and archive old ones.
 
   WHY THIS EXISTS
   ---------------
@@ -13,22 +13,28 @@
   account bucket (an account that never tracked the workspace is seeded with the shared
   workspace guid -- it is identical across accounts). It never removes a record.
 
-  AUTO-ARCHIVE (once per session)
-  -------------------------------
+  AUTO-ARCHIVE
+  ------------
   A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
-  (default 7, UTC; 0 or less = off) is ARCHIVED on every seat, once. It is remembered in
-  .flag-state.json (autoArchived: its date, or "kept <date>"), so this sync does not archive it again for age.
-  An un-archive the sync sees (a change since its last run, at any age), or a record the app marked
-  autoArchiveExempt (the app appears to set it: inferred, issue #16), is remembered as kept, and the session is
-  never archived for age. A session archived for age that is then resumed (its transcript written again, recent)
-  is un-archived on every seat once, and archived again when it goes stale; a kept one is never un-archived this
-  way. Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
+  (default 7, UTC; 0 or less = off) is ARCHIVED on every seat. It is remembered in .flag-state.json (autoArchived:
+  session id -> value), so this sync does not archive it again for age. The value is one of three kinds:
+    <iso date>   the age rule archived it (it was archived on no seat before). If it is then resumed (its transcript
+                 written after that date, and recent), it is un-archived on every seat once and the entry is removed,
+                 so it is archived again when it goes stale. A revive that was held (a record write failed) or whose
+                 state save failed is finished by the next run (the entry is removed), not read as the user's un-archive.
+    kept <iso>   the user un-archived it (a change the sync sees, at any age and in any run, also with -MaxAgeDays 0 or
+                 another -Cwd), or a record the app marked autoArchiveExempt (the app appears to set it: inferred,
+                 issue #16). Never archived for age, never revived.
+    seen <iso>   it was already archived (by the user or the app) on some seat when it came due, so the age rule changed
+                 nothing; the sync archived its other records. Never archived again for age, never revived.
+  Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
   file deleted) is not known.
   Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes,
-  or held back this run (a record known from the last run that can't be read, or a record whose write
-  fails; retried next run). With a state file from before the record map (no 'cli' map), any unreadable known
-  record holds every session and nothing is saved. It runs in the flag step, so only while the app is closed;
-  otherwise it waits for the next run. Records are never moved or deleted.
+  or held back this run: a record known from the last run that can't be read (the session is not archived and
+  nothing about it is saved), or a record whose write fails (the session's other records are archived, it is not
+  remembered, and the failed record is retried next run). With a state file from before the record map (no 'cli'
+  map), any unreadable known record holds every session and nothing is saved. It runs in the flag step, so only
+  while the app is closed; otherwise it waits for the next run. Records are never moved or deleted.
 
   WHAT IS COPIED to the seats that lack it
   ----------------------------------------
@@ -65,10 +71,10 @@
   better title can be derived.
 
   USAGE
-    pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older once)
+    pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older)
     pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl. how many sessions it would archive)
     pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
-                                                    # a smaller value archives the sessions older than it on every seat, once; later runs with the default do not un-archive them
+                                                    # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless you resume one: then it is revived)
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
     pwsh -File sync-app-history.ps1 -MinAssistant 10
     pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
@@ -100,7 +106,7 @@
 param(
   [string]$Cwd = 'C:\Dev\hameishiv',
   [int]$MinAssistant = 6,
-  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones once (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it, once; later runs with the default do not un-archive them
+  [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it; later runs with the default do not un-archive them (unless you resume one: then it is revived)
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
   [switch]$DryRun,
   [switch]$NoPrune,           # no-op, kept so old invocations still work (records are never removed)
@@ -429,7 +435,7 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # cliSessionId, whatever their cwd. Each folder's archived-sessions.idx is kept in step with its records
 # (after pass 2). The sidebar pin LIST and groups are NOT synced: the app keeps
 # them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
-# Old sessions are archived here too, once (AUTO-ARCHIVE in the header), so they get the same writes and baseline.
+# Old sessions are archived here too (AUTO-ARCHIVE in the header), so they get the same writes and baseline.
 # Runs only while the app is closed: the live app holds its records in memory and rewrites them,
 # so a flag we set under it would be lost and then read back as the user's own change ($appUp, above pass 1).
 $flagStatePath = Join-Path $env:USERPROFILE '.claude-app-seats\.flag-state.json'
@@ -471,12 +477,16 @@ $flagByCli = @{}
 # A record known last run that can't be read holds back its session the same way (see below).
 $flagFail = $false
 $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
-# Sessions archived once for age (cliSessionId -> ISO date), from .flag-state.json. One in here is never
-# auto-archived again, so an un-archive sticks. A state file from before this map simply has none yet.
+# Sessions the age rule has handled (cliSessionId -> value), from .flag-state.json. A session is not archived for
+# age while it stays in here. The value is a plain ISO date (archived for age by this sync; REVIVED, and the entry removed,
+# when the session is resumed, so it can be archived again), "kept <iso>" (the user un-archived it; never archived for age,
+# never revived) or "seen <iso>" (already archived when due; never archived again for age, never revived). A state file
+# from before this map simply has none yet.
 $autoArch = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
 if ($flagPrevAll -and -not $flagSkip -and $flagPrevAll['autoArchived'] -is [hashtable]) { foreach ($k in $flagPrevAll['autoArchived'].Keys) { $autoArch[$k] = $flagPrevAll['autoArchived'][$k] } }
-# An autoArchived value is the ISO date of the run that archived the session for age, or "kept <iso>" for a session the
-# user un-archived (or the app marked autoArchiveExempt). Returns the date of the first kind (UTC), $null for anything else.
+# An autoArchived value is the ISO date of the run that archived the session for age (it was archived on no seat before), "kept <iso>" for
+# a session the user un-archived (or the app marked autoArchiveExempt), or "seen <iso>" for one already archived when it came due.
+# Returns the date of the first kind (UTC), $null for the other two (they do not parse).
 function Get-AutoArchDate($v) {
   if ($v -is [datetime]) { return $v.ToUniversalTime() }
   $d = [datetime]::MinValue
@@ -556,13 +566,15 @@ if (-not $flagSkip) {
               elseif ($known.Count) { [bool]($known | Where-Object { $_.v }) }
               else { [bool]($rs | Where-Object { $_.v }) }
       if (-not $flagWant.ContainsKey($cli)) { $flagWant[$cli] = @{ isArchived = $false; isStarred = $false } }
-      # AUTO-ARCHIVE, once: a -Cwd session whose transcript is here and older than $MaxAgeDays, not pinned, not held
-      # this run, and not archived for age before. Setting $want lets the writes and the baseline below do the rest.
+      # AUTO-ARCHIVE: a -Cwd session whose transcript is here and older than $MaxAgeDays, not pinned, not held
+      # this run, and not remembered before. Setting $want lets the writes and the baseline below do the rest. What is
+      # remembered: a plain date if the age rule changed the answer ($want was off before the override), else "seen <date>"
+      # (already archived on some seat; no later resume revives it).
       # Unless the user turned archive off: un-archived since last run (a changed record, and the answer is off), or a
       # record the app marked autoArchiveExempt (the app appears to set it when you un-archive a session it archived;
       # inferred, issue #16). Such a session is not archived; it is only remembered ("kept <date>"), so no later run
       # archives it either. An un-archive seen on a session that is not old yet is remembered too (see $autoKeep). A
-      # session archived for age and resumed since is un-archived once (see REVIVE). Decided BEFORE $want is overridden.
+      # session archived for age (a plain date) and resumed since is un-archived once (see REVIVE). Decided BEFORE $want is overridden.
       $autoDue = $false; $autoKeep = $false; $autoRevive = $false
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
@@ -588,7 +600,7 @@ if (-not $flagSkip) {
         $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
         if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = -not $want; $want = $true } }
       }
-      # REVIVE: a session this sync archived for age (a plain date in autoArch, never a kept entry) that was written
+      # REVIVE: a session this sync archived for age (a plain date in autoArch; never a kept or seen entry) that was written
       # again since and is recent again, with no change this run and every record still archived, is un-archived on
       # every seat; once that is written it is forgotten here, so it is archived again when it goes stale.
       if ($inScope -and $autoArch.ContainsKey($cli) -and -not $changed.Count -and -not $flagFailCli.Contains("isArchived|$cli") -and -not @($rs | Where-Object { -not $_.v }).Count) {
@@ -645,7 +657,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago, once (+$($autoDone - $autoFlipped) already archived, now remembered so an un-archive sticks$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because resumed" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, now remembered$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because resumed" }))" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {

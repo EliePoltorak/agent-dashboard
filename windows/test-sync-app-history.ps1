@@ -14,14 +14,15 @@
   every seat; opposite changes in one run -> "on" wins; a corrupt state file -> warning, nothing changed, file
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
-  saved baseline. Auto-archive (once): an old session is archived on every seat and no record moves or
+  saved baseline. Auto-archive: an old session is archived on every seat and no record moves or
   disappears; an un-archive after that sticks; the app being open defers it; a pinned old session is not
   archived; a held (unreadable record) session is retried and not marked done; a state file without the
   autoArchived map loads, and a malformed one fails like the other maps; an old session the user
   un-archived since the last run, or with autoArchiveExempt on a record, is not archived but is remembered; a young
   session un-archived is remembered too, so it is not archived once old; a session archived for age and then resumed is
-  un-archived on every seat and archived again once stale, while a kept entry (user un-archived) is never revived; a session of
-  another cwd is left alone; a state file without the cli map plus an unreadable record auto-archives nothing.
+  un-archived on every seat and archived again once stale (a revive held by an unwritable record is finished next run), while a kept
+  entry (user un-archived) and a seen entry (already archived when it came due) are never revived; an un-archive seen in a
+  -MaxAgeDays 0 run is remembered too; a session of another cwd is left alone; a state file without the cli map plus an unreadable record auto-archives nothing.
   Copies the LIVE app session index into a fresh sandbox under C:\Dev\Temp and runs the sync there with
   %APPDATA% / %USERPROFILE% redirected, and -AssumeAppClosed (so the app-running check is skipped for the sandbox).
   The real files are only read. The sandbox is deleted on success and kept (path printed) on failure. Exit 1 on
@@ -324,7 +325,7 @@ if ($RX.Count -ge 1) {
   check 'fabricated records are in the saved baseline' (@($made | Where-Object { $st['isArchived'][(key $_.f)] -ne $true -or $st['isStarred'][(key $_.f)] -ne $true }).Count -eq 0)
 }
 
-"--- auto-archive: an old session is archived once on every seat; no record moves or disappears"
+"--- auto-archive: an old session is archived on every seat; no record moves or disappears"
 $O1 = mkOld; $paths = @((Get-ChildItem $ccs -Recurse -Filter local_*.json).FullName); run
 $S = ofSession $O1
 check "old session: archived on every seat ($($S.Count))" ($S.Count -ge 2 -and @($S | Where-Object { -not $_.arch }).Count -eq 0)
