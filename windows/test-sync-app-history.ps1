@@ -429,7 +429,12 @@ check 'seen: resumed: stays archived on every seat (a seen entry is never revive
 "--- a session archived for age and then resumed is un-archived on every seat, and archived again once stale"
 $RV = mkOld; run
 check 'revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV) -and -not ((autoVal $RV) -like 'kept *'))
-touch $RV 0; run
+touch $RV 0; $AV = mkOld; run '-DryRun'   # a revive and an age archive due in the same run: the summary line carries both
+check 'revive + age archive, dry run: exits 0, no error, says it would un-archive one' ($rc -eq 0 -and -not ($out -match 'rror|xception') -and [bool]($out -match '\+1 would be un-archived because their transcript was written again'))
+run
+check 'revive + age archive in one run: exits 0, no error' ($rc -eq 0 -and -not ($out -match 'rror|xception'))
+check 'revive + age archive in one run: the auto-archived line also reports the revive' ([bool]($out -match '^auto-archived 1 session.*\+1 un-archived because their transcript was written again'))
+check 'revive + age archive in one run: the other session is archived for age' (@(ofSession $AV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $AV))
 check 'revive: resumed: un-archived on every seat' (@(ofSession $RV | Where-Object arch).Count -eq 0)
 check "revive: resumed: removed from every folder's archived-sessions.idx" (@(ofSession $RV | Where-Object { inIdx $_ }).Count -eq 0)
 check 'revive: resumed: no longer remembered' (-not (autoDone $RV))
