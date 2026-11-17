@@ -554,7 +554,7 @@ If the state save fails, the sync errs toward leaving the session as it is (afte
 The app itself may still re-archive a session on another seat, and the sync then spreads that (issue #16). Not
 archived: a session pinned as the run resolves it, one written in the last 10 minutes, one with a record known from the last
 run that can't be read, or one whose pin write failed that run. If an archive write fails on one record, the other records are
-still archived, the date is stored, and the failed one is archived next run. With a state file from before the record map (no `cli` map), any unreadable known record holds
+still archived and the failed one is archived next run. With a state file from before the record map (no `cli` map), any unreadable known record holds
 every session and nothing is saved. `-MaxAgeDays 0` turns it off. It runs in the archive/pin step below, so only while the app is
 closed; a run with the app open leaves it for the next one. `-DryRun` says how many sessions it would
 archive. Limits: an un-archive the sync never saw as a change (made before this version first ran, or with the

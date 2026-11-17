@@ -31,7 +31,7 @@
   file deleted) is not known.
   Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes, one with a
   record known from the last run that can't be read, or one whose pin write failed this run. If an archive write fails on
-  one record, the other records are still archived, the date is stored, and the failed one is archived next run. With a state file from before the record map (no 'cli'
+  one record, the other records are still archived and the failed one is archived next run. With a state file from before the record map (no 'cli'
   map), any unreadable known record holds every session and nothing is saved. It runs in the flag step, so only
   while the app is closed; otherwise it waits for the next run. Records are never moved or deleted.
 
@@ -645,7 +645,7 @@ if (-not $flagSkip) {
       }
     }
     $flagNextAll[$flag] = $next
-    if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
+    if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if ($flag -eq 'isArchived') { ' or for the age rule (see auto-archived below)' })$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
   }
   # A session held back this run (a record failed), or every session when no state is saved, gets no resolved
   # flags for the records pass 2 creates: those are written neutral (off), which the next run doesn't count as
