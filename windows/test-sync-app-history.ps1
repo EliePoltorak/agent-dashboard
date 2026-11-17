@@ -15,13 +15,16 @@
   left as is; a missing ~\.claude-app-seats directory -> run succeeds and writes the state file; records the
   script creates (cloned from another seat, or fabricated from the transcript) carry the flags and are in the
   saved baseline. Auto-archive: an old session is archived on every seat and no record moves or
-  disappears; an un-archive after that sticks; the app being open defers it; a pinned old session is not
+  disappears; an un-archive after that is respected on later runs; the app being open defers it; a pinned old session is not
   archived; a held (unreadable record) session is retried and not marked done; a state file without the
   autoArchived map loads, and a malformed one fails like the other maps; an old session the user
   un-archived since the last run, or with autoArchiveExempt on a record, is not archived but is remembered; a young
   session un-archived is remembered too, so it is not archived once old; a session archived for age and then resumed is
-  un-archived on every seat and archived again once stale (a revive held by an unwritable record is finished next run), while a kept
-  entry (user un-archived) and a seen entry (already archived when it came due) are never revived; an un-archive seen in a
+  un-archived on every seat and archived again once stale, while a kept entry (user un-archived) and a seen entry (already
+  archived when it came due) are never revived; a plain-date session the user un-archived while resuming it becomes a kept entry;
+  a revive held by an unwritable record leaves a revive entry that the next run resolves; an age archive held by an unwritable
+  record after another record was written keeps its plain date (the failed record is written next run, the entry stays a date,
+  and a resume revives it); an un-archive seen in a
   -MaxAgeDays 0 run is remembered too; a session of another cwd is left alone; a state file without the cli map plus an unreadable record auto-archives nothing.
   Copies the LIVE app session index into a fresh sandbox under C:\Dev\Temp and runs the sync there with
   %APPDATA% / %USERPROFILE% redirected, and -AssumeAppClosed (so the app-running check is skipped for the sandbox).
@@ -30,7 +33,7 @@
     pwsh -File test-sync-app-history.ps1 [<path to sync-app-history.ps1>]
 #>
 $Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
-$sb = "C:\Dev\Temp\sync-app-history-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+$sb = "C:\Dev\Temp\sync-app-history-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID"   # per run: the pid keeps runs started in the same second apart
 $proj = "$sb\home\.claude\projects\C--Dev-hameishiv"
 New-Item -ItemType Directory "$sb\app\Claude", $proj, "$sb\home\.claude-app-seats" -Force | Out-Null
 Copy-Item "$env:APPDATA\Claude\claude-code-sessions" "$sb\app\Claude\" -Recurse -Force
@@ -436,16 +439,38 @@ check 'revive: a further run leaves it un-archived' (@(ofSession $RV | Where-Obj
 touch $RV 30; run
 check 'revive: stale again: archived once more on every seat' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV))
 
-"--- a revive that is held (one record can't be written) is finished next run, not turned into a kept entry"
+"--- a revive that is held (one record can't be written) leaves a revive entry; the next run finishes it"
 $HR = mkOld; run
-check 'held revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $HR | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $HR) -and (autoVal $HR) -notmatch '^(kept|seen) ')
+check 'held revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $HR | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $HR) -and (autoVal $HR) -notmatch '^(kept|seen|revive) ')
 $rhRec = @(ofSession $HR); touch $HR 0; (Get-Item -LiteralPath $rhRec[1].f).IsReadOnly = $true; run   # the resume revives it; seat 1's record can't be written
 check 'held revive: the other records are un-archived, the unwritable one is not' (@(ofSession $HR | Where-Object { $_.f -ne $rhRec[1].f -and $_.arch }).Count -eq 0 -and @(ofSession $HR | Where-Object { $_.f -eq $rhRec[1].f -and $_.arch }).Count -eq 1)
-check 'held revive: the plain date stays (the session is held)' ((autoDone $HR) -and (autoVal $HR) -notmatch '^(kept|seen) ')
+check 'held revive: remembered as a revive entry (not the plain date)' ((autoDone $HR) -and (autoVal $HR) -like 'revive *')
 (Get-Item -LiteralPath $rhRec[1].f).IsReadOnly = $false; run
 check 'held revive, next run: un-archived on every seat' (@(ofSession $HR | Where-Object arch).Count -eq 0)
 check 'held revive, next run: finished (no longer remembered), not a kept entry' (-not (autoDone $HR))
 check 'held revive, next run: says it un-archived one because resumed' ([bool]($out -match '\+1 un-archived because resumed'))
+run
+check 'held revive: a further run leaves it un-archived and forgotten' (@(ofSession $HR | Where-Object arch).Count -eq 0 -and -not (autoDone $HR))
+
+"--- a plain-date session the user un-archives while resuming it becomes a kept entry (no revive is inferred), and stays un-archived once stale"
+$UP = mkOld; run
+check 'user un-archive on resume: setup: archived on every seat, remembered as a plain date' (@(ofSession $UP | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $UP) -and (autoVal $UP) -notmatch '^(kept|seen|revive) ')
+touch $UP 0; setRec (ofSession $UP)[0].f 'isArchived' $false; run
+check 'user un-archive on resume: un-archived on every seat' (@(ofSession $UP | Where-Object arch).Count -eq 0)
+check 'user un-archive on resume: remembered as a kept entry' ((autoVal $UP) -like 'kept *')
+touch $UP 30; run
+check 'user un-archive on resume, then aged to 30 days: still un-archived on every seat' (@(ofSession $UP | Where-Object arch).Count -eq 0 -and (autoVal $UP) -like 'kept *')
+
+"--- an age archive that is held after one record was written keeps its plain date; the failed record is written next run; a resume revives it"
+$HA = mkOld; $haRec = @(ofSession $HA); (Get-Item -LiteralPath $haRec[1].f).IsReadOnly = $true; run   # seat 1's record can't be written
+check 'held age archive: warns' ([bool]($out -match 'could not set isArchived'))
+check 'held age archive: the other records are archived, the unwritable one is not' (@(ofSession $HA | Where-Object { $_.f -ne $haRec[1].f -and -not $_.arch }).Count -eq 0 -and @(ofSession $HA | Where-Object { $_.f -eq $haRec[1].f -and $_.arch }).Count -eq 0)
+check 'held age archive: remembered as a plain date' ((autoDone $HA) -and (autoVal $HA) -notmatch '^(kept|seen|revive) ')
+(Get-Item -LiteralPath $haRec[1].f).IsReadOnly = $false; run
+check 'held age archive, next run: archived on every seat' (@(ofSession $HA | Where-Object { -not $_.arch }).Count -eq 0)
+check 'held age archive, next run: still a plain date (not seen, not kept)' ((autoDone $HA) -and (autoVal $HA) -notmatch '^(kept|seen|revive) ')
+touch $HA 0; run
+check 'held age archive: resumed: un-archived on every seat (revived)' (@(ofSession $HA | Where-Object arch).Count -eq 0 -and -not (autoDone $HA))
 
 "--- an archive-for-age the user un-archived becomes a kept entry: archived by hand and resumed, it stays archived"
 setRec (ofSession $RV)[0].f 'isArchived' $false; run
