@@ -435,6 +435,17 @@ check 'revive: a further run leaves it un-archived' (@(ofSession $RV | Where-Obj
 touch $RV 30; run
 check 'revive: stale again: archived once more on every seat' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV))
 
+"--- a revive that is held (one record can't be written) is finished next run, not turned into a kept entry"
+$HR = mkOld; run
+check 'held revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $HR | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $HR) -and (autoVal $HR) -notmatch '^(kept|seen) ')
+$rhRec = @(ofSession $HR); touch $HR 0; (Get-Item -LiteralPath $rhRec[1].f).IsReadOnly = $true; run   # the resume revives it; seat 1's record can't be written
+check 'held revive: the other records are un-archived, the unwritable one is not' (@(ofSession $HR | Where-Object { $_.f -ne $rhRec[1].f -and $_.arch }).Count -eq 0 -and @(ofSession $HR | Where-Object { $_.f -eq $rhRec[1].f -and $_.arch }).Count -eq 1)
+check 'held revive: the plain date stays (the session is held)' ((autoDone $HR) -and (autoVal $HR) -notmatch '^(kept|seen) ')
+(Get-Item -LiteralPath $rhRec[1].f).IsReadOnly = $false; run
+check 'held revive, next run: un-archived on every seat' (@(ofSession $HR | Where-Object arch).Count -eq 0)
+check 'held revive, next run: finished (no longer remembered), not a kept entry' (-not (autoDone $HR))
+check 'held revive, next run: says it un-archived one because resumed' ([bool]($out -match '\+1 un-archived because resumed'))
+
 "--- an archive-for-age the user un-archived becomes a kept entry: archived by hand and resumed, it stays archived"
 setRec (ofSession $RV)[0].f 'isArchived' $false; run
 check 'kept after archive-for-age: un-archived on every seat, now a kept entry' (@(ofSession $RV | Where-Object arch).Count -eq 0 -and (autoVal $RV) -like 'kept *')

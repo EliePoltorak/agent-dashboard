@@ -573,6 +573,15 @@ if (-not $flagSkip) {
       # session would be archived once it grows old. (One already remembered as archived for age becomes a kept entry, so
       # a resume later does not revive it.)
       if ($userOffChange -and -not $flagFail -and -not $flagFailCli.Contains("isArchived|$cli") -and (-not $autoArch.ContainsKey($cli) -or (Get-AutoArchDate $autoArch[$cli]))) { $autoKeep = $true }
+      # ...unless it is a REVIVE that did not finish: a record write that failed (the session was held, so the
+      # plain date stayed), or a state save that failed, leaves some records un-archived against an all-archived baseline,
+      # which reads as the user's un-archive. A plain date, a transcript written after it and recent: the revive's own
+      # conditions apart from "no change" and "all archived". Finish it (forget the entry) instead of making it a kept entry.
+      if ($autoKeep -and $inScope -and $autoArch.ContainsKey($cli)) {
+        $archD = Get-AutoArchDate $autoArch[$cli]
+        $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
+        if ($archD -and $tw -and $tw -gt $archD -and ([DateTime]::UtcNow - $tw).TotalDays -le $MaxAgeDays) { $autoKeep = $false; $autoRevive = $true }
+      }
       if ($inScope -and -not $autoArch.ContainsKey($cli) -and
           -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli")) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
