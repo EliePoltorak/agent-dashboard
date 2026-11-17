@@ -566,10 +566,12 @@ if (-not $flagSkip) {
       # AUTO-ARCHIVE (the four entry kinds are in the header): a -Cwd session whose transcript is here and older than
       # $MaxAgeDays, not pinned, not held this run, and with no entry. Setting $want lets the writes and the baseline below do
       # the rest; what is remembered is decided after the writes (below). Decided BEFORE $want is overridden:
-      # $autoKeep   an un-archive seen this run (a changed record, and the answer is off), at any age and in any run; or a record
-      #             the app marked autoArchiveExempt (inferred, issue #16). The session is only remembered ("kept"), never archived for age.
+      # $autoKeep   an un-archive seen this run (a changed record, and the answer is off), at any age and in any run, when the entry
+      #             is absent or a date: remembered ("kept"), never archived for age. A record the app marked autoArchiveExempt
+      #             (inferred, issue #16) is handled through $autoUserOff when the session comes due (also "kept").
       # $autoDue    old enough: archive it, or just remember it ("seen") if it was already archived on some seat.
-      # $autoRevive a plain-date entry whose transcript was written since and is recent, no change this run, every record archived: un-archive it everywhere.
+      # $autoRevive a plain-date entry whose transcript was written since and is recent, no change this run, every KNOWN record
+      #             archived (a new un-archived copy pass 2 made meanwhile is not a change, so it does not block it): un-archive it everywhere.
       # $autoRevFin a "revive" entry left by a held revive: resolved by $want once the session is not held (see the save below).
       $autoDue = $false; $autoKeep = $false; $autoRevive = $false; $autoRevFin = $false; $sessFlips = 0
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
@@ -590,7 +592,7 @@ if (-not $flagSkip) {
       # again, with no change this run and every record still archived, is un-archived on every seat; once every record is
       # written the entry is forgotten, so it is archived again when it goes stale. If a write fails the entry becomes
       # "revive <iso>" (below), so the next run does not read the sync's own writes as the user's un-archive.
-      if ($inScope -and $autoArch.ContainsKey($cli) -and -not $changed.Count -and -not $flagFailCli.Contains("isArchived|$cli") -and -not @($rs | Where-Object { -not $_.v }).Count) {
+      if ($inScope -and $autoArch.ContainsKey($cli) -and -not $changed.Count -and -not $flagFailCli.Contains("isArchived|$cli") -and $known.Count -and -not @($known | Where-Object { -not $_.v }).Count) {
         $archD = Get-AutoArchDate $autoArch[$cli]
         if ($archD) {
           $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
@@ -653,7 +655,8 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, now remembered$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because their transcript was written again" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or (($autoRevived -gt 0 -or $DryRun) -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, $(if ($DryRun) { 'would be remembered' } else { 'now remembered' })$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because their transcript was written again" }))" }
+  elseif (-not $Quiet -and $autoRevived -gt 0) { "$(if ($DryRun) { 'WOULD un-archive' } else { 'un-archived' }) $autoRevived session(s) archived for age, because their transcript was written again" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
