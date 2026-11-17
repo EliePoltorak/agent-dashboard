@@ -543,17 +543,22 @@ spreads to every seat, not the sidebar's own pin list (see below).
 
 **Old sessions are archived once (2026-11-16).** A `-Cwd` session whose transcript is on this machine
 and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat, once. It is then
-remembered in `.flag-state.json` (`autoArchived`, session id → date), so this sync will not archive it
-again for age. If you un-archive it (or the app marks a record `autoArchiveExempt`) before the sync would
-archive it, it is left as you set it and remembered the same way. The app itself may still re-archive it on
-another seat, and the sync then spreads that (issue #16). Not archived: a session pinned as the run
-resolves it, one written in the last 10 minutes, or one held back that run (a record known from the last
-run that can't be read, or a record whose write fails; it is retried next run and not remembered until
-then). `-MaxAgeDays 0` turns it off. It runs in the archive/pin step below, so only while the app is
+remembered in `.flag-state.json` (`autoArchived`, session id → date, or `kept <date>`), so this sync will not
+archive it again for age. An un-archive the sync sees (as a change since its last run, at any age), or a record
+carrying `autoArchiveExempt` (the app appears to set it when you un-archive a session it archived; inferred, issue
+#16), is remembered as kept and the session is never archived for age. A session archived for age that you then
+resume (its transcript written again, recent) is un-archived on every seat once, and archived again once it goes
+stale; a kept one is never un-archived this way. The app itself may still re-archive it on another seat, and the
+sync then spreads that (issue #16). Not archived: a session pinned as the run resolves it, one written in the last
+10 minutes, or one held back that run (a record known from the last run that can't be read, or a record whose
+write fails; it is retried next run and not remembered until then; with a state file from before the record map
+(no `cli` map), any unreadable known record holds every session and nothing is saved). `-MaxAgeDays 0` turns it off. It runs in the archive/pin step below, so only while the app is
 closed; a run with the app open leaves it for the next one. `-DryRun` says how many sessions it would
-archive. Limits: if the state file is deleted, the next run archives every old session once more,
-un-archived ones included. An older copy of the script (from before this change) drops the `autoArchived`
-map when it saves and prunes again, so do not roll back the deployed copy without expecting a re-archive.
+archive. Limits: an un-archive the sync never saw as a change (made before this version first ran, or with the
+state file deleted) is not known, so if the state file is deleted the next run archives every old session once
+more, un-archived ones included. Rolling back to an older copy of the script restores pruning (records are moved
+out of the index again) and forgets `autoArchived`; the next deploy of this version then archives every old
+session once more.
 The sync runs at Idle CPU priority and puts the caller's priority back when it ends (the rotator runs it in its own process).
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
@@ -606,7 +611,7 @@ the next run tries again from it. (No step writes the sync's older copy over a r
 un-archiving, pinning or unpinning) may not stick (the same holds after a run whose state save failed); an unreadable record (including an empty one) holds its
 session back until it can be read again (a file only in use clears by itself; a corrupt one must be restored or
 deleted). One exception: a state file from before this version has no record-to-session map, so until its first
-good save an unreadable record stops the whole save. The first run, and any session never seen before, use
+good save any unreadable record it knew holds every session back and nothing is saved. The first run, and any session never seen before, use
 "on for any seat → on for all"; records the sync itself creates carry the session's flags (or none, if they
 are made while the app is open, the state file is unreadable, their session is held back, or the state file predates the record-to-session map and a record can't be read). The app also lists each folder's archived
 records in `archived-sessions.idx`; the sync keeps that list in step with the records. **This step runs only while the

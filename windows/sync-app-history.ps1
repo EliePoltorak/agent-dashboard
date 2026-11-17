@@ -17,12 +17,18 @@
   -------------------------------
   A -Cwd session whose transcript is on this machine and was last written more than -MaxAgeDays ago
   (default 7, UTC; 0 or less = off) is ARCHIVED on every seat, once. It is remembered in
-  .flag-state.json (autoArchived), so this sync does not archive it again for age. Un-archive it, or
-  let the app mark it autoArchiveExempt, before that run and it is left as you set it (and remembered).
+  .flag-state.json (autoArchived: its date, or "kept <date>"), so this sync does not archive it again for age.
+  An un-archive the sync sees (a change since its last run, at any age), or a record the app marked
+  autoArchiveExempt (the app appears to set it: inferred, issue #16), is remembered as kept, and the session is
+  never archived for age. A session archived for age that is then resumed (its transcript written again, recent)
+  is un-archived on every seat once, and archived again when it goes stale; a kept one is never un-archived this
+  way. Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
+  file deleted) is not known.
   Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes,
   or held back this run (a record known from the last run that can't be read, or a record whose write
-  fails; retried next run). It runs in the flag step, so only while the app is closed; otherwise it
-  waits for the next run. Records are never moved or deleted.
+  fails; retried next run). With a state file from before the record map (no 'cli' map), any unreadable known
+  record holds every session and nothing is saved. It runs in the flag step, so only while the app is closed;
+  otherwise it waits for the next run. Records are never moved or deleted.
 
   WHAT IS COPIED to the seats that lack it
   ----------------------------------------
@@ -77,7 +83,9 @@
 
   SAFETY
   - No record is moved or deleted (pruning was removed 2026-11-16; older runs moved records to
-    ~/.claude-app-seats\.pruned-history-backups\). Transcripts are never touched.
+    ~/.claude-app-seats\.pruned-history-backups\). Transcripts are never touched. Rolling back to an older copy
+    restores pruning (records are moved out of the index again) and forgets autoArchived; the next deploy of this
+    version then archives every old session once more.
   - Only sessions whose transcript we can actually read are auto-archived; records with no local
     transcript are left alone.
   - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
@@ -416,7 +424,7 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # differs from that is the one you changed, and its value goes to every seat's record of the
 # session (true wins if two seats changed opposite ways). A record not seen last run counts as changed
 # only if it is on. A session with a record that can't be written or read keeps its last baseline
-# (below; with a state file that predates its record->session map, an unreadable record stops the save). First run, or a session no record was
+# (below; with a state file that predates its record->session map, an unreadable record holds every session and nothing is saved). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
 # cliSessionId, whatever their cwd. Each folder's archived-sessions.idx is kept in step with its records
 # (after pass 2). The sidebar pin LIST and groups are NOT synced: the app keeps
@@ -551,8 +559,10 @@ if (-not $flagSkip) {
       # AUTO-ARCHIVE, once: a -Cwd session whose transcript is here and older than $MaxAgeDays, not pinned, not held
       # this run, and not archived for age before. Setting $want lets the writes and the baseline below do the rest.
       # Unless the user turned archive off: un-archived since last run (a changed record, and the answer is off), or a
-      # record the app marked autoArchiveExempt (it sets that when you un-archive a session it archived). Such a session
-      # is not archived; it is only remembered, so no later run archives it either. Decided BEFORE $want is overridden.
+      # record the app marked autoArchiveExempt (the app appears to set it when you un-archive a session it archived;
+      # inferred, issue #16). Such a session is not archived; it is only remembered ("kept <date>"), so no later run
+      # archives it either. An un-archive seen on a session that is not old yet is remembered too (see $autoKeep). A
+      # session archived for age and resumed since is un-archived once (see REVIVE). Decided BEFORE $want is overridden.
       $autoDue = $false; $autoKeep = $false; $autoRevive = $false
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
