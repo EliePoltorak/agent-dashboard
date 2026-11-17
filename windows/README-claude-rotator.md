@@ -545,7 +545,7 @@ spreads to every seat, not the sidebar's own pin list (see below).
 and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat. It is then remembered in
 `.flag-state.json` (`autoArchived`, session id → value), so this sync will not archive it again for age while the entry stays. The value is one of four kinds:
 
-- a plain date: archived for age by this sync; if its transcript is written again after that date and is recent (a resume, or a CLI process exiting after a long idle, which appends a few lines) it is un-archived once, and archived again when it goes stale;
+- a plain date: archived for age by this sync; if its transcript is written again after that date and is recent (a resume, or a CLI process exiting after a long idle, which appends a few lines) it is un-archived once, and archived again when it goes stale (if its records were all removed and recreated meanwhile, it simply stays un-archived);
 - `kept <date>`: you un-archived it (a change the sync sees, at any age and in any run, also with `-MaxAgeDays 0` or another `-Cwd`, when the entry is absent or a date), or a record carries `autoArchiveExempt` (the app appears to set it when you un-archive a session it archived; inferred, issue #16); never archived for age again;
 - `seen <date>`: it was already archived on some seat (by you or the app) when it became due; left alone, never revived;
 - `revive <date>`: an un-archive the sync started and is finishing (a record write failed); the next run that is not held resolves it: un-archived, the entry is removed (archived for age again when stale); archived again, it becomes `seen`.

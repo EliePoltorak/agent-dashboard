@@ -20,7 +20,8 @@
   session id -> value), so this sync does not archive it again for age while the entry stays. The value is one of four kinds:
     <iso date>   archived for age by this sync. If its transcript is written again after that date and is recent (a resume, or a CLI
                  process exiting after a long idle: it appends a few lines) it is
-                 un-archived once and archived again when stale.
+                 un-archived once and archived again when stale (unless its records were all
+                 removed and recreated meanwhile: then it simply stays un-archived).
     kept <iso>   you un-archived it (a change the sync sees, at any age and in any run, when the entry is absent or a date), or a record carries autoArchiveExempt
                  (the app appears to set it: inferred, issue #16). Never archived for age again.
     seen <iso>   it was already archived on some seat when it became due: left alone, never revived.
@@ -656,7 +657,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or (($autoRevived -gt 0 -or $DryRun) -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, $(if ($DryRun) { 'would be remembered' } else { 'now remembered' })$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because their transcript was written again" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, $(if ($DryRun) { 'would be remembered' } else { 'now remembered' })$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because their transcript was written again" }))" }
   elseif (-not $Quiet -and $autoRevived -gt 0) { "$(if ($DryRun) { 'WOULD un-archive' } else { 'un-archived' }) $autoRevived session(s) archived for age, because their transcript was written again" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
