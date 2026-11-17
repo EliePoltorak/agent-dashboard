@@ -577,7 +577,7 @@ if (-not $flagSkip) {
           -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli")) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
         $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
-        if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = [bool]($rs | Where-Object { -not $_.v }); $want = $true } }
+        if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = -not $want; $want = $true } }
       }
       # REVIVE: a session this sync archived for age (a plain date in autoArch, never a kept entry) that was written
       # again since and is recent again, with no change this run and every record still archived, is un-archived on
@@ -623,7 +623,7 @@ if (-not $flagSkip) {
       # remembered only when the session is not held back this run (no failed write, no record known from the last
       # run that can't be read); a held session is retried next run
       if (-not $flagFailCli.Contains("isArchived|$cli")) {
-        if ($autoDue) { if ($autoUserOff) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))"; if (-not $want) { $autoKept++ } } else { $autoArch[$cli] = $nowUtc.ToString('o'); $autoDone++; if ($autoOff) { $autoFlipped++ } } }
+        if ($autoDue) { if ($autoUserOff) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))"; if (-not $want) { $autoKept++ } } else { $autoArch[$cli] = if ($autoOff) { $nowUtc.ToString('o') } else { "seen $($nowUtc.ToString('o'))" }; $autoDone++; if ($autoOff) { $autoFlipped++ } } }
         elseif ($autoKeep) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))" }
         elseif ($autoRevive) { $autoArch.Remove($cli); $autoRevived++ }
       }

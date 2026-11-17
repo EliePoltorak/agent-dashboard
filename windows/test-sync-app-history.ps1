@@ -414,6 +414,14 @@ touch $YA 30; run
 check 'out of scope, then aged to 30 days, default run: still un-archived on every seat' (@(ofSession $YA | Where-Object arch).Count -eq 0)
 check 'out of scope, then aged: still a kept entry' ((autoVal $YA) -like 'kept *')
 
+"--- a session that was already archived (by hand) when it came due is remembered as seen, and a resume does not revive it"
+$YB = mkOld 1; foreach ($r in (ofSession $YB)) { setRec $r.f 'isArchived' $true }; run   # archived on every seat by hand, saved state; young, so not due
+touch $YB 30; run
+check 'seen: still archived on every seat after it came due' (@(ofSession $YB | Where-Object { -not $_.arch }).Count -eq 0)
+check 'seen: remembered as a seen entry (not a plain date)' ((autoVal $YB) -like 'seen *')
+touch $YB 0; run
+check 'seen: resumed: stays archived on every seat (a seen entry is never revived)' (@(ofSession $YB | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $YB) -like 'seen *')
+
 "--- a session archived for age and then resumed is un-archived on every seat, and archived again once stale"
 $RV = mkOld; run
 check 'revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV) -and -not ((autoVal $RV) -like 'kept *'))
