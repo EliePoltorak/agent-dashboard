@@ -543,20 +543,17 @@ spreads to every seat, not the sidebar's own pin list (see below).
 
 **Old sessions are archived (2026-11-16).** A `-Cwd` session whose transcript is on this machine
 and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat. It is then remembered in
-`.flag-state.json` (`autoArchived`, session id → value), so this sync will not archive it again for age while the
-entry stays. The value is one of three kinds. A plain date: the age rule archived it (it was archived on no seat
-before); if you then resume it (its transcript written after that date, and recent) it is un-archived on every
-seat once and the entry is removed, so it is archived again once it goes stale (a revive that was held, or whose
-state save failed, is finished by the next run). `kept <date>`: you un-archived it (a change the sync sees, at any
-age and in any run, also with `-MaxAgeDays 0` or another `-Cwd`), or a record carries `autoArchiveExempt` (the app
-appears to set it when you un-archive a session it archived; inferred, issue #16); it is never archived for age and
-never revived. `seen <date>`: it was already archived on some seat (by you or the app) when it came due, so the age
-rule changed nothing and the sync archived its other records; it is never archived again for age and never revived.
+`.flag-state.json` (`autoArchived`, session id → value), so this sync will not archive it again for age. The value is one of four kinds:
+
+- a plain date: archived for age by this sync; if you resume it (its transcript written after that date, and recent) it is un-archived once, and archived again when it goes stale;
+- `kept <date>`: you un-archived it (a change the sync sees, at any age and in any run, also with `-MaxAgeDays 0` or another `-Cwd`), or a record carries `autoArchiveExempt` (the app appears to set it when you un-archive a session it archived; inferred, issue #16); never archived for age again;
+- `seen <date>`: it was already archived on some seat (by you or the app) when it became due; left alone, never revived;
+- `revive <date>`: an un-archive the sync started and is finishing; the next run resolves it.
+
+If a write or the state save fails, the sync errs toward leaving the session as it is (a failed state save after an archive or revive may leave it recorded as `seen` or `kept`; both keep it as it is).
 The app itself may still re-archive a session on another seat, and the sync then spreads that (issue #16). Not
-archived: a session pinned as the run resolves it, one written in the last 10 minutes, or one held back that run: a
-record known from the last run that can't be read (the session is not archived and nothing about it is saved), or a
-record whose write fails (the session's other records are archived, it is not remembered, and the failed record is
-retried next run). With a state file from before the record map (no `cli` map), any unreadable known record holds
+archived: a session pinned as the run resolves it, one written in the last 10 minutes, or one held back that run (a record
+that can't be read or written). With a state file from before the record map (no `cli` map), any unreadable known record holds
 every session and nothing is saved. `-MaxAgeDays 0` turns it off. It runs in the archive/pin step below, so only while the app is
 closed; a run with the app open leaves it for the next one. `-DryRun` says how many sessions it would
 archive. Limits: an un-archive the sync never saw as a change (made before this version first ran, or with the
