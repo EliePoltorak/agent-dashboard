@@ -405,6 +405,15 @@ touch $Y 30; run
 check 'young, then aged to 30 days: still un-archived on every seat' (@(ofSession $Y | Where-Object arch).Count -eq 0)
 check 'young, then aged: still remembered' (autoDone $Y)
 
+"--- an un-archive the sync sees in a run that is out of scope (-MaxAgeDays 0) is remembered too"
+$YA = mkOld 1; foreach ($r in (ofSession $YA)) { setRec $r.f 'isArchived' $true }; run   # archived on every seat by hand; young, so not due
+setRec (ofSession $YA)[0].f 'isArchived' $false; run '-MaxAgeDays 0'
+check 'out of scope: un-archived on every seat' (@(ofSession $YA | Where-Object arch).Count -eq 0)
+check 'out of scope: remembered as a kept entry' ((autoVal $YA) -like 'kept *')
+touch $YA 30; run
+check 'out of scope, then aged to 30 days, default run: still un-archived on every seat' (@(ofSession $YA | Where-Object arch).Count -eq 0)
+check 'out of scope, then aged: still a kept entry' ((autoVal $YA) -like 'kept *')
+
 "--- a session archived for age and then resumed is un-archived on every seat, and archived again once stale"
 $RV = mkOld; run
 check 'revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV) -and -not ((autoVal $RV) -like 'kept *'))

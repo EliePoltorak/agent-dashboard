@@ -568,9 +568,11 @@ if (-not $flagSkip) {
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
       $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
-      # An un-archive seen this run is remembered at ANY age, or the session would be archived once it grows old.
-      # (One already remembered as archived for age becomes a kept entry, so a resume later does not revive it.)
-      if ($userOffChange -and $inScope -and -not $flagFailCli.Contains("isArchived|$cli") -and (-not $autoArch.ContainsKey($cli) -or (Get-AutoArchDate $autoArch[$cli]))) { $autoKeep = $true }
+      # An un-archive seen this run is remembered at ANY age, and in ANY run (also with -MaxAgeDays 0, another -Cwd, or no
+      # transcript here: the baseline is saved for it either way, so a later run could not see it as a change), or the
+      # session would be archived once it grows old. (One already remembered as archived for age becomes a kept entry, so
+      # a resume later does not revive it.)
+      if ($userOffChange -and -not $flagFail -and -not $flagFailCli.Contains("isArchived|$cli") -and (-not $autoArch.ContainsKey($cli) -or (Get-AutoArchDate $autoArch[$cli]))) { $autoKeep = $true }
       if ($inScope -and -not $autoArch.ContainsKey($cli) -and
           -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli")) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
