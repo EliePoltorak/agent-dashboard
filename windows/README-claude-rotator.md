@@ -559,7 +559,7 @@ every session and nothing is saved. `-MaxAgeDays 0` turns it off. It runs in the
 closed; a run with the app open leaves it for the next one. `-DryRun` says how many sessions it would
 archive. Limits: an un-archive the sync never saw as a change (made before this version first ran, or with the
 state file deleted) is not known, so if the state file is deleted the next run archives every old session once
-more, un-archived ones included. Rolling back to an older copy of the script prunes (moves out) the records of old
+more (the exclusions above still apply), un-archived ones included. Rolling back to an older copy of the script prunes (moves out) the records of old
 sessions again, kept ones included, and forgets `autoArchived`; redeploying this version does not bring them back:
 restore them from `.pruned-history-backups`. Opening the app while the sync is writing can undo an auto-archive; the next
 run then reads that as your un-archive and records the session as `kept`.
@@ -625,7 +625,7 @@ app is closed** (checked before reading and again before writing; opening the ap
 under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 timestamp-named backup folders are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
 as a first run; delete it to start again (the next run counts a flag set on any seat as set on all, and,
-with the app closed, archives every old session once more, un-archived ones included, because deleting it
+with the app closed, archives every old session of this workspace once more (unpinned, with a local transcript), un-archived ones included, because deleting it
 also forgets which sessions were archived for age).
 
 Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own

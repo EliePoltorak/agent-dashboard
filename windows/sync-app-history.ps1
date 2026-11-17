@@ -462,7 +462,7 @@ if ($appUp) {
     if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xFFFF) -in 32, 33) {
       Write-Warning "flag state file $flagStatePath is in use ($($_.Exception.Message)); archive/pin flags not synced this run. This clears on its own; do not delete it."
     } else {
-      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old session once more, un-archived ones included, because deleting it also forgets which sessions were archived for age)"
+      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old session once more (the exclusions above still apply), un-archived ones included, because deleting it also forgets which sessions were archived for age)"
     }
   }
 }
@@ -589,7 +589,8 @@ if (-not $flagSkip) {
         if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = -not $want; $want = $true } }
       }
       # REVIVE: a session this sync archived for age (a plain date in autoArch) that was written again since and is recent
-      # again, with no change this run and every record still archived, is un-archived on every seat; once every record is
+      # again, with no change this run and every record known from the last run still archived (a new un-archived copy does not
+      # block it), is un-archived on every seat; once every record is
       # written the entry is forgotten, so it is archived again when it goes stale. If a write fails the entry becomes
       # "revive <iso>" (below), so the next run does not read the sync's own writes as the user's un-archive.
       if ($inScope -and $autoArch.ContainsKey($cli) -and -not $changed.Count -and -not $flagFailCli.Contains("isArchived|$cli") -and $known.Count -and -not @($known | Where-Object { -not $_.v }).Count) {

@@ -439,6 +439,15 @@ check 'revive: a further run leaves it un-archived' (@(ofSession $RV | Where-Obj
 touch $RV 30; run
 check 'revive: stale again: archived once more on every seat' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV))
 
+"--- a new un-archived copy (pass 2 made it while the app was open) does not block a revive"
+$NC = mkOld; run
+check 'revive with a new copy: setup: archived on every seat, plain date' (@(ofSession $NC | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $NC) -notmatch '^(kept|seen|revive) ' -and (autoDone $NC))
+$ncSrc = (ofSession $NC)[0]; $ncj = Get-Content $ncSrc.f -Raw | ConvertFrom-Json; $ncj.sessionId = "local_$([guid]::NewGuid())"; $ncj.isArchived = $false
+Set-Content (Join-Path (Split-Path $ncSrc.f) "$($ncj.sessionId).json") ($ncj | ConvertTo-Json -Compress -Depth 100) -NoNewline
+touch $NC 0; run
+check 'revive with a new copy: un-archived on every record, the new copy included' (@(ofSession $NC | Where-Object arch).Count -eq 0)
+check 'revive with a new copy: no longer remembered' (-not (autoDone $NC))
+
 "--- a revive that is held (one record can't be written) leaves a revive entry; the next run finishes it"
 $HR = mkOld; run
 check 'held revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $HR | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $HR) -and (autoVal $HR) -notmatch '^(kept|seen|revive) ')
