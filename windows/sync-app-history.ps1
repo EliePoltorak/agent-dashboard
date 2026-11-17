@@ -475,7 +475,7 @@ function Get-AutoArchDate($v) {
   if ([datetime]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$d)) { return $d }
   return $null
 }
-$autoDone = 0; $autoFlipped = 0; $autoKept = 0   # $autoKept: due, but the user had it un-archived: remembered, not archived
+$autoDone = 0; $autoFlipped = 0; $autoRevived = 0; $autoKept = 0   # $autoKept: due, but the user had it un-archived: remembered, not archived
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
 # newer one (the app writing as it starts or quits). A record found changed, or one pass 1.5 could not write, is skipped by the later
@@ -553,7 +553,7 @@ if (-not $flagSkip) {
       # Unless the user turned archive off: un-archived since last run (a changed record, and the answer is off), or a
       # record the app marked autoArchiveExempt (it sets that when you un-archive a session it archived). Such a session
       # is not archived; it is only remembered, so no later run archives it either. Decided BEFORE $want is overridden.
-      $autoDue = $false; $autoKeep = $false
+      $autoDue = $false; $autoKeep = $false; $autoRevive = $false
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
@@ -566,6 +566,16 @@ if (-not $flagSkip) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
         $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
         if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = [bool]($rs | Where-Object { -not $_.v }); $want = $true } }
+      }
+      # REVIVE: a session this sync archived for age (a plain date in autoArch, never a kept entry) that was written
+      # again since and is recent again, with no change this run and every record still archived, is un-archived on
+      # every seat; once that is written it is forgotten here, so it is archived again when it goes stale.
+      if ($inScope -and $autoArch.ContainsKey($cli) -and -not $changed.Count -and -not $flagFailCli.Contains("isArchived|$cli") -and -not @($rs | Where-Object { -not $_.v }).Count) {
+        $archD = Get-AutoArchDate $autoArch[$cli]
+        if ($archD) {
+          $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
+          if ($tw -and $tw -gt $archD -and ([DateTime]::UtcNow - $tw).TotalDays -le $MaxAgeDays) { $autoRevive = $true; $want = $false }
+        }
       }
       $flagWant[$cli][$flag] = $want
       foreach ($r in $rs) {
@@ -603,6 +613,7 @@ if (-not $flagSkip) {
       if (-not $flagFailCli.Contains("isArchived|$cli")) {
         if ($autoDue) { if ($autoUserOff) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))"; if (-not $want) { $autoKept++ } } else { $autoArch[$cli] = $nowUtc.ToString('o'); $autoDone++; if ($autoOff) { $autoFlipped++ } } }
         elseif ($autoKeep) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))" }
+        elseif ($autoRevive) { $autoArch.Remove($cli); $autoRevived++ }
       }
     }
     $flagNextAll[$flag] = $next
@@ -613,7 +624,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago, once (+$($autoDone - $autoFlipped) already archived, now remembered so an un-archive sticks$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or $autoRevived -gt 0 -or $DryRun)) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago, once (+$($autoDone - $autoFlipped) already archived, now remembered so an un-archive sticks$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because resumed" }))" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
     foreach ($old in @(Get-ChildItem -LiteralPath $flagBackupRoot -Directory | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip 10)) {
