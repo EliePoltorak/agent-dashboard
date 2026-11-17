@@ -132,7 +132,7 @@ function claude-usage      { claude-rotator --usage @args }   # add --refresh to
 
 # Backfill the desktop APP's session history with CLI / other-account sessions the app never
 # recorded. The app lists only sessions it has a pointer record for; this creates the missing
-# pointers (idempotent). Run after CLI work, then refresh the app's sessions panel.
+# pointers (idempotent), and with the app closed archives old sessions on every seat. Run after CLI work, then refresh the app's sessions panel.
 function claude-sync-history { pwsh -NoProfile -File (Join-Path (Join-Path (Join-Path $ProfileHome '.grok') 'bin') 'sync-app-history.ps1') @args }
 
 # After rotating seats: resume every running Claude session on the new account. VS Code
