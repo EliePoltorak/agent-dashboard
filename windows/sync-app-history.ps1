@@ -366,7 +366,7 @@ if ($cacheDirty) {
 if (-not $Quiet) {
   $ageNote = if ($MaxAgeDays -le 0) { 'no age limit' } else { "$nStale over ${MaxAgeDays}d" }
   $resNote = if ($KeepResumable) { "$nInterrupted interrupted + $nUnfinishedMpr unfinished merge-pr" } else { 'resumability off' }
-  "classified $($transcripts.Count) transcripts for ${Cwd}: $($keep.Count) copied to every seat ($resNote), $($allT.Count - $keep.Count) not ($ageNote; MinAssistant=$MinAssistant)"
+  "classified $($transcripts.Count) transcripts for ${Cwd}: $($keep.Count) to be on every seat ($resNote), $($allT.Count - $keep.Count) not ($ageNote; MinAssistant=$MinAssistant)"
 }
 
 # Is the desktop app running? Checked BEFORE any record is read, so a record the app writes as it quits
@@ -657,7 +657,7 @@ if (-not $flagSkip) {
   # a change, and the next good run then sets them like any other record.
   foreach ($kv in $flagWant.GetEnumerator()) { $pinResolved[$kv.Key] = [bool]$kv.Value['isStarred'] }
   if ($flagFail) { $flagWant.Clear() } else { foreach ($fc in $flagFailCli) { [void]$flagWant.Remove(($fc -split '\|', 2)[1]) } }
-  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, $(if ($DryRun) { 'would be remembered' } else { 'now remembered' })$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived un-archived because their transcript was written again" }))" }
+  if (-not $Quiet -and ($autoDone -gt 0 -or $autoKept -gt 0 -or ($DryRun -and $MaxAgeDays -gt 0))) { "$(if ($DryRun) { 'WOULD auto-archive' } else { 'auto-archived' }) $autoFlipped session(s) last used over ${MaxAgeDays}d ago (+$($autoDone - $autoFlipped) already archived on a seat, $(if ($DryRun) { 'would be remembered' } else { 'now remembered' })$(if ($autoKept) { "; +$autoKept left un-archived as the user chose" })$(if ($autoRevived) { "; +$autoRevived $(if ($DryRun) { would be un-archived } else { un-archived }) because their transcript was written again" }))" }
   elseif (-not $Quiet -and $autoRevived -gt 0) { "$(if ($DryRun) { 'WOULD un-archive' } else { 'un-archived' }) $autoRevived session(s) archived for age, because their transcript was written again" }
   # keep only the newest 10 backup folders (names are yyyyMMdd-HHmmss, so name order = age order)
   if (-not $DryRun -and (Test-Path -LiteralPath $flagBackupRoot)) {
