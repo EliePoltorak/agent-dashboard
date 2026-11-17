@@ -53,11 +53,11 @@ function recHash { (Get-ChildItem $ccs -Recurse -Filter local_*.json | Sort-Obje
 function state { Get-Content $statePath -Raw | ConvertFrom-Json -AsHashtable }
 function mixed($R, $p) { @($R | Group-Object cli | Where-Object { ($_.Group.$p -contains $true) -and ($_.Group.$p -contains $false) }).Count }
 function ofSession($cli) { @(recs | Where-Object { $_.cli -eq $cli }) }
-# An old (30-day) substantive session with an unflagged record next to each of the synthetic session's records.
-function mkOld {
+# An old (30-day, or $days) substantive session with an unflagged record next to each of the synthetic session's records.
+function mkOld([int]$days = 30) {
   $o = [guid]::NewGuid().ToString()
   Set-Content "$proj\$o.jsonl" (@('{"type":"user","message":{"role":"user","content":"an old session for the auto-archive test"}}') + $asst)
-  (Get-Item "$proj\$o.jsonl").LastWriteTime = (Get-Date).AddDays(-30)
+  (Get-Item "$proj\$o.jsonl").LastWriteTime = (Get-Date).AddDays(-$days)
   foreach ($r in (ofSession $X)) {
     $j = Get-Content $r.f -Raw | ConvertFrom-Json
     $j.sessionId = "local_$([guid]::NewGuid())"; $j.cliSessionId = $o
@@ -66,6 +66,9 @@ function mkOld {
   }
   $o
 }
+# move a session's transcript write time to $days days ago (0 = now)
+function touch($cli, [double]$days) { (Get-Item "$proj\$cli.jsonl").LastWriteTime = (Get-Date).AddDays(-$days) }
+function autoVal($cli) { [string](state)['autoArchived'][$cli] }
 function autoDone($cli) { $a = (state)['autoArchived']; [bool]($a -and $a.ContainsKey($cli)) }
 # is this record's sessionId in its folder's archived-sessions.idx?
 function inIdx($r) { $p = Join-Path (Split-Path $r.f) 'archived-sessions.idx'; (Test-Path $p) -and (@((Get-Content $p -Raw | ConvertFrom-Json).archived) -contains $r.id) }
@@ -389,6 +392,43 @@ check 'no cli map + unreadable record: not archived, not remembered' (@(ofSessio
 check 'no cli map + unreadable record: state file (autoArchived) unchanged' ((Get-Content $statePath -Raw) -eq $stBefore)
 Set-Content -LiteralPath $r8[1].f $raw8 -NoNewline; run
 check 'no cli map, record readable again: archived on every seat and remembered' (@(ofSession $O8 | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $O8))
+
+"--- an un-archive the sync sees on a YOUNG session is remembered, so it is not archived once the session is old"
+$Y = mkOld 1; foreach ($r in (ofSession $Y)) { setRec $r.f 'isArchived' $true }; run   # archived on every seat by hand; young, so not due
+check 'young: setup: archived on every seat, not remembered' (@(ofSession $Y | Where-Object { -not $_.arch }).Count -eq 0 -and -not (autoDone $Y))
+setRec (ofSession $Y)[0].f 'isArchived' $false; run
+check 'young: un-archived on every seat' (@(ofSession $Y | Where-Object arch).Count -eq 0)
+check 'young: remembered as a kept entry' ((autoVal $Y) -like 'kept *')
+touch $Y 30; run
+check 'young, then aged to 30 days: still un-archived on every seat' (@(ofSession $Y | Where-Object arch).Count -eq 0)
+check 'young, then aged: still remembered' (autoDone $Y)
+
+"--- a session archived for age and then resumed is un-archived on every seat, and archived again once stale"
+$RV = mkOld; run
+check 'revive: setup: archived on every seat, remembered as a plain date' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV) -and -not ((autoVal $RV) -like 'kept *'))
+touch $RV 0; run
+check 'revive: resumed: un-archived on every seat' (@(ofSession $RV | Where-Object arch).Count -eq 0)
+check "revive: resumed: removed from every folder's archived-sessions.idx" (@(ofSession $RV | Where-Object { inIdx $_ }).Count -eq 0)
+check 'revive: resumed: no longer remembered' (-not (autoDone $RV))
+check 'revive: says it un-archived one because resumed' ([bool]($out -match '\+1 un-archived because resumed'))
+run
+check 'revive: a further run leaves it un-archived' (@(ofSession $RV | Where-Object arch).Count -eq 0 -and -not (autoDone $RV))
+touch $RV 30; run
+check 'revive: stale again: archived once more on every seat' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoDone $RV))
+
+"--- an archive-for-age the user un-archived becomes a kept entry: archived by hand and resumed, it stays archived"
+setRec (ofSession $RV)[0].f 'isArchived' $false; run
+check 'kept after archive-for-age: un-archived on every seat, now a kept entry' (@(ofSession $RV | Where-Object arch).Count -eq 0 -and (autoVal $RV) -like 'kept *')
+foreach ($r in (ofSession $RV)) { setRec $r.f 'isArchived' $true }; run
+check 'kept after archive-for-age: archived by hand on every seat' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0)
+touch $RV 0; run
+check 'kept after archive-for-age: resumed: stays archived (a kept entry is never revived)' (@(ofSession $RV | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $RV) -like 'kept *')
+
+"--- a kept entry (the user un-archived it) that the user later archives by hand and resumes stays archived"
+foreach ($r in (ofSession $Y)) { setRec $r.f 'isArchived' $true }; run
+check 'kept: archived by hand on every seat' (@(ofSession $Y | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $Y) -like 'kept *')
+touch $Y 0; run
+check 'kept: resumed: stays archived on every seat' (@(ofSession $Y | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $Y) -like 'kept *')
 
 "$fail failure(s)"
 if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }
