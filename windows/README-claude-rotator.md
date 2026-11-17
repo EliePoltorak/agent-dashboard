@@ -556,7 +556,7 @@ archived: a session pinned as the run resolves it, one written in the last 10 mi
 run that can't be read, or one whose pin write failed that run. If an archive write fails on one record, the other records are
 still archived and the failed one is archived next run. With a state file from before the record map (no `cli` map), any unreadable known record holds
 every session and nothing is saved. `-MaxAgeDays 0` turns it off. It runs in the archive/pin step below, so only while the app is
-closed; a run with the app open leaves it for the next one. `-DryRun` says how many sessions it would
+closed; a run with the app open leaves it for the next one. With the app closed, `-DryRun` says how many sessions it would
 archive. Limits: an un-archive the sync never saw as a change (made before this version first ran, or with the
 state file deleted) is not known, so if the state file is deleted the next run archives every old session once
 more (the exclusions above still apply), un-archived ones included. Rolling back to an older copy of the script prunes (moves out) the records of old

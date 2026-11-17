@@ -73,7 +73,7 @@
 
   USAGE
     pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older)
-    pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl. how many sessions it would archive)
+    pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl., with the app closed, how many sessions it would archive)
     pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
                                                     # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
