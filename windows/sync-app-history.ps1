@@ -20,16 +20,18 @@
   session id -> value), so this sync does not archive it again for age. The value is one of four kinds:
     <iso date>   archived for age by this sync. If you resume it (transcript written after that date, and recent) it is
                  un-archived once and archived again when stale.
-    kept <iso>   you un-archived it (a change the sync sees, at any age and in any run), or a record carries autoArchiveExempt
+    kept <iso>   you un-archived it (a change the sync sees, at any age and in any run, when the entry is absent or a date), or a record carries autoArchiveExempt
                  (the app appears to set it: inferred, issue #16). Never archived for age again.
     seen <iso>   it was already archived on some seat when it became due: left alone, never revived.
-    revive <iso> an un-archive the sync started and is finishing (a record write failed part way); the next run resolves it.
+    revive <iso> an un-archive the sync started and is finishing (a record write failed part way); the next run that is not held
+                 resolves it: un-archived -> entry removed (so it is archived for age again when stale); archived -> seen.
   If a write or the state save fails, the sync errs toward leaving the session as it is (a failed state save after an
   archive or revive may leave it recorded as seen or kept; both keep it as it is).
   Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
   file deleted) is not known.
-  Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes,
-  or held back this run (a record that can't be read or written). With a state file from before the record map (no 'cli'
+  Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes, one with a
+  record known from the last run that can't be read, or one whose pin write failed this run. If an archive write fails on
+  one record, the other records are still archived, the date is stored, and the failed one is archived next run. With a state file from before the record map (no 'cli'
   map), any unreadable known record holds every session and nothing is saved. It runs in the flag step, so only
   while the app is closed; otherwise it waits for the next run. Records are never moved or deleted.
 
@@ -87,8 +89,8 @@
   SAFETY
   - No record is moved or deleted (pruning was removed 2026-11-16; older runs moved records to
     ~/.claude-app-seats\.pruned-history-backups\). Transcripts are never touched. Rolling back to an older copy
-    restores pruning (records are moved out of the index again) and forgets autoArchived; the next deploy of this
-    version then archives every old session once more.
+    prunes (moves out) the records of old sessions again, kept ones included, and forgets autoArchived; redeploying
+    this version does not bring them back: restore them from .pruned-history-backups.
   - Only sessions whose transcript we can actually read are auto-archived; records with no local
     transcript are left alone.
   - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
@@ -128,7 +130,7 @@ while (-not $runLock) {
   try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
   catch [IO.IOException] {
     if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { throw }   # only a sharing violation means another run holds it
-    if ([DateTime]::UtcNow -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run may still be writing session records: opening the app before it finishes can undo an archive or pin change.'; return }
+    if ([DateTime]::UtcNow -ge $lockUntil) { Write-Warning 'another history sync is still running; this one is skipped. That run may still be writing session records: opening the app before it finishes can undo an archive or pin change (an auto-archive undone that way is then read as your un-archive and kept).'; return }
     if (-not $lockSaid) { 'another history sync is running; waiting for it (up to 3 min)...'; $lockSaid = $true }
     Start-Sleep -Seconds 2
   }
@@ -465,7 +467,7 @@ if ($appUp) {
 }
 $flagNextAll = @{}
 $flagWant = @{}         # cliSessionId -> @{ isArchived; isStarred }: the resolved values, for records pass 2 creates
-$pinResolved = @{}      # cliSessionId -> resolved isStarred, kept even for held sessions (pass 2's pin exemption)
+$pinResolved = @{}      # cliSessionId -> resolved isStarred, kept even for held sessions (pass 2's pinned-copy rule)
 $flagByCli = @{}
 # If a session's record can't be written, that SESSION keeps last run's baseline (as if this run never
 # happened for it), and its new clones are left out. The next run then compares it with that baseline: the
@@ -594,7 +596,7 @@ if (-not $flagSkip) {
           if ($tw -and $tw -gt $archD -and ([DateTime]::UtcNow - $tw).TotalDays -le $MaxAgeDays) { $autoRevive = $true; $want = $false }
         }
       }
-      if ($flag -eq 'isArchived' -and $autoArch.ContainsKey($cli) -and ([string]$autoArch[$cli]) -like 'revive *') { $autoRevFin = $true }   # in ANY run: $want is whatever the records say
+      if ($flag -eq 'isArchived' -and -not $flagFail -and $autoArch.ContainsKey($cli) -and ([string]$autoArch[$cli]) -like 'revive *') { $autoRevFin = $true }   # in ANY run: $want is whatever the records say
       $flagWant[$cli][$flag] = $want
       foreach ($r in $rs) {
         if ($r.v -eq $want) { $next[$r.key] = $want; continue }
@@ -626,8 +628,8 @@ if (-not $flagSkip) {
           [void]$flagFailCli.Add("$flag|$cli")
         }
       }
-      # remembered only when the session is not held back this run (no failed write, no record known from the last
-      # run that can't be read); a held session is retried next run
+      # not held back this run (no failed write, no record known from the last run that can't be read): resolve fully. A
+      # held session stores only what the branch below says (a date or a revive entry), or nothing, and is retried next run
       if (-not $flagFailCli.Contains("isArchived|$cli")) {
         if ($autoDue) { if ($autoUserOff) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))"; if (-not $want) { $autoKept++ } } else { $autoArch[$cli] = if ($autoOff) { $nowUtc.ToString('o') } else { "seen $($nowUtc.ToString('o'))" }; $autoDone++; if ($autoOff) { $autoFlipped++ } } }
         elseif ($autoKeep) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))" }
