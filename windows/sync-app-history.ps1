@@ -467,6 +467,14 @@ $flagFailCli = New-Object 'System.Collections.Generic.HashSet[string]'
 # auto-archived again, so an un-archive sticks. A state file from before this map simply has none yet.
 $autoArch = New-Object System.Collections.Hashtable ([StringComparer]::OrdinalIgnoreCase)
 if ($flagPrevAll -and -not $flagSkip -and $flagPrevAll['autoArchived'] -is [hashtable]) { foreach ($k in $flagPrevAll['autoArchived'].Keys) { $autoArch[$k] = $flagPrevAll['autoArchived'][$k] } }
+# An autoArchived value is the ISO date of the run that archived the session for age, or "kept <iso>" for a session the
+# user un-archived (or the app marked autoArchiveExempt). Returns the date of the first kind (UTC), $null for anything else.
+function Get-AutoArchDate($v) {
+  if ($v -is [datetime]) { return $v.ToUniversalTime() }
+  $d = [datetime]::MinValue
+  if ([datetime]::TryParse([string]$v, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal, [ref]$d)) { return $d }
+  return $null
+}
 $autoDone = 0; $autoFlipped = 0; $autoKept = 0   # $autoKept: due, but the user had it un-archived: remembered, not archived
 # Pass 1 reads every record once; pass 1.4, pass 1.5 and the pass 2 retitle each write a record back from that
 # copy. Each checks first that the file is unchanged since pass 1 read it, so none writes an older copy over a
@@ -545,11 +553,16 @@ if (-not $flagSkip) {
       # Unless the user turned archive off: un-archived since last run (a changed record, and the answer is off), or a
       # record the app marked autoArchiveExempt (it sets that when you un-archive a session it archived). Such a session
       # is not archived; it is only remembered, so no later run archives it either. Decided BEFORE $want is overridden.
-      $autoDue = $false
-      $autoUserOff = $flag -eq 'isArchived' -and (($changed.Count -and -not $want) -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
-      if ($flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and -not $autoArch.ContainsKey($cli) -and $allT.Contains($cli) -and
-          -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli") -and
-          @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count) {
+      $autoDue = $false; $autoKeep = $false
+      $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
+      $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
+      # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
+      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
+      # An un-archive seen this run is remembered at ANY age, or the session would be archived once it grows old.
+      # (One already remembered as archived for age becomes a kept entry, so a resume later does not revive it.)
+      if ($userOffChange -and $inScope -and -not $flagFailCli.Contains("isArchived|$cli") -and (-not $autoArch.ContainsKey($cli) -or (Get-AutoArchDate $autoArch[$cli]))) { $autoKeep = $true }
+      if ($inScope -and -not $autoArch.ContainsKey($cli) -and
+          -not $flagWant[$cli]['isStarred'] -and -not $flagFailCli.Contains("isStarred|$cli") -and -not $flagFailCli.Contains("isArchived|$cli")) {
         # re-read the write time: the session may have been resumed since the transcripts were listed
         $tw = $null; try { $tw = (Get-Item -LiteralPath $tFile[$cli].FullName).LastWriteTimeUtc } catch { }
         if ($tw -and ([DateTime]::UtcNow - $tw).TotalDays -gt $MaxAgeDays) { $autoDue = $true; if (-not $autoUserOff) { $autoOff = [bool]($rs | Where-Object { -not $_.v }); $want = $true } }
@@ -587,7 +600,10 @@ if (-not $flagSkip) {
       }
       # remembered only when the session is not held back this run (no failed write, no record known from the last
       # run that can't be read); a held session is retried next run
-      if ($autoDue -and -not $flagFailCli.Contains("isArchived|$cli")) { $autoArch[$cli] = $nowUtc.ToString('o'); if ($autoUserOff) { $autoKept++ } else { $autoDone++; if ($autoOff) { $autoFlipped++ } } }
+      if (-not $flagFailCli.Contains("isArchived|$cli")) {
+        if ($autoDue) { if ($autoUserOff) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))"; if (-not $want) { $autoKept++ } } else { $autoArch[$cli] = $nowUtc.ToString('o'); $autoDone++; if ($autoOff) { $autoFlipped++ } } }
+        elseif ($autoKeep) { $autoArch[$cli] = "kept $($nowUtc.ToString('o'))" }
+      }
     }
     $flagNextAll[$flag] = $next
     if (-not $Quiet -and $flipped -gt 0) { "$(if ($DryRun) { 'WOULD set' } else { 'set' }) $flag on $flipped record(s) to match the other seats$(if (-not $prev) { ' (first run: set on any seat -> set on all)' })" }
