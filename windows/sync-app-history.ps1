@@ -463,7 +463,7 @@ if ($appUp) {
     if ($_.Exception -is [IO.IOException] -and ($_.Exception.HResult -band 0xFFFF) -in 32, 33) {
       Write-Warning "flag state file $flagStatePath is in use ($($_.Exception.Message)); archive/pin flags not synced this run. This clears on its own; do not delete it."
     } else {
-      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old session once more (the exclusions above still apply), un-archived ones included, because deleting it also forgets which sessions were archived for age)"
+      Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old unpinned session of this workspace with a local transcript once more, un-archived ones included, because deleting it also forgets which sessions were archived for age)"
     }
   }
 }
