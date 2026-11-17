@@ -432,7 +432,7 @@ errors, so this usually shows up as a pause, not a failure.
 | `claude-rotator <args>` | The rotator CLI (table above) |
 | `claude-cli-account <args>` | Same as `claude-rotator` |
 | `claude-usage [--refresh]` | Usage table for all accounts |
-| `claude-sync-history [-Cwd <path>]` | Backfill the **desktop app** session history with CLI / other-account sessions it never recorded (see "Desktop app session history" below) |
+| `claude-sync-history [-Cwd <path>]` | Backfill the **desktop app** session history with CLI / other-account sessions it never recorded, and archives old sessions on every seat (see "Desktop app session history" below) |
 | `claude-account <args>` | Switch the **desktop-app** login (separate tool: `claude-app-rotator.ps1`) |
 | `claude-kill` | Kill background CLI `claude` processes (leaves the desktop app alone) |
 
@@ -625,7 +625,7 @@ app is closed** (checked before reading and again before writing; opening the ap
 under `~/.claude-app-seats\.flag-sync-backups\<timestamp>\` (the newest 10 timestamp-named backup folders are kept). If the state
 file is unreadable the step is skipped with a warning and the file is left as it is, rather than treated
 as a first run; delete it to start again (the next run counts a flag set on any seat as set on all, and,
-with the app closed, archives every old session of this workspace once more (unpinned, with a local transcript), un-archived ones included, because deleting it
+with the app closed, archives every old session of this workspace once more (unpinned, with a local transcript, no `autoArchiveExempt` record), un-archived ones included, because deleting it
 also forgets which sessions were archived for age).
 
 Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own
