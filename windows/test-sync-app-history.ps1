@@ -121,6 +121,7 @@ $invalidWorkspaces = @(
   '\\?\C:\draft\.\release'
   '\\?\C:\work/project'
   '\\?\C:\work\\project'
+  '\\?\\UNC\server\share\repo'
   '\\.\C:\work\trailing.'
   '//?/C:/work/project'
   'C:\work\NUL'

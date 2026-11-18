@@ -152,7 +152,7 @@ if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified(
     ($unc -and -not $uncRoot) -or
     (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
     ($path.StartsWith('\\?\', [StringComparison]::Ordinal) -and $inputPath.Contains('/')) -or
-    ($verbatim -and ($directoryNames.Contains('\\') -or $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)')) -or
+    ($verbatim -and ($inputPath.Substring(3).Contains('\\') -or $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)')) -or
     (-not $verbatim -and -not $unc -and $directoryNames -match '(^|\\)NUL(?:\\|$)') -or
     -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Use a valid absolute Windows workspace path with -Cwd or in ~/.claude/history-sync-workspace.txt. Check for quotes, trailing spaces or unsupported characters.'
