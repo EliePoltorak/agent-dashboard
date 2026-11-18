@@ -72,13 +72,13 @@
   better title can be derived.
 
   USAGE
-    pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older)
+    pwsh -File sync-app-history.ps1                 # sync historySyncCwd from the adjacent rotator.local.json
     pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl., with the app closed, how many sessions it would archive)
     pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
                                                     # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
     pwsh -File sync-app-history.ps1 -MinAssistant 10
-    pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
+    pwsh -File sync-app-history.ps1 -Cwd 'C:\path\to\project'
     -NoPrune is still accepted and does nothing (records are never removed now)
     pwsh -File sync-app-history.ps1 -Quiet          # for the launcher hook / scheduled task
     pwsh -File sync-app-history.ps1 -AssumeAppRunning   # testing: act as if the app were open (flags not synced)
@@ -105,7 +105,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Cwd = 'C:\Dev\hameishiv',
+  [string]$Cwd,
   [int]$MinAssistant = 6,
   [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
@@ -116,6 +116,18 @@ param(
   [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); -AssumeAppRunning wins if both are given
 )
 $ErrorActionPreference = 'Stop'
+
+if (-not $PSBoundParameters.ContainsKey('Cwd')) {
+  $settingsPath = Join-Path $PSScriptRoot 'rotator.local.json'
+  if (Test-Path -LiteralPath $settingsPath -PathType Leaf) {
+    try { $settings = Get-Content -LiteralPath $settingsPath -Raw | ConvertFrom-Json }
+    catch { throw 'Could not read rotator.local.json. Fix the file or pass -Cwd explicitly.' }
+    if ($settings.historySyncCwd -is [string]) { $Cwd = $settings.historySyncCwd }
+  }
+}
+if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd)) {
+  throw 'Pass an absolute workspace path with -Cwd or set historySyncCwd in rotator.local.json beside this script.'
+}
 
 $ccs = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
 if (-not (Test-Path -LiteralPath $ccs)) { throw "App session index not found: $ccs (is the desktop app installed?)" }

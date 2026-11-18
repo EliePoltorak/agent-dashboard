@@ -26,24 +26,40 @@
   record after another record was written keeps its plain date (the failed record is written next run, the entry stays a date,
   and a resume revives it); an un-archive seen in a
   -MaxAgeDays 0 run is remembered too; a session of another cwd is left alone; a state file without the cli map plus an unreadable record auto-archives nothing.
-  Copies the LIVE app session index into a fresh sandbox under C:\Dev\Temp and runs the sync there with
+  Builds a synthetic app session index in a fresh sandbox and runs the sync there with
   %APPDATA% / %USERPROFILE% redirected, and -AssumeAppClosed (so the app-running check is skipped for the sandbox).
   The real files are only read. The sandbox is deleted on success and kept (path printed) on failure. Exit 1 on
   any failure. Each sync run takes ~1-2 min on a full index.
     pwsh -File test-sync-app-history.ps1 [<path to sync-app-history.ps1>]
 #>
-$Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
-$sb = "C:\Dev\Temp\sync-app-history-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID"   # per run: the pid keeps runs started in the same second apart
-$proj = "$sb\home\.claude\projects\C--Dev-hameishiv"
-New-Item -ItemType Directory "$sb\app\Claude", $proj, "$sb\home\.claude-app-seats" -Force | Out-Null
-Copy-Item "$env:APPDATA\Claude\claude-code-sessions" "$sb\app\Claude\" -Recurse -Force
+$sourceScript = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
+$sb = Join-Path ([IO.Path]::GetTempPath()) "sync-app-history-test-$([guid]::NewGuid())"
+$Script = Join-Path $sb 'sync-app-history.ps1'
+$settingsPath = Join-Path $sb 'rotator.local.json'
+$workspace = Join-Path $sb 'workspace'
+$encoded = $workspace -creplace '[^A-Za-z0-9]', '-'
+$proj = "$sb\home\.claude\projects\$encoded"
+$ccs = "$sb\app\Claude\claude-code-sessions"
+New-Item -ItemType Directory $workspace, $proj, "$sb\home\.claude-app-seats", $ccs -Force | Out-Null
+Copy-Item -LiteralPath $sourceScript -Destination $Script
+$fixtureSessions = @(1..4 | ForEach-Object { [guid]::NewGuid().ToString() })
+foreach ($seat in 'A','B','C') {
+  $folder = Join-Path (Join-Path $ccs $seat) 'fixture-workspace'
+  New-Item -ItemType Directory -Path $folder -Force | Out-Null
+  foreach ($cli in $fixtureSessions) {
+    $id = "local_$([guid]::NewGuid())"
+    @{ sessionId = $id; cliSessionId = $cli; cwd = $workspace; originCwd = $workspace
+       title = 'Synthetic session'; isArchived = $false } |
+      ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $folder "$id.json") -NoNewline
+  }
+}
 # One synthetic, recent, substantive transcript so the script has a session to create records for (pass 2).
 # The real index's transcripts are NOT copied, so nothing else is created or auto-archived.
 $X = [guid]::NewGuid().ToString()
 $asst = 1..7 | ForEach-Object { '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok ' + $_ + '"}]}}' }
 Set-Content "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + $asst)
 "sandbox: $sb"
-$ccs = "$sb\app\Claude\claude-code-sessions"; $statePath = "$sb\home\.claude-app-seats\.flag-state.json"
+$statePath = "$sb\home\.claude-app-seats\.flag-state.json"
 $fail = 0; $script:out = @(); $script:rc = 0
 function run([string]$extra = '') {
   # -NoPrune is a no-op now; passed so an old invocation is proven to still work
@@ -79,7 +95,14 @@ function autoDone($cli) { $a = (state)['autoArchived']; [bool]($a -and $a.Contai
 # is this record's sessionId in its folder's archived-sessions.idx?
 function inIdx($r) { $p = Join-Path (Split-Path $r.f) 'archived-sessions.idx'; (Test-Path $p) -and (@((Get-Content $p -Raw | ConvertFrom-Json).archived) -contains $r.id) }
 
-# The live index already agrees across seats, so plant a disagreement for the first run to resolve.
+run '-DryRun'
+check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path $statePath))
+Set-Content -LiteralPath $settingsPath -Value '{"invalid":' -NoNewline
+run "-Cwd '$workspace' -DryRun"
+check 'an explicit workspace bypasses the unusable local setting' ($rc -eq 0 -and -not ($out -match 'no transcripts') -and -not (Test-Path $statePath))
+@{ historySyncCwd = $workspace } | ConvertTo-Json | Set-Content -LiteralPath $settingsPath
+
+# The sandbox index agrees across seats, so plant a disagreement for the first run to resolve.
 $U = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Select-Object -First 1
 if (-not $U) { "FAIL no unflagged multi-seat session in the index to test with"; exit 1 }
 setRec $U.Group[0].f 'isArchived' $true
@@ -111,7 +134,7 @@ $st = state; $st['autoArchived'] = @{}; Set-Content $statePath ($st | ConvertTo-
 $leftover = "$((Get-ChildItem $ccs -Recurse -Filter local_*.json | Select-Object -First 1).FullName).sync-tmp"; Set-Content $leftover 'x' -NoNewline; run
 check 'leftover .sync-tmp removed' (-not (Test-Path $leftover))
 
-# a real multi-seat session, nothing flagged, for the pin / archive tests
+# An unflagged multi-seat session for the pin / archive tests.
 $G = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Sort-Object Count -Descending | Select-Object -First 1
 if (-not $G) { "FAIL no unflagged multi-seat session in the index to test with"; exit 1 }
 $g0 = $G.Group[0]; $g1 = $G.Group[1]

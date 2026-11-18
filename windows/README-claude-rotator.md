@@ -641,6 +641,11 @@ The script itself lives at `%USERPROFILE%\.grok\bin\sync-app-history.ps1` (the s
 there to deploy a change. `rotator-sync --pull` does not deploy it: it copies the file into the live rotator folder,
 which nothing runs it from, so a clean `rotator-sync --check` does not mean the running copy is current.
 
+Set `historySyncCwd` to the absolute workspace path in `rotator.local.json` beside the installed
+history-sync script before deploying this version. The scheduled task and account switch use that
+setting. Manual runs can pass an absolute `-Cwd` to override it. If neither is supplied, the sync
+stops before opening the app's session index.
+
 **The app reads its index at launch** — after a sync, new records appear when the app is
 restarted (or the workspace reopened), not in an already-open window.
 
@@ -651,7 +656,7 @@ claude-sync-history -MaxAgeDays 14       # widen/narrow the window (0 = copy all
                                          # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
 claude-sync-history -KeepResumable       # also keep interrupted / died-pre-merge runs
 claude-sync-history -MinAssistant 10     # stricter "substantive" bar
-claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
+claude-sync-history -Cwd 'C:\path\to\project'  # a different workspace
 ```
 
 - Script: `C:\Users\User\.grok\bin\sync-app-history.ps1`
