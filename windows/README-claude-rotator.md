@@ -643,11 +643,15 @@ which nothing runs it from, so a clean `rotator-sync --check` does not mean the 
 
 Before deploying this version, save the absolute workspace path as a single unquoted line in
 `%USERPROFILE%\.claude\history-sync-workspace.txt`. The account-switch hook and the scheduled task
-read that file on each run. Before replacing the installed script, run the checkout copy from the
-repo root with `pwsh -NoProfile -File .\windows\sync-app-history.ps1 -DryRun`. For a workspace with
-saved CLI sessions, confirm that the `WOULD: added … record(s) for …` summary names the intended
-workspace. If the preview says `no transcripts`, check the path and that the workspace has CLI
-sessions before relying on the unattended run.
+read that file on each run.
+
+For a workspace the desktop app has never used, start and save one session in the app on any account
+so the sync can reuse the app's workspace ID. Before replacing the installed script, run the checkout
+copy from the repo root with `pwsh -NoProfile -File .\windows\sync-app-history.ps1 -DryRun`.
+Confirm that the `WOULD: added … record(s) for …` summary names the intended workspace. If a CLI
+session that meets the copy rules above is missing from the app, the preview should plan an addition
+or a clone. Zero is expected when every eligible session is already present or none qualify. If the
+preview says `no transcripts`, check the path and that the workspace has CLI transcripts for this user.
 
 Manual runs can pass an absolute `-Cwd` to override the file. If neither is supplied, the sync stops
 before opening the app's session index.
