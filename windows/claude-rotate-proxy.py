@@ -234,7 +234,7 @@ def cache_entry(prior, suffix, entry, has_fable):
         # Fable-only response.
         cap = default_fable_observation(prior)
         # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
-        if cap and observed_ms(cap) <= entry["observed_ms"]:
+        if cap and observed_ms(cap) <= time.time_ns() // 1_000_000:   # not future-dated; a newer cap is kept
             entry["fable_cap"] = cap
     return entry
 
@@ -694,6 +694,14 @@ def cache_self_test():
             f.write('{"ts": 5, "observed_ms": Infinity, "data": {"ok": true, "http": 200, "oi7_stat": "allowed"}}')
         _state["failed"].clear()
         write_cache("S", {"ok": True, "http": 429, "src": "proxy", "oi7_stat": "rejected"})   # must not raise
+        time.time_ns = real_ns
+        now = time.time_ns() // 1_000_000
+        nested = {"ts": now // 1000, "observed_ms": now - 10, "data": {"ok": True, "src": "proxy", "http": 429, "oi7_stat": "rejected"}}
+        prior = {"ts": (now - 5000) // 1000, "observed_ms": now - 5000, "data": {"ok": True, "src": "proxy", "s5_util": 0.1}, "fable_cap": nested}
+        late = {"ts": (now - 2000) // 1000, "observed_ms": now - 2000, "data": {"ok": True, "src": "proxy", "s5_util": 0.2}}
+        assert cache_entry(prior, "", dict(late), False).get("fable_cap") == nested, "a late default write dropped a newer Fable rejection"
+        future = dict(nested, observed_ms=now + 3_600_000)
+        assert "fable_cap" not in cache_entry(dict(prior, fable_cap=future), "", dict(late), False), "a future-dated cap was carried"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()

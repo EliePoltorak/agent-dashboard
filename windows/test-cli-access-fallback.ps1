@@ -675,6 +675,12 @@ $future.ts = $nowS + 86400; $future | Add-Member -NotePropertyName observed_ms -
 $future | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $defaultPath -Encoding UTF8
 Write-UsageCacheFile $defaultPath 'A' @{ ts = $nowS; observed_ms = $nowS * 1000 + 1; data = @{ ok = $true; http = 200; s5_util = 0.1 } } $false
 Check 'a default refresh drops a future-dated legacy Fable cap' (-not (Read-UsageCacheFile $defaultPath).fable_cap)
+$nowMsT = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+@{ ts = [int64](($nowMsT - 5000) / 1000); observed_ms = $nowMsT - 5000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; s5_util = 0.1 }
+   fable_cap = @{ ts = [int64](($nowMsT - 10) / 1000); observed_ms = $nowMsT - 10; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected' } } } |
+  ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $defaultPath -Encoding UTF8
+Write-UsageCacheFile $defaultPath 'A' @{ ts = [int64](($nowMsT - 2000) / 1000); observed_ms = $nowMsT - 2000; data = @{ ok = $true; http = 200; s5_util = 0.2 } } $false
+Check 'a default refresh that finishes late keeps a newer Fable cap' ((Read-UsageCacheFile $defaultPath).fable_cap.data.oi7_stat -eq 'rejected')
 
 Reset-Case
 $allowedFable.fable_cap = $statusOnly
