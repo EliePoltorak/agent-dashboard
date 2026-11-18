@@ -641,10 +641,11 @@ The script itself lives at `%USERPROFILE%\.grok\bin\sync-app-history.ps1` (the s
 there to deploy a change. `rotator-sync --pull` does not deploy it: it copies the file into the live rotator folder,
 which nothing runs it from, so a clean `rotator-sync --check` does not mean the running copy is current.
 
-Set the Windows user environment variable `CLAUDE_HISTORY_SYNC_CWD` to the absolute workspace path
-before deploying this version. Give the account-switch shell and the scheduled task an environment
-that includes the setting. Manual runs can pass an absolute `-Cwd` to override it. If neither is
-supplied, the sync stops before opening the app's session index.
+Before deploying this version, save the absolute workspace path as a single unquoted line in
+`%USERPROFILE%\.claude\history-sync-workspace.txt`. The account-switch hook and the scheduled task
+read that file on each run. Check it with `claude-sync-history -DryRun`. Manual runs can pass an
+absolute `-Cwd` to override it. If neither is supplied, the sync stops before opening the app's
+session index.
 
 **The app reads its index at launch** — after a sync, new records appear when the app is
 restarted (or the workspace reopened), not in an already-open window.

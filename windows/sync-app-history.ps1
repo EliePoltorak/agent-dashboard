@@ -72,7 +72,7 @@
   better title can be derived.
 
   USAGE
-    pwsh -File sync-app-history.ps1                 # sync the workspace in CLAUDE_HISTORY_SYNC_CWD
+    pwsh -File sync-app-history.ps1                 # sync the workspace in ~/.claude/history-sync-workspace.txt
     pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl., with the app closed, how many sessions it would archive)
     pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
                                                     # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
@@ -105,7 +105,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Cwd = $env:CLAUDE_HISTORY_SYNC_CWD,
+  [string]$Cwd,
   [int]$MinAssistant = 6,
   [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
@@ -117,8 +117,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 
-if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd)) {
-  throw 'Pass an absolute workspace path with -Cwd or set CLAUDE_HISTORY_SYNC_CWD.'
+if (-not $PSBoundParameters.ContainsKey('Cwd')) {
+  $workspaceFile = Join-Path $env:USERPROFILE '.claude\history-sync-workspace.txt'
+  if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
+    $Cwd = ([string](Get-Content -LiteralPath $workspaceFile -Raw)).TrimEnd([char[]](13, 10))
+  }
+}
+if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd) -or
+    -not (Test-Path -LiteralPath "FileSystem::$Cwd" -IsValid)) {
+  throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
 $Cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Cwd))
 
