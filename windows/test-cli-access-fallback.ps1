@@ -606,6 +606,15 @@ Check 'the watcher baseline reports a cap the proxy saved in both caches at once
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $measuredCap | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Check 'the watcher baseline agrees: a newer default-cache allowance clears a measured Fable cap' (-not (Read-FableCache 'A').capped)
+$nestedRej = @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; status = 'allowed'; s5_util = 0.2; w7_util = 0.3 }
+               fable_cap = @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day_oi'; oi7_stat = 'rejected' } } }
+$nestedRej | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+$sample = Get-ProxySample 'A' $true
+Check 'a --now check sees a fresh Fable-only proxy rejection nested under the default reading' ($sample -and $sample.status -eq 'rejected' -and $sample.claim -eq 'seven_day_oi')
+Check 'the overlay keeps the default reading it nests under' ([double]$sample.s5_util -eq 0.2)
+$nestedRej.fable_cap.observed_ms = ($nowS - 600) * 1000; $nestedRej.fable_cap.ts = $nowS - 600
+$nestedRej | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a stale nested rejection does not satisfy a --now check' ($null -eq (Get-ProxySample 'A' $true))
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $allowedFable.ts = $statusOnly.ts - 60

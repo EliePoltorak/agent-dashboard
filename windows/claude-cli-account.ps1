@@ -436,8 +436,9 @@ function Get-CacheObservationMs($Cache) {
   return 0
 }
 
-# A proxy Fable observation (a rejection or an allowance) in the default cache: an older proxy's only copy of a
-# status-only rejection, or the backup when the proxy's -fable write was skipped. The newer reading wins.
+# A proxy Fable observation (a rejection or an allowance) in the default cache: at the top level (an older proxy's
+# only copy, or the backup when the -fable write was skipped) or nested as fable_cap (a Fable-only proxy response,
+# kept under the default reading). The newer reading wins.
 # Despite the name (and the fable_cap key it fills), the result can be an allowance: never read it as "capped".
 # The newer of the record's own proxy reading and the one nested under it wins.
 function Get-LegacyFableCap($Cache) {
@@ -1021,6 +1022,15 @@ function Get-ProxySample {
     $c = Get-Content $cf -Raw | ConvertFrom-Json
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
+    # A Fable-only proxy rejection is nested under the default reading (fable_cap), not at the top level.
+    # A fresh one is still the rejection that just happened: overlay its verdict so the trigger sees it.
+    $n = $c.fable_cap
+    if ($n -and $n.data.src -eq 'proxy' -and $n.data.ok -and $n.data.status -eq 'rejected' -and $d.status -ne 'rejected' -and
+        ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - (Get-CacheObservationMs $n)) -le ($ProxyFreshSec * 1000)) {
+      $d = $d.PSObject.Copy()
+      $d | Add-Member -NotePropertyName status -NotePropertyValue 'rejected' -Force
+      $d | Add-Member -NotePropertyName claim -NotePropertyValue $n.data.claim -Force
+    }
     $rejected = ($d.status -eq 'rejected' -or $d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected')
     if ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_util -or $rejected) -and $age -le $ProxyFreshSec -and
         ($rejected -or -not $RejectedOnly)) { return $d }
@@ -1122,7 +1132,7 @@ function Invoke-CheckRotateCore {
     elseif ($u.s5_stat -eq 'rejected') { $trigger = "SESSION window CAPPED at $s5% (weekly $w7%)"; $capped = 'session' }
     # The server's overall verdict. Rank-Accounts treats it as a cap unless oi7_stat is rejected
     # (then it is a Fable cap, judged on the Fable reading); this branch rotates off the active seat
-    # either way, and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
+    # either way (Get-ProxySample overlays a fresh nested Fable-only rejection), and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
     # proxy re-asked every 20s and nothing moved (Fable review 2026-10-30, P2-4).
     elseif ($u.status -eq 'rejected') { $trigger = "account REJECTED by the server (claim $($u.claim); session $s5%, weekly $w7%)"; $capped = 'session' }
     elseif ($s5 -ge $sessBar)      { $trigger = "session at $s5% >= $sessBar% (weekly $w7%, left to burn)" }
