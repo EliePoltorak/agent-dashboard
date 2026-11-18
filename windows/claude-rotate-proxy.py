@@ -135,8 +135,9 @@ def is_quota_rejection(status, headers):
 def write_cache(label, data):
     """Atomic write of <label>/usage-cache.json (and -fable when the Fable window rode along)."""
     rejected = any(data.get(k) == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
+    has_fable = data.get("oi7_util") or data.get("oi7_stat") == "rejected"
     now = time.time()
-    for suffix, present in (("", data.get("s5_util") or rejected), ("-fable", data.get("oi7_util"))):
+    for suffix, present in (("", data.get("s5_util") or rejected), ("-fable", has_fable)):
         if not present:
             continue
         key = label + suffix

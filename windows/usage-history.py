@@ -4499,6 +4499,12 @@ def selftest():
             rs_ = read_seat("A")
             assert (rs_["ts"], rs_["s"], rs_["w"], rs_["st"]) == (100, .1, .5, "allowed"), rs_
             assert rs_["f"] is None and "fts" not in rs_, rs_             # no Fable measurement at all: no Fable read time either
+        with open(os.path.join(rd, "A", "usage-cache-fable.json"), "w", encoding="utf-8") as fh:
+            json.dump({"ts": 110, "data": {"ok": True, "src": "proxy", "http": 429,
+                       "oi7_stat": "rejected", "oi7_util": None, "oi7_reset": "120"}}, fh)
+        rs_ = read_seat("A")
+        assert (rs_["ts"], rs_["s"], rs_["w"]) == (100, .1, .5), rs_
+        assert rs_["f"] is None and "fts" not in rs_, rs_                 # status alone supplies no Fable utilization sample
     finally:
         globals()["ROOT"] = keep_root
         __import__("shutil").rmtree(rd, ignore_errors=True)

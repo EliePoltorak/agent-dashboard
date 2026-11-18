@@ -470,8 +470,8 @@ function Write-FableCache([string]$l, [int64]$age, $reset) {
 }
 $nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 Reset-Case
-Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS + 3 * 86400))
-Check 'a Fable cap read past the TTL still counts until its reset' (Test-FableCapCached 'A')
+Write-FableCache 'A' (8 * 86400) ([string]($nowS + 3 * 86400))
+Check 'a Fable cap older than a week still counts when its reset is in the future' (Test-FableCapCached 'A')
 Write-FableCache 'A' ($FableTTL + 3600) ([string]($nowS - 60))
 Check 'a Fable cap whose reset has passed no longer counts' (-not (Test-FableCapCached 'A'))
 Write-FableCache 'A' 10 $null
@@ -551,6 +551,54 @@ Write-DefaultCache 'A' $stale @{ s5_stat = 'rejected'; s5_reset = ($nowS - 60); 
 $script:plan['A'] = 'default-500'
 $null = Get-UsageCached 'A' $true 'haiku' ''
 Check 'a headerless default probe still replaces a cap that has reset' ((Get-Content (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Raw | ConvertFrom-Json).data.http -eq 500)
+
+# A proxy response can name only the Fable window, without measuring its utilization.
+Reset-Case
+Clear-AppIdentity
+foreach ($l in 'A','C') { $script:plan[$l] = 'network' }
+$seatA = Join-Path $Root 'A'
+$statusOnly = @{ ts = $nowS - $stale; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429
+                 status = 'rejected'; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600); oi7_util = $null } }
+$cacheNames = 'usage-cache.json','usage-cache-fable.json'
+foreach ($name in $cacheNames) {
+  $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA $name) -Encoding UTF8
+}
+Check 'a Fable-only rejection is no default cap' (-not (Test-CapCached 'A' 'default'))
+Check 'a status-only Fable rejection is a cap in the Fable cache' (Test-FableCapCached 'A')
+Check 'a status-only Fable rejection supplies no utilization baseline' ($null -eq (Read-FableCache 'A'))
+Check 'the network fallback skips the Fable-capped seat' ((Select-RotationTarget 90 'B').label -eq 'C')
+$statusOnly.data.oi7_reset = [string]($nowS - 60)
+foreach ($name in $cacheNames) {
+  $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA $name) -Encoding UTF8
+}
+Check 'the network fallback can use the seat after its Fable reset' ((Select-RotationTarget 90 'B').label -eq 'A')
+
+# With no usable reset, a headerless probe preserves both the cap and its original timestamp for up to a week.
+$week = 7 * 86400
+foreach ($case in @(
+    @{ window = 'session'; fields = @{ s5_stat = 'rejected'; status = 'rejected' } },
+    @{ window = 'weekly'; fields = @{ w7_stat = 'rejected'; w7_reset = 'unreadable'; status = 'rejected' } },
+    @{ window = 'overall'; fields = @{ status = 'rejected' } },
+    @{ window = 'Fable'; fable = $true })) {
+  Reset-Case
+  $which, $model, $suffix = if ($case.fable) { 'fable', 'fable', '-fable' } else { 'default', 'haiku', '' }
+  $script:plan['A'] = "$which-500"
+  $cf = Join-Path $seatA "usage-cache$suffix.json"
+  foreach ($age in ($week - 60), ($week + 60)) {
+    if ($case.fable) { Write-FableCache 'A' $age $null }
+    else { Write-DefaultCache 'A' $age $case.fields }
+    $before = Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json
+    $inForce = $age -lt $week
+    Check "the $($case.window) cap without a reset at age ${age}s counts only within a week" ((Test-CapCached 'A' $which) -eq $inForce)
+    $null = Get-UsageCached 'A' $true $model $suffix
+    $after = Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json
+    if ($inForce) {
+      Check "a headerless probe retains the $($case.window) cap without renewing its timestamp" ($after.ts -eq $before.ts -and (Test-CapCached 'A' $which))
+    } else {
+      Check "a headerless probe replaces the expired $($case.window) cap" ($after.data.http -eq 500 -and -not (Test-CapCached 'A' $which))
+    }
+  }
+}
 
 # --- issue #11: the normal ranking and selection path honours a cached cap when the live probe is headerless ---
 # A is the only seat the other probes leave usable (401s), so selecting it can only be the cap being ignored.

@@ -454,8 +454,8 @@ function Get-UsageCached {
     if ($Model -like '*fable*' -and $proved) { Clear-AccessDisabled $Label }
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
     # A probe that read no window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not overwrite a
-    # cached cap still in force: ranking, selection and the fallback read that file through Test-CapCached, until the cap's own
-    # reset or, with none, until a reading replaces it. For a Fable probe the window is oi7 (no oi7_stat or oi7_util); for any
+    # cached cap still in force: ranking, selection and the fallback read that file through Test-CapCached until the cap's reset
+    # or, with no usable reset, for up to seven days after the reading. For a Fable probe the window is oi7 (no oi7_stat or oi7_util); for any
     # other model it is the session or weekly one (no status, s5_stat, w7_stat or s5_util).
     $non2xx = -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300)
     $keepCap = if ($Model -like '*fable*') { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
@@ -717,8 +717,8 @@ function Rank-Accounts {
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
     # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
-    # probe (an unknown ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token; a subscription-refusal 403 is $fDenied below, any other 403 on the messages call is an ok non-2xx, so the cached cap applies) stays unknown, so not-capped as above; a cap with no reset would
-    # otherwise hold for good. Honouring a cap with a future reset there is an open question (#20).
+    # probe (an unknown ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token) stays unknown. An explicit
+    # subscription refusal is handled by $fDenied below. Using the cache after failed Fable probes is a separate follow-up (#20).
     $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     $fCapLive = ($fu.ok -and $fu.oi7_stat -eq 'rejected')
     $fCapped = $fCapLive -or ($fNoWin -and (Test-FableCapCached $l))
@@ -1134,32 +1134,35 @@ function Invoke-EnsureCliSeat {
 
 # Does this seat's cached reading say a window is capped, with the cap still in force? Which = 'fable' reads the weekly Fable window
 # (usage-cache-fable.json, oi7_*); 'default' reads the default-model reading (usage-cache.json): the session window (s5_*), the weekly
-# window (w7_*), or an overall status of rejected with neither window named. Reads the cache file whatever its age: the cache TTL is
-# how long a reading is fresh enough to rank on, not how long a cap lasts. A rejection holds until its own reset (epoch seconds); with
-# that reset missing or unreadable, until a newer reading replaces the file: a 2xx, or a non-2xx carrying one of the fields $keepCap
-# in Get-UsageCached tests (oi7_stat or oi7_util for Fable; status, s5_stat, w7_stat or s5_util otherwise). That is the probe path;
-# claude-rotate-proxy.py write_cache also rewrites these files (see its own rules).
+# window (w7_*), or an overall rejection with no rejected window named. A rejection holds until its reset (epoch seconds).
+# Without a usable reset, it holds for up to seven days from the cache timestamp. A newer reading can replace the cap earlier
+# through Get-UsageCached or the proxy's write_cache. The cache freshness TTL used by Get-UsageCached is independent of this check.
 # Never probes.
 function Test-CapCached {
   param([string]$Label, [string]$Which = 'default')
   $name = if ($Which -eq 'fable') { 'usage-cache-fable.json' } else { 'usage-cache.json' }
   $cf = Join-Path (Join-Path $Root $Label) $name
   if (-not (Test-Path -LiteralPath $cf)) { return $false }
-  try { $d = (Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json).data } catch { return $false }
+  try { $c = Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json } catch { return $false }
+  $d = $c.data
   if (-not $d -or -not $d.ok) { return $false }
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $sampledAt = [int64]0
+  $withinWeek = [int64]::TryParse([string]$c.ts, [ref]$sampledAt) -and $sampledAt -gt 0 -and
+                $sampledAt -le $now -and ($now - $sampledAt) -lt (7 * 86400)
   $inForce = {
     param($stat, $resetRaw)
     if ($stat -ne 'rejected') { return $false }
     $reset = [int64]0
-    if (-not [int64]::TryParse([string]$resetRaw, [ref]$reset) -or $reset -le 0) { return $true }
+    if (-not [int64]::TryParse([string]$resetRaw, [ref]$reset) -or $reset -le 0) { return $withinWeek }
     return ($reset -gt $now)
   }
   if ($Which -eq 'fable') { return (& $inForce $d.oi7_stat $d.oi7_reset) }
   if (& $inForce $d.s5_stat $d.s5_reset) { return $true }
   if (& $inForce $d.w7_stat $d.w7_reset) { return $true }
-  # an overall rejection that names no rejected window has no reset to wait for: it holds until a reading replaces it
-  return ($d.status -eq 'rejected' -and $d.s5_stat -ne 'rejected' -and $d.w7_stat -ne 'rejected')
+  # The proxy also writes Fable rejections to the Fable cache. An overall rejection tied to that window belongs there.
+  return ($withinWeek -and $d.status -eq 'rejected' -and $d.s5_stat -ne 'rejected' -and
+          $d.w7_stat -ne 'rejected' -and $d.oi7_stat -ne 'rejected')
 }
 
 # The Fable-window cap alone (see Test-CapCached).
@@ -1177,9 +1180,8 @@ function Select-RotationTarget {
   if ($PSBoundParameters.ContainsKey('UnknownExcept')) {
     # The access-refusal fallback: usage unknown (network), so no session bar, but every other exclusion
     # still holds - the active seat, the desktop-app seat, a seat marked disabled, and a seat whose cached
-    # reading says a capped window (the default-model session or weekly window, or the weekly Fable one) until that cap's own
-    # reset (or, with none, until a reading replaces it), however old the reading (cache only: the network is what failed, so no probe; see Test-CapCached). Only a seat whose probe failed on the
-    # network qualifies: a 401 (dead token), a 5xx, or a missing token is a seat the CLI cannot use, not an unknown one.
+    # reading says a cap is still in force (see Test-CapCached). Only a seat whose probe failed on the network qualifies:
+    # a 401 (dead token), a 5xx, or a missing token is a seat the CLI cannot use, not an unknown one.
     $appSeat = Get-AppSeatLabel
     $unknown = @(Rank-Accounts $false $false | Where-Object {
       $_.access -eq 'unknown' -and $_.net -and $_.label -ne $UnknownExcept -and -not ($appSeat -and ($_.label -ieq $appSeat)) -and -not (Read-AccessDisabled $_.label)

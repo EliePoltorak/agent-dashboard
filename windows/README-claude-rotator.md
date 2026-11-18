@@ -126,8 +126,10 @@ soonest weekly renewal first — and names the winner.
 excluded outright, not merely ranked last — Fable runs merge-pr's Gate C. A cap still counts when
 the live probe answered without reading it: a non-2xx carrying none of `status`, `s5_stat`,
 `w7_stat` or `s5_util` (for Fable: none of `oi7_stat` or `oi7_util`). The cap kept in the seat's
-`usage-cache[-fable].json` then counts until its own reset, or until a reading replaces the file (a
-2xx, or a non-2xx carrying one of those fields; see `Test-CapCached`). A Fable probe that fails
+`usage-cache[-fable].json` then counts until its own reset. Without a usable reset, it counts for up
+to seven days from the cached reading. A new reading can replace it sooner (a 2xx, or a non-2xx
+carrying one of those fields). The proxy saves a Fable rejection to `usage-cache-fable.json` even
+when the response has no Fable utilization. A Fable probe that fails
 (any unknown reading, e.g. the network, a model-catalog HTTP or parse error, no token) still reads
 as not-capped, as any unknown Fable reading does (see the inference note below; #20).
 

@@ -37,7 +37,11 @@ class Fake(BaseHTTPRequestHandler):
         if tok == "tok-A":   # seat A is an ordinary seat whose session window is spent
             body = b'{"type":"error","error":{"type":"rate_limit_error","message":"spent"}}'
             self.send_response(429)
-            for k, v in (("status", "rejected"), ("5h-status", "rejected"), ("5h-utilization", "1.0")):
+            if self.path.endswith("?fable-status-only"):
+                fields = (("7d_oi-status", "rejected"), ("7d_oi-reset", "1893456000"))
+            else:
+                fields = (("status", "rejected"), ("5h-status", "rejected"), ("5h-utilization", "1.0"))
+            for k, v in fields:
                 self.send_header(RL + k, v)
             self.send_header("content-type", "application/json")
             self.end_headers()
@@ -145,9 +149,12 @@ def main():
         open(os.path.join(root, ".no-rotate"), "w").close()
         time.sleep(21)   # past the proxy's rotate cooldown, so the rotator really is asked
         seen.clear()
-        status, body = call(port, "tok-A")
+        status, body = call(port, "tok-A", "/v1/messages?fable-status-only")
         assert status == 429 and b"spent" in body and seen == ["tok-A"], (status, body, seen)
-        print("ok  nothing to rotate to -> original 429, no replay")
+        with open(os.path.join(root, "A", "usage-cache-fable.json"), encoding="utf-8") as f:
+            fab = json.load(f)["data"]
+        assert fab["oi7_stat"] == "rejected" and fab["oi7_reset"] == "1893456000" and fab["oi7_util"] is None, fab
+        print("ok  status-only Fable rejection is cached, original 429 returned when no seat can rotate")
 
         # 5. health
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
