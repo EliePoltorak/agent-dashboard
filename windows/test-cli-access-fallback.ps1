@@ -593,6 +593,15 @@ $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Enc
 Check 'a newer Fable allowance in the default cache supersedes the Fable cache rejection' ((Select-RotationTarget 90 'B').label -eq 'A')
 $measuredCap = @{ ts = $statusOnly.ts; data = @{ ok = $true; http = 429; oi7_stat = 'rejected'; oi7_util = 1.0; oi7_reset = [string]($nowS + 3600) } }
 $measuredCap | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache.json')
+Check 'the watcher baseline reports a measured Fable cap' ((Read-FableCache 'A').capped)
+$sameResponse = @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'
+                   oi7_stat = 'rejected'; oi7_util = 1.0; oi7_reset = [string]($nowS + 3600) } }
+foreach ($name in $cacheNames) { $sameResponse | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA $name) -Encoding UTF8 }
+Check 'the watcher baseline reports a cap the proxy saved in both caches at once' ((Read-FableCache 'A').capped)
+@{ ts = $statusOnly.ts + 60; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; s5_util = 0.1; oi7_stat = 'allowed' } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+$measuredCap | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Check 'the watcher baseline agrees: a newer default-cache allowance clears a measured Fable cap' (-not (Read-FableCache 'A').capped)
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
