@@ -639,6 +639,15 @@ Set-NestedRej ($nowS - 900) 'proxy' ($nowS - 30) $rej429
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
 Check 'a newer Fable cache allowance supersedes a nested Fable rejection' ($null -eq (Get-ProxySample 'A' $true))
 Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -ErrorAction SilentlyContinue
+Set-NestedRej ($nowS - 900) 'proxy' ($nowS - 30) $rej429
+@{ ts = $nowS - 600; observed_ms = ($nowS - 600) * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.85 }
+   fable_cap = @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600) } } } |
+  ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
+Check 'a newer status-only Fable cache rejection keeps the nested Fable rejection' ((Get-ProxySample 'A' $true).fable_only_rejection)
+@{ ts = $nowS + 3600; observed_ms = ($nowS + 3600) * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.4 } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
+Check 'a future-dated Fable cache allowance does not hide a fresh nested rejection' ((Get-ProxySample 'A' $true).fable_only_rejection)
+Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $allowedFable.ts = $statusOnly.ts - 60
