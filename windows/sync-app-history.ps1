@@ -138,18 +138,21 @@ $pathNames = if ($extendedUnc) {
 } else {
   $path -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
 }
+$directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
+$verbatim = $path.StartsWith('\\?\', [StringComparison]::Ordinal)
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
-    ($unc -and $pathNames -notmatch '^\\\\[^\\]+\\[^\\]+') -or
-    (-not $device -and $pathNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
+    ($unc -and $pathNames -notmatch '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}(?:\\|$))[^\\]+') -or
+    (-not $device -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
+    ($verbatim -and $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)') -or
     -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
 $root = [IO.Path]::GetPathRoot($path)
 $components = [Collections.Generic.List[string]]::new()
 foreach ($component in ($path.Substring($root.Length) -split '\\')) {
-  if ($component -eq '..') {
+  if ([string]::Equals($component, '..', [StringComparison]::Ordinal)) {
     if ($components.Count) { $components.RemoveAt($components.Count - 1) }
-  } elseif ($component -and $component -ne '.') {
+  } elseif ($component -and -not [string]::Equals($component, '.', [StringComparison]::Ordinal)) {
     $components.Add($component)
   }
 }
