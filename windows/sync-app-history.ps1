@@ -123,10 +123,13 @@ if (-not $PSBoundParameters.ContainsKey('Cwd')) {
     $Cwd = ([string](Get-Content -LiteralPath $workspaceFile -Raw)).TrimEnd([char[]](13, 10))
   }
 }
-# The filesystem syntax check allows stream names. Only a drive prefix can contain a colon.
+# Check syntax without touching the workspace. An offline share can still have local transcripts.
+$pathSyntax = ([string]$Cwd).Replace('/', '\') -replace '^\\\\\?\\UNC\\', '\\'
+$unc = $pathSyntax.StartsWith('\\') -and $pathSyntax -notmatch '^\\\\[?.]\\'
+$pathNames = $pathSyntax -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:', ''
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd) -or
-    -not (Test-Path -LiteralPath "FileSystem::$Cwd" -IsValid) -or
-    $Cwd -notmatch '^(?:(?:[\\/]{2}[?.][\\/])?[A-Z]:)?[^:]*$') {
+    ($unc -and $pathSyntax -notmatch '^\\\\[^\\]+\\[^\\]+') -or
+    $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
 $Cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Cwd))

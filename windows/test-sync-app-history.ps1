@@ -33,11 +33,12 @@
 #>
 $Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
 $sb = Join-Path ([IO.Path]::GetTempPath()) "sync-app-history-test's-[fixture]-$([guid]::NewGuid())"
-$workspace = Join-Path $sb 'workspace'
+# This path is only a transcript key. Keep its encoded directory name independent of TEMP.
+$workspace = Join-Path ([IO.Path]::GetPathRoot($PSHOME)) "sync-fixture's-[workspace]"
 $encoded = $workspace -creplace '[^A-Za-z0-9]', '-'
 $proj = "$sb\home\.claude\projects\$encoded"
 $ccs = "$sb\app\Claude\claude-code-sessions"
-New-Item -ItemType Directory $workspace, $proj, "$sb\home\.claude-app-seats", $ccs -Force | Out-Null
+New-Item -ItemType Directory $proj, "$sb\home\.claude-app-seats", $ccs -Force | Out-Null
 $fixtureSessions = @(1..4 | ForEach-Object { [guid]::NewGuid().ToString() })
 foreach ($seat in 'A','B','C') {
   $folder = Join-Path (Join-Path $ccs $seat) 'fixture-workspace'
@@ -102,7 +103,7 @@ function inIdx($r) { $p = Join-Path (Split-Path -LiteralPath $r.f) 'archived-ses
 $initialIndex = recHash
 run @{ Quiet = $true }
 check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
-foreach ($invalidWorkspace in 'relative-path', ($workspace + '"'), ($workspace + ':archive'), '\\server\share:stream\workspace') {
+foreach ($invalidWorkspace in 'relative-path', ($workspace + '"'), ($workspace + ':archive'), '\\server\share:stream\workspace', '\\server\sh*re\workspace', '\\server') {
   Set-Content -LiteralPath $workspaceFile $invalidWorkspace
   run @{ Quiet = $true }
   check "an invalid workspace setting ($invalidWorkspace) fails before writing state" ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
