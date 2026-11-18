@@ -643,7 +643,8 @@ which nothing runs it from, so a clean `rotator-sync --check` does not mean the 
 
 Before deploying this version, save the absolute workspace path as a single unquoted line in
 `%USERPROFILE%\.claude\history-sync-workspace.txt`. The account-switch hook and the scheduled task
-read that file on each run. Check it with `claude-sync-history -DryRun`. Manual runs can pass an
+read that file on each run. Before replacing the installed script, run the checkout copy from the
+repo root with `pwsh -NoProfile -File .\windows\sync-app-history.ps1 -DryRun`. Manual runs can pass an
 absolute `-Cwd` to override it. If neither is supplied, the sync stops before opening the app's
 session index.
 
