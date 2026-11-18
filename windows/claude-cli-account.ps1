@@ -496,7 +496,9 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
         # A headerless response cannot clear a legacy cap or undo an earlier Fable allowance.
         if ($priorAt) { $Entry.fable_confirmed_ms = $priorAt }
       }
-      if ($d.oi7_stat -and $null -eq $d.oi7_util -and $null -ne $prior.data.oi7_util) {
+      # A future-dated measurement (a clock set back) is not kept, or its timestamp would outlive this write.
+      if ($d.oi7_stat -and $null -eq $d.oi7_util -and $null -ne $prior.data.oi7_util -and
+          (Get-CacheObservationMs $prior) -le $Entry.observed_ms) {
         $Entry = @{ ts = $prior.ts; observed_ms = $prior.observed_ms; data = $prior.data; fable_cap = $Entry }
       }
     } else {
@@ -813,7 +815,7 @@ function Rank-Accounts {
       continue
     }
     $s5 = [double]$u.s5_util; $w7 = [double]$u.w7_util
-    # The cached cap counts only for the reading $keepCap in Get-UsageCached leaves a cap on disk for (the same test): an ok non-2xx
+    # The cached cap counts only for the reading Write-UsageCacheFile keeps a cached cap through (the same test): an ok non-2xx
     # carrying none of the session/weekly window's fields. Any other reading is not checked against the cache (though within the TTL,
     # $u itself may be the cached reading: Get-UsageCached serves a fresh-enough file).
     $capLive = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or
@@ -824,7 +826,7 @@ function Rank-Accounts {
     # merge-pr's Gate C, so landing on a seat that cannot run Fable trades one blocked pipeline
     # for another. An UNKNOWN fable reading is deliberately treated as not-capped — excluding on
     # a probe hiccup would wedge rotation entirely, which is the worse failure.
-    # The cached Fable cap counts on the same terms ($keepCap's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
+    # The cached Fable cap counts on the same terms (Write-UsageCacheFile's Fable test: an ok non-2xx with no oi7_stat or oi7_util). A failed Fable
     # probe (an unknown ok=$false reading, e.g. network, a model-catalog HTTP or parse error, no token) stays unknown. An explicit
     # subscription refusal is handled by $fDenied below. Using the cache after failed Fable probes is a separate follow-up (#20).
     $fNoWin  = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
@@ -1104,8 +1106,9 @@ function Invoke-CheckRotateCore {
     # 2026-09-22 10:06 rotation at 104%, which woke nobody, against 2026-09-20 02:56 (fable) which
     # did. Rank-Accounts has tested s5_stat all along; only this branch did not.
     elseif ($u.s5_stat -eq 'rejected') { $trigger = "SESSION window CAPPED at $s5% (weekly $w7%)"; $capped = 'session' }
-    # The server's overall verdict. Rank-Accounts already treats it as a cap and the proxy rotates
-    # on it; without this branch a rejection carried by another claim was invisible here, so the
+    # The server's overall verdict. Rank-Accounts treats it as a cap unless oi7_stat is rejected
+    # (then it is a Fable cap, judged on the Fable reading); this branch rotates off the active seat
+    # either way, and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
     # proxy re-asked every 20s and nothing moved (Fable review 2026-10-30, P2-4).
     elseif ($u.status -eq 'rejected') { $trigger = "account REJECTED by the server (claim $($u.claim); session $s5%, weekly $w7%)"; $capped = 'session' }
     elseif ($s5 -ge $sessBar)      { $trigger = "session at $s5% >= $sessBar% (weekly $w7%, left to burn)" }
@@ -1329,7 +1332,7 @@ function Select-RotationTarget {
     if ($fu.access -eq 'disabled') { continue }                       # the Fable probe was an explicit access refusal: never a target
     if ($fu.ok -and $fu.oi7_stat -eq 'rejected') { continue }         # Gate C needs Fable
     $fNoWin = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
-    if ($fNoWin -and (Test-FableCapCached $c.label)) {               # an ok non-2xx that read no Fable window left a cap in force on disk ($keepCap)
+    if ($fNoWin -and (Test-FableCapCached $c.label)) {               # an ok non-2xx that read no Fable window left a cap in force on disk (Write-UsageCacheFile)
       Write-RotateLog ("skipped '{0}' as a target: its Fable probe (http {1}) read no Fable window and a cached Fable cap is still in force" -f $c.label, $fu.http) Yellow
       continue
     }

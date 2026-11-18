@@ -183,6 +183,16 @@ def main():
         allowance = saved.pop("fable_cap")
         assert saved == measurement and allowance["data"]["oi7_stat"] == "allowed", (saved, allowance)
         assert allowance["observed_ms"] > cap["observed_ms"], (cap, allowance)
+        future = dict(measurement, ts=measurement["ts"] + 86400, observed_ms=(measurement["ts"] + 86400) * 1000)
+        with open(fable_path, "w", encoding="utf-8") as f:
+            json.dump(future, f)   # a clock set back: the measurement on disk is dated tomorrow
+        status, _ = call(port, "tok-A", "/v1/messages?fable-status-only")
+        assert status == 429
+        with open(fable_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        assert "fable_cap" not in saved and saved["data"]["oi7_stat"] == "rejected", saved
+        assert saved["observed_ms"] <= time.time() * 1000, saved
+        print("ok  a status-only Fable rejection does not carry a future-dated measurement's timestamp forward")
         with open(os.path.join(root, ".active"), "w") as f:
             f.write("A")
         print("ok  status-only Fable rejection preserves the last measured utilization and its timestamp")

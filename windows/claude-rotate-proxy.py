@@ -59,14 +59,17 @@ FIELDS = {"status": RL + "status", "s5_util": RL + "5h-utilization", "s5_stat": 
           "w7_reset": RL + "7d-reset", "oi7_util": RL + "7d_oi-utilization",
           "oi7_stat": RL + "7d_oi-status", "oi7_reset": RL + "7d_oi-reset",
           "claim": RL + "representative-claim", "org": "anthropic-organization-id"}
-WRITE_EVERY = 5        # s between cache writes per seat (a rejection always writes at once)
+WRITE_EVERY = 5        # s between cache writes per seat (a rejection, or a reading that can clear a cached Fable
+                       # rejection, skips it; a reading older than the file's is never written)
+CACHE_LOCK_TRIES = 40  # x 25 ms: a cold PowerShell writer can hold the cache lock for over 100 ms
 ROTATE_COOLDOWN = 20   # s: after a rotation attempt that changed nothing, don't ask again yet
 LOG_MAX = 1_000_000
 
 _lock = threading.Lock()          # tokens and log
 _cache_locks = {}                  # same-process writers to each cache path
 _rotate_lock = threading.Lock()   # one rotation request at a time
-_state = {"tokens": {}, "by_label": {}, "loaded": 0.0, "written": {}, "last_rotate": 0.0}
+_state = {"tokens": {}, "by_label": {}, "loaded": 0.0, "written": {}, "last_rotate": 0.0,
+          "fable_capped": set()}   # -fable keys whose file held a rejection when this proxy last read or wrote it
 
 
 def log(msg):
@@ -146,12 +149,12 @@ def lock_cache(stream):
         import fcntl
         acquire = lambda: fcntl.lockf(stream, fcntl.LOCK_EX | fcntl.LOCK_NB, 1)
         release = lambda: fcntl.lockf(stream, fcntl.LOCK_UN, 1)
-    for attempt in range(5):
+    for attempt in range(CACHE_LOCK_TRIES):
         try:
             acquire()
             break
         except OSError:
-            if attempt == 4:
+            if attempt == CACHE_LOCK_TRIES - 1:
                 raise
             time.sleep(0.025)
     try:
@@ -197,7 +200,9 @@ def fable_observed_ms(entry):
 def cache_entry(prior, suffix, entry, has_fable):
     if suffix:
         # Keep the last measurement and its timestamp for the watcher and usage history.
-        if entry["data"].get("oi7_util") is None and prior.get("data", {}).get("oi7_util") is not None:
+        # A future-dated measurement (a clock set back) is not kept, or its timestamp would outlive this write.
+        if (entry["data"].get("oi7_util") is None and prior.get("data", {}).get("oi7_util") is not None
+                and observed_ms(prior) <= entry["observed_ms"]):
             return {**prior, "fable_cap": entry}
     elif not has_fable:
         # A default-only write must not lose an older proxy's only copy of the cap.
@@ -220,6 +225,10 @@ def write_cache(label, data):
         if not present:
             continue
         key = label + suffix
+        # Throttle before any lock or file read: this runs before the response reaches the client.
+        if (not rejected and now - _state["written"].get(key, 0) < WRITE_EVERY
+                and not (suffix and key in _state["fable_capped"])):
+            continue
         path = os.path.join(ROOT, label, "usage-cache%s.json" % suffix)
         tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
         with _lock:
@@ -228,6 +237,12 @@ def write_cache(label, data):
             with local_guard, open(path + ".lock", "a+b") as guard, lock_cache(guard):
                 prior = read_cache_for_update(path)
                 effective = (prior.get("fable_cap") if suffix else None) or prior
+                if suffix:
+                    # Learned on each read, so a rejection another writer saved is cleared within WRITE_EVERY.
+                    if effective.get("data", {}).get("oi7_stat") == "rejected":
+                        _state["fable_capped"].add(key)
+                    else:
+                        _state["fable_capped"].discard(key)
                 previous_ms = fable_observed_ms(prior) if suffix else observed_ms(effective)
                 if receipt <= previous_ms <= time.time_ns() // 1_000_000:
                     continue
@@ -243,6 +258,11 @@ def write_cache(label, data):
                     time.sleep(0.025)
                     os.replace(tmp, path)
                 _state["written"][key] = now
+                if suffix:
+                    if ((entry.get("fable_cap") or entry).get("data", {}).get("oi7_stat") == "rejected"):
+                        _state["fable_capped"].add(key)
+                    else:
+                        _state["fable_capped"].discard(key)
         except (OSError, TypeError, ValueError) as e:
             log("cache write failed for %s: %s" % (key, e))
 

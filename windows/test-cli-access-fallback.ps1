@@ -644,6 +644,11 @@ Check 'a persistently invalid Fable cache is repaired by the next observation' (
 Check 'a future-dated reading is not served as fresh' (-not (Get-UsageCached 'A' $false 'fable' '-fable' $true).ok)
 Write-UsageCacheFile $fablePath 'A' $repair $true
 Check 'a future cache timestamp does not block the next Fable observation' (Test-FableCapCached 'A')
+@{ ts = $second + 86400; observed_ms = $observed + 86400000; data = @{ok=$true; http=200; oi7_util=0.4} } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Write-UsageCacheFile $fablePath 'A' $repair $true
+$saved = Read-UsageCacheFile $fablePath
+Check 'a status-only write does not carry a future-dated measurement forward' (-not $saved.fable_cap -and [long]$saved.observed_ms -eq $repair.observed_ms)
 
 # With no usable reset, a headerless probe preserves both the cap and its original timestamp for up to a week.
 $week = 7 * 86400
@@ -767,7 +772,7 @@ foreach ($case in @(
   }
 }
 
-# Only the reading $keepCap keeps a cap for (an ok non-2xx with none of the window's fields) is checked against the cache: a 2xx
+# Only the reading Write-UsageCacheFile keeps a cached cap through (an ok non-2xx with none of the window's fields) is checked against the cache: a 2xx
 # (with or without the window) or a non-2xx carrying the window decides, even when its cache write failed and the old cap is still
 # on disk. The old cache is past its TTL here, so the live reading is the one ranked.
 foreach ($case in @(
