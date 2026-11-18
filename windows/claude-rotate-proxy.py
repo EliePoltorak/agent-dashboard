@@ -237,35 +237,40 @@ def write_cache(label, data):
         with _lock:
             local_guard = _cache_locks.setdefault(path, threading.Lock())
         try:
-            with local_guard, open(path + ".lock", "a+b") as guard, lock_cache(guard):
-                prior = read_cache_for_update(path)
-                effective = (prior.get("fable_cap") if suffix else None) or prior
-                if suffix:
-                    # Learned on each read. A rejection another writer saved since is seen on the next unthrottled write.
-                    if effective.get("data", {}).get("oi7_stat") == "rejected":
-                        _state["fable_capped"].add(key)
-                    else:
-                        _state["fable_capped"].discard(key)
-                previous_ms = fable_observed_ms(prior) if suffix else observed_ms(effective)
-                if receipt <= previous_ms <= time.time_ns() // 1_000_000:
+            with local_guard:
+                # Re-checked here: threads queued behind a failed write must not each wait out the lock again.
+                if now - _state["failed"].get(key, 0) < WRITE_EVERY or (
+                        not rejected and not suffix and now - _state["written"].get(key, 0) < WRITE_EVERY):
                     continue
-                clears_fable_cap = suffix and effective.get("data", {}).get("oi7_stat") == "rejected"
-                if not rejected and not clears_fable_cap and now - _state["written"].get(key, 0) < WRITE_EVERY:
-                    continue
-                entry = cache_entry(prior, suffix, {"ts": receipt // 1000, "observed_ms": receipt, "data": data}, has_fable)
-                with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump(entry, f)
-                try:
-                    os.replace(tmp, path)
-                except PermissionError:
-                    time.sleep(0.025)
-                    os.replace(tmp, path)
-                _state["written"][key] = now
-                if suffix:
-                    if ((entry.get("fable_cap") or entry).get("data", {}).get("oi7_stat") == "rejected"):
-                        _state["fable_capped"].add(key)
-                    else:
-                        _state["fable_capped"].discard(key)
+                with open(path + ".lock", "a+b") as guard, lock_cache(guard):
+                    prior = read_cache_for_update(path)
+                    effective = (prior.get("fable_cap") if suffix else None) or prior
+                    if suffix:
+                        # Learned on each read. A rejection another writer saved since is seen on the next unthrottled write.
+                        if effective.get("data", {}).get("oi7_stat") == "rejected":
+                            _state["fable_capped"].add(key)
+                        else:
+                            _state["fable_capped"].discard(key)
+                    previous_ms = fable_observed_ms(prior) if suffix else observed_ms(effective)
+                    if receipt <= previous_ms <= time.time_ns() // 1_000_000:
+                        continue
+                    clears_fable_cap = suffix and effective.get("data", {}).get("oi7_stat") == "rejected"
+                    if not rejected and not clears_fable_cap and now - _state["written"].get(key, 0) < WRITE_EVERY:
+                        continue
+                    entry = cache_entry(prior, suffix, {"ts": receipt // 1000, "observed_ms": receipt, "data": data}, has_fable)
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(entry, f)
+                    try:
+                        os.replace(tmp, path)
+                    except PermissionError:
+                        time.sleep(0.025)
+                        os.replace(tmp, path)
+                    _state["written"][key] = now
+                    if suffix:
+                        if ((entry.get("fable_cap") or entry).get("data", {}).get("oi7_stat") == "rejected"):
+                            _state["fable_capped"].add(key)
+                        else:
+                            _state["fable_capped"].discard(key)
         except (OSError, TypeError, ValueError) as e:
             log("cache write failed for %s: %s" % (key, e))
             _state["failed"][key] = now
