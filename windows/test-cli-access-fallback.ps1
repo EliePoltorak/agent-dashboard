@@ -569,6 +569,11 @@ $cacheNames = 'usage-cache.json','usage-cache-fable.json'
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a Fable-only rejection is no default cap' (-not (Test-CapCached 'A' 'default'))
 Check 'the network fallback honors a legacy rejection stored only in the default cache' ((Select-RotationTarget 90 'B').label -eq 'C')
+$measured = @{ ts = $nowS - $stale; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'
+               oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600); oi7_util = '1.0' } }
+$measured | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'the network fallback honors a measured Fable rejection whose Fable cache write was skipped' ((Select-RotationTarget 90 'B').label -eq 'C')
+$statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $allowedFable = @{ ts = $statusOnly.ts + 60; data = @{ ok = $true; oi7_stat = 'allowed'; oi7_util = 0.1 } }
 $fablePath = Join-Path $seatA 'usage-cache-fable.json'
 @{ ts = $statusOnly.ts + 60; data = @{ ok = $true; http = 500 } } |

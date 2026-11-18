@@ -205,10 +205,11 @@ def cache_entry(prior, suffix, entry, has_fable):
                 and observed_ms(prior) <= entry["observed_ms"]):
             return {**prior, "fable_cap": entry}
     elif not has_fable:
-        # A default-only write must not lose an older proxy's only copy of the cap.
+        # A default-only write must not lose the default cache's copy of a Fable rejection: an older proxy's only
+        # copy, or the backup when the -fable write was skipped. With or without utilization.
         cap = prior.get("fable_cap")
         old = prior.get("data", {})
-        if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat") == "rejected" and old.get("oi7_util") is None:
+        if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat") == "rejected":
             cap = {"ts": prior.get("ts"), "observed_ms": observed_ms(prior), "data": old}
         # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
         if cap and observed_ms(cap) <= entry["observed_ms"]:

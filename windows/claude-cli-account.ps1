@@ -436,9 +436,10 @@ function Get-CacheObservationMs($Cache) {
   return 0
 }
 
-# Proxies before this fix could put a status-only Fable rejection only in the default cache.
+# A proxy Fable rejection in the default cache: an older proxy's only copy of a status-only rejection, or
+# the backup when the proxy's -fable write was skipped (with or without utilization). The newer reading wins.
 function Get-LegacyFableCap($Cache) {
-  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat -eq 'rejected' -and $null -eq $Cache.data.oi7_util) {
+  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat -eq 'rejected') {
     return @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
   }
   return $Cache.fable_cap
