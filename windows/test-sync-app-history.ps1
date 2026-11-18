@@ -32,16 +32,13 @@
   any failure. Each sync run takes ~1-2 min on a full index.
     pwsh -File test-sync-app-history.ps1 [<path to sync-app-history.ps1>]
 #>
-$sourceScript = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
+$Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
 $sb = Join-Path ([IO.Path]::GetTempPath()) "sync-app-history-test-$([guid]::NewGuid())"
-$Script = Join-Path $sb 'sync-app-history.ps1'
-$settingsPath = Join-Path $sb 'rotator.local.json'
 $workspace = Join-Path $sb 'workspace'
 $encoded = $workspace -creplace '[^A-Za-z0-9]', '-'
 $proj = "$sb\home\.claude\projects\$encoded"
 $ccs = "$sb\app\Claude\claude-code-sessions"
 New-Item -ItemType Directory $workspace, $proj, "$sb\home\.claude-app-seats", $ccs -Force | Out-Null
-Copy-Item -LiteralPath $sourceScript -Destination $Script
 $fixtureSessions = @(1..4 | ForEach-Object { [guid]::NewGuid().ToString() })
 foreach ($seat in 'A','B','C') {
   $folder = Join-Path (Join-Path $ccs $seat) 'fixture-workspace'
@@ -60,10 +57,10 @@ $asst = 1..7 | ForEach-Object { '{"type":"assistant","message":{"role":"assistan
 Set-Content "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + $asst)
 "sandbox: $sb"
 $statePath = "$sb\home\.claude-app-seats\.flag-state.json"
-$fail = 0; $script:out = @(); $script:rc = 0
+$fail = 0; $script:out = @(); $script:rc = 0; $script:configuredCwd = ''
 function run([string]$extra = '') {
   # -NoPrune is a no-op now; passed so an old invocation is proven to still work
-  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -NoPrune -AssumeAppClosed $extra *>&1" 2>&1 | ForEach-Object { "$_" })
+  $script:out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; `$env:CLAUDE_HISTORY_SYNC_CWD='$script:configuredCwd'; & '$Script' -NoPrune -AssumeAppClosed $extra *>&1" 2>&1 | ForEach-Object { "$_" })
   $script:rc = $LASTEXITCODE
   $script:out | Where-Object { $_ -match '^set |^WOULD |isArchived|isStarred|auto-archiv|not synced|rror|xception|WARNING|added \d' } | ForEach-Object { "    $_" }
 }
@@ -97,10 +94,10 @@ function inIdx($r) { $p = Join-Path (Split-Path $r.f) 'archived-sessions.idx'; (
 
 run '-DryRun'
 check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path $statePath))
-Set-Content -LiteralPath $settingsPath -Value '{"invalid":' -NoNewline
-run "-Cwd '$workspace' -DryRun"
+$script:configuredCwd = 'relative-path'
+run "-Cwd '$workspace\' -DryRun"
 check 'an explicit workspace bypasses the unusable local setting' ($rc -eq 0 -and -not ($out -match 'no transcripts') -and -not (Test-Path $statePath))
-@{ historySyncCwd = $workspace } | ConvertTo-Json | Set-Content -LiteralPath $settingsPath
+$script:configuredCwd = "$workspace\"
 
 # The sandbox index agrees across seats, so plant a disagreement for the first run to resolve.
 $U = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Select-Object -First 1
