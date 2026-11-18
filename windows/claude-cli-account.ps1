@@ -1026,10 +1026,18 @@ function Get-ProxySample {
     # timestamp and source. Judge the nested reading on its own: a fresh one (not future-dated) is the
     # rejection that just happened, whatever wrote the reading above it or how old that is. It carries
     # no default-window values, so it is returned as its own sample and never feeds the session projection.
+    # fable_cap can also hold a carried full reading: its overall rejection counts only when it names no
+    # default window. A fresh session or weekly cap above it is the limit to report, so it wins (below).
     $n = $c.fable_cap
-    if ($n -and $n.data.src -eq 'proxy' -and $n.data.ok -and ($n.data.status -eq 'rejected' -or $n.data.oi7_stat -eq 'rejected')) {
-      $nAge = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - (Get-CacheObservationMs $n)
-      if ($nAge -ge 0 -and $nAge -le ($ProxyFreshSec * 1000)) {
+    $nDefault = ($null -ne $n.data.s5_util -or $n.data.s5_stat -or $n.data.w7_stat)
+    $topCap = ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected') -and $age -le $ProxyFreshSec)
+    if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
+        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault))) {
+      $nAt = Get-CacheObservationMs $n
+      $nAge = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $nAt
+      # A newer Fable cache reading (a live Fable probe's allowance) supersedes it.
+      $fableAt = Get-FableObservationMs (Read-UsageCacheFile (Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'))
+      if ($nAge -ge 0 -and $nAge -le ($ProxyFreshSec * 1000) -and $nAt -ge $fableAt) {
         return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $n.data.claim
                                   oi7_stat = $n.data.oi7_stat; fable_only_rejection = $true }
       }
