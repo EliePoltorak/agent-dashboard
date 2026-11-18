@@ -124,7 +124,8 @@ if (-not $PSBoundParameters.ContainsKey('Cwd')) {
   }
 }
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd) -or
-    -not (Test-Path -LiteralPath "FileSystem::$Cwd" -IsValid)) {
+    -not (Test-Path -LiteralPath "FileSystem::$Cwd" -IsValid) -or
+    $Cwd.Substring([IO.Path]::GetPathRoot($Cwd).Length).Contains(':')) {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
 $Cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Cwd))

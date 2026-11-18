@@ -102,7 +102,7 @@ function inIdx($r) { $p = Join-Path (Split-Path -LiteralPath $r.f) 'archived-ses
 $initialIndex = recHash
 run @{ Quiet = $true }
 check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
-foreach ($invalidWorkspace in 'relative-path', ($workspace + '"')) {
+foreach ($invalidWorkspace in 'relative-path', ($workspace + '"'), ($workspace + ':archive')) {
   Set-Content -LiteralPath $workspaceFile $invalidWorkspace
   run @{ Quiet = $true }
   check "an invalid workspace setting ($invalidWorkspace) fails before writing state" ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
