@@ -468,6 +468,8 @@ function Get-UsageCached {
   # CacheOnly = a switch/rotate readout. It must never pay for a live probe (see Show-Usage).
   if ($CacheOnly) { return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; note='not probed (run claude-usage)' } }
   $d = Probe-Usage $Label $Model
+  # Order competing cache records by when the response was observed. A proxy can write while the probe is in flight.
+  $observedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   if (-not ($d.PSObject.Properties.Name -contains 'access') -or -not $d.access) {
     $d | Add-Member -NotePropertyName access -NotePropertyValue $(if ($d.ok) { 'ok' } else { 'unknown' }) -Force
   }
@@ -488,7 +490,7 @@ function Get-UsageCached {
     $keepCap = if ($isFable) { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
                else { ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and (Test-CapCached $Label 'default')) }
     if (-not $keepCap) {
-      $entry = @{ ts = $now; data = $d }
+      $entry = @{ ts = $observedAt; data = $d }
       if (-not $isFable) {
         # A default-model refresh has no authority over the older Fable-only rejection.
         $legacy = Get-LegacyFableCap (Read-UsageCacheFile $cf)

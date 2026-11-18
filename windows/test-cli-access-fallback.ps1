@@ -60,6 +60,12 @@ $global:ClaudeRotatorProbeOverride = {
     if ($plan -eq 'fable-disabled') {
       return [pscustomobject]@{ label=$Label; ok=$false; access='disabled'; http=403; code='oauth_org_not_allowed'; note='subscription disabled (403 oauth_org_not_allowed)' }
     }
+    if ($plan -eq 'fable-overlap') {
+      Start-Sleep -Milliseconds 1100   # give the proxy write a later epoch second than the start of this probe
+      $proxyAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+      @{ ts = $proxyAt; data = @{ ok = $true; src = 'proxy'; oi7_stat = 'rejected'; oi7_reset = $proxyAt + 3600 } } |
+        ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root $Label) 'usage-cache.json') -Encoding UTF8
+    }
     return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=200; oi7_util=0.1; oi7_stat='allowed'; note='' }
   }
   if ($plan -eq 'disabled') {
@@ -596,6 +602,14 @@ $allowedFable | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $fablePath -E
 $baseline = Read-FableCache 'A'
 Check 'a status-only cap preserves the older measured baseline' ($baseline.pct -eq 10 -and $baseline.ts -eq $allowedFable.ts -and -not $baseline.capped)
 Check 'cap checks use the status-only rejection alongside the measured baseline' (Test-FableCapCached 'A')
+
+Reset-Case
+$script:plan['A'] = 'fable-overlap'
+$null = Get-UsageCached 'A' $true 'fable' '-fable'
+Check 'a successful Fable response supersedes a proxy rejection received during the probe' (-not (Test-FableCapCached 'A'))
+$script:plan['A'] = 'fable-500'
+$null = Get-UsageCached 'A' $true 'fable' '-fable'
+Check 'a subsequent headerless Fable probe does not revive the superseded cap' (-not (Test-FableCapCached 'A'))
 
 # With no usable reset, a headerless probe preserves both the cap and its original timestamp for up to a week.
 $week = 7 * 86400
