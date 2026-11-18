@@ -438,6 +438,7 @@ function Get-CacheObservationMs($Cache) {
 
 # A proxy Fable observation (a rejection or an allowance) in the default cache: an older proxy's only copy of a
 # status-only rejection, or the backup when the proxy's -fable write was skipped. The newer reading wins.
+# Despite the name (and the fable_cap key it fills), the result can be an allowance: never read it as "capped".
 function Get-LegacyFableCap($Cache) {
   if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat) {
     return @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
@@ -508,7 +509,7 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
     } else {
       if ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and
           (Test-CapCached $Label 'default')) { return }
-      # A default-model refresh has no authority over the older Fable-only rejection.
+      # A default-model refresh has no authority over the older Fable observation (a rejection or an allowance).
       $legacy = Get-LegacyFableCap $prior
       # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
       # Only a reading without Fable fields leaves it to the cap (as in the proxy): one with them is the newer Fable word.
@@ -968,7 +969,8 @@ function Read-FableCache {
     if ($c.data -and $null -ne $c.data.oi7_util) {
       return [pscustomobject]@{ pct = [int][math]::Round([double]$c.data.oi7_util * 100)
                                 ts  = [int64]$c.ts
-                                capped = ($c.data.oi7_stat -eq 'rejected' -and (-not $c.fable_cap -or (Test-FableCapCached $Label))) }
+                                # A rejection here counts only while the cap checks agree, so a newer default-cache allowance clears it as it does for ranking.
+                                capped = ($c.data.oi7_stat -eq 'rejected' -and (Test-FableCapCached $Label)) }
     }
   } catch {}
   return $null

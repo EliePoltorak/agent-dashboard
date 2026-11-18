@@ -18,7 +18,7 @@ forwarded untouched. Binds 127.0.0.1 only. The desktop app cannot be routed thro
 sets ANTHROPIC_BASE_URL itself, and that beats every settings file (tested 2026-10-30).
 
 Run:   pythonw -I claude-rotate-proxy.py          (the 'Claude rotate proxy' task does this)
-Check: claude-rotate-proxy.py --self-test         (offline checks of the pure helpers)
+Check: claude-rotate-proxy.py --self-test         (offline checks: pure helpers, and cache writes in a temp root)
 """
 import http.client
 from contextlib import contextmanager
@@ -636,9 +636,10 @@ def self_test():
 
 def cache_self_test():
     """write_cache against a sandbox root: repair of malformed metadata, same-millisecond ties, carried allowances."""
-    import tempfile
-    global ROOT
+    import shutil, tempfile
+    global ROOT, LOG
     saved, ROOT = ROOT, tempfile.mkdtemp(prefix="crp-cache-")
+    saved_log, LOG = LOG, os.path.join(ROOT, ".proxy-log.txt")
     real_ns = time.time_ns
     try:
         os.makedirs(os.path.join(ROOT, "S"))
@@ -666,7 +667,8 @@ def cache_self_test():
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()
-        ROOT = saved
+        shutil.rmtree(ROOT, ignore_errors=True)
+        ROOT, LOG = saved, saved_log
 
 
 def marker_self_test():

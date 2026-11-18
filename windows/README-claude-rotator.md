@@ -132,7 +132,8 @@ carrying one of those fields). The proxy saves a Fable rejection to `usage-cache
 when the response has no Fable utilization. The last measured utilization keeps its original
 timestamp, unless that timestamp is in the future (a clock set back), when the rejection is saved alone. A proxy Fable rejection kept in the default cache (an older proxy's only copy, or the backup when
 the Fable cache write was skipped), with or without utilization, survives default-model refreshes
-until a newer Fable reading supersedes it.
+until a newer Fable reading supersedes it. A proxy Fable allowance kept the same way supersedes an
+older Fable cache rejection.
 A Fable probe that fails
 (any unknown reading, e.g. the network, a model-catalog HTTP or parse error, no token) still reads
 as not-capped, as any unknown Fable reading does (see the inference note below; #20).
