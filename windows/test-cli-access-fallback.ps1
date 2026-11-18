@@ -629,11 +629,21 @@ $null = Get-UsageCached 'A' $true 'fable' '-fable'
 Check 'a subsequent headerless Fable probe does not revive the superseded cap' (-not (Test-FableCapCached 'A'))
 
 Reset-Case
-$second = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$second = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - 1
 $observed = $second * 1000
 Write-UsageCacheFile $fablePath 'A' @{ ts = $second; observed_ms = $observed + 200; data = @{ ok = $true; http = 200; oi7_stat = 'allowed' } } $true
 Write-UsageCacheFile $fablePath 'A' @{ ts = $second; observed_ms = $observed + 100; data = @{ ok = $true; http = 429; oi7_stat = 'rejected' } } $true
 Check 'a delayed cache write cannot reinstate a rejection from earlier in the same second' ((Read-FableUsageCache $seatA).data.oi7_stat -eq 'allowed')
+
+$repair = @{ ts = $second; observed_ms = $observed + 300; data = @{ ok = $true; http = 429; oi7_stat = 'rejected' } }
+Set-Content -LiteralPath $fablePath -Value '{"data":' -Encoding UTF8
+Write-UsageCacheFile $fablePath 'A' $repair $true
+Check 'a persistently invalid Fable cache is repaired by the next observation' (Test-FableCapCached 'A')
+@{ ts = $second + 86400; observed_ms = $observed + 86400000; data = @{ok=$true; http=200; oi7_stat='allowed'} } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Check 'a future-dated reading is not served as fresh' (-not (Get-UsageCached 'A' $false 'fable' '-fable' $true).ok)
+Write-UsageCacheFile $fablePath 'A' $repair $true
+Check 'a future cache timestamp does not block the next Fable observation' (Test-FableCapCached 'A')
 
 # With no usable reset, a headerless probe preserves both the cap and its original timestamp for up to a week.
 $week = 7 * 86400

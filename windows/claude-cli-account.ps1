@@ -418,8 +418,13 @@ function Read-UsageCacheFile($Path, [switch]$ForUpdate) {
     $reader = [IO.StreamReader]::new($file)
     try {
       $text = $reader.ReadToEnd()
-      if ($ForUpdate -and [string]::IsNullOrWhiteSpace($text)) { throw 'Incomplete usage cache' }
-      $text | ConvertFrom-Json -ErrorAction Stop
+      try { $record = $text | ConvertFrom-Json -ErrorAction Stop }
+      catch { throw [IO.InvalidDataException]::new('Invalid usage cache JSON', $_.Exception) }
+      if ($ForUpdate -and ($record -isnot [pscustomobject] -or $record.data -isnot [pscustomobject] -or
+          ($record.fable_cap -and $record.fable_cap.data -isnot [pscustomobject]))) {
+        throw [IO.InvalidDataException]::new('Incomplete usage cache')
+      }
+      return $record
     } finally { $reader.Dispose() }
   } catch [IO.FileNotFoundException] {} catch { if ($ForUpdate) { throw } }
 }
@@ -465,16 +470,23 @@ function Read-FableUsageCache($Seat) {
 
 function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
   $guard = $null
+  $locked = $false
   $tmp = "$Path.tmp-$([guid]::NewGuid().ToString('N'))"
   try {
     # Both writers lock the same byte of this path's guard. Readers see an atomic replacement.
     $guard = [IO.File]::Open("$Path.lock", 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
     for ($attempt = 0; ; $attempt++) {
-      try { $guard.Lock(0, 1); break }
+      try { $guard.Lock(0, 1); $locked = $true; break }
       catch { if ($attempt -ge 4) { throw }; Start-Sleep -Milliseconds 25 }
     }
-    $prior = Read-UsageCacheFile $Path -ForUpdate
+    try { $prior = Read-UsageCacheFile $Path -ForUpdate }
+    catch [IO.InvalidDataException] {
+      # An old writer can still be publishing in place. Retry once before replacing invalid cache data.
+      Start-Sleep -Milliseconds 25
+      try { $prior = Read-UsageCacheFile $Path -ForUpdate } catch [IO.InvalidDataException] { $prior = $null }
+    }
     $priorAt = if ($IsFable) { Get-FableObservationMs $prior } else { Get-CacheObservationMs $prior }
+    if ($priorAt -gt [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) { $priorAt = 0 }
     if ($Entry.observed_ms -le $priorAt) { return }
     $d = $Entry.data
     $non2xx = [int]$d.http -lt 200 -or [int]$d.http -ge 300
@@ -495,8 +507,13 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
       if ($legacy) { $Entry.fable_cap = $legacy }
     }
     [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $Entry -Depth 6))
-    [IO.File]::Move($tmp, $Path, $true)
-  } catch {} finally {
+    try { [IO.File]::Move($tmp, $Path, $true) }
+    catch [IO.IOException], [UnauthorizedAccessException] {
+      Start-Sleep -Milliseconds 25
+      [IO.File]::Move($tmp, $Path, $true)
+    }
+  } catch { Write-RotateLog ("usage cache write failed for '{0}': {1}" -f $Label, $_.Exception.Message) DarkYellow } finally {
+    if ($locked) { try { $guard.Unlock(0, 1) } catch {} }
     if ($guard) { $guard.Dispose() }
     try { [IO.File]::Delete($tmp) } catch {}
   }
@@ -524,7 +541,7 @@ function Get-UsageCached {
   if (-not $Refresh) {
     try {
       $c = if ($isFable) { Read-FableUsageCache $seat } else { Read-UsageCacheFile $cf }
-      if ($c.ts -and (($now - [int64]$c.ts) -le $ttl) -and
+      if ($c.ts -and [int64]$c.ts -le $now -and (($now - [int64]$c.ts) -le $ttl) -and
           (-not $isFable -or $c.data.oi7_stat -ne 'rejected' -or (Test-FableReadingCap $c $now))) {
         $d = $c.data; $d | Add-Member -NotePropertyName ageSec -NotePropertyValue ([int]($now - [int64]$c.ts)) -Force
         return $d
@@ -583,7 +600,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Write-RotateLog','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(Get-PrefetchWork $Labels $models $HonorAccessCooldown)
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
@@ -591,6 +608,7 @@ function Prefetch-Usage {
     # Re-create what the probe needs inside the runspace: -Parallel starts a clean session,
     # so script-scope functions and variables are NOT inherited.
     $Root = $using:Root; $UsageTTL = $using:UsageTTL; $FableTTL = $using:FableTTL; $AccessCooldownSec = $using:AccessCooldownSec
+    $RotateLog = $using:RotateLog
     $script:UnknownProbeMemo = @{}
     $script:CliVersion = $using:cliVer
     . ([scriptblock]::Create($using:fnText))

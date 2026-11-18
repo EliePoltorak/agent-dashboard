@@ -153,6 +153,8 @@ def main():
         with open(os.path.join(root, ".active"), "w") as f:
             f.write("A")
         open(os.path.join(root, ".no-rotate"), "w").close()
+        with open(os.path.join(root, "A", "usage-cache-fable.json"), "w", encoding="utf-8") as f:
+            f.write('{"data":')  # An interrupted in-place write must not freeze this cache.
         time.sleep(21)   # past the proxy's rotate cooldown, so the rotator really is asked
         seen.clear()
         status, body = call(port, "tok-A", "/v1/messages?fable-status-only")

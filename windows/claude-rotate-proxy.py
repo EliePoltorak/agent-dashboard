@@ -21,6 +21,7 @@ Run:   pythonw -I claude-rotate-proxy.py          (the 'Claude rotate proxy' tas
 Check: claude-rotate-proxy.py --self-test         (offline checks of the pure helpers)
 """
 import http.client
+from contextlib import contextmanager
 import json
 import os
 import socket
@@ -63,7 +64,7 @@ ROTATE_COOLDOWN = 20   # s: after a rotation attempt that changed nothing, don't
 LOG_MAX = 1_000_000
 
 _lock = threading.Lock()          # tokens and log
-_cache_lock = threading.Lock()    # cache-write stamps and same-process writes
+_cache_locks = {}                  # same-process writers to each cache path
 _rotate_lock = threading.Lock()   # one rotation request at a time
 _state = {"tokens": {}, "by_label": {}, "loaded": 0.0, "written": {}, "last_rotate": 0.0}
 
@@ -133,21 +134,48 @@ def is_quota_rejection(status, headers):
     return any(headers.get(RL + k) == "rejected" for k in ("status", "5h-status", "7d-status", "7d_oi-status"))
 
 
+@contextmanager
 def lock_cache(stream):
     """Take the same byte-range lock as the PowerShell cache writer."""
+    stream.seek(0)
     if os.name == "nt":
         import msvcrt
         acquire = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        release = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
     else:
         import fcntl
         acquire = lambda: fcntl.lockf(stream, fcntl.LOCK_EX | fcntl.LOCK_NB, 1)
-    for _ in range(4):
+        release = lambda: fcntl.lockf(stream, fcntl.LOCK_UN, 1)
+    for attempt in range(5):
         try:
             acquire()
-            return
+            break
         except OSError:
+            if attempt == 4:
+                raise
             time.sleep(0.025)
-    acquire()
+    try:
+        yield
+    finally:
+        release()
+
+
+def read_cache_for_update(path):
+    for attempt in range(2):
+        try:
+            with open(path, encoding="utf-8-sig") as f:
+                entry = json.load(f)
+            if isinstance(entry, dict) and isinstance(entry.get("data"), dict):
+                extra = entry.get("fable_cap")
+                if not extra or (isinstance(extra, dict) and isinstance(extra.get("data"), dict)):
+                    return entry
+        except FileNotFoundError:
+            return {}
+        except ValueError:
+            pass
+        if not attempt:
+            time.sleep(0.025)   # An older PowerShell writer might still be publishing in place.
+    return {}
 
 
 def observed_ms(entry):
@@ -194,22 +222,14 @@ def write_cache(label, data):
         key = label + suffix
         path = os.path.join(ROOT, label, "usage-cache%s.json" % suffix)
         tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
+        with _lock:
+            local_guard = _cache_locks.setdefault(path, threading.Lock())
         try:
-            with _cache_lock, open(path + ".lock", "a+b") as guard:
-                guard.seek(0)
-                lock_cache(guard)
-                try:
-                    with open(path, encoding="utf-8-sig") as f:
-                        prior = json.load(f)
-                except FileNotFoundError:
-                    prior = {}
-                if not isinstance(prior, dict) or not isinstance(prior.get("data", {}), dict):
-                    continue
+            with local_guard, open(path + ".lock", "a+b") as guard, lock_cache(guard):
+                prior = read_cache_for_update(path)
                 effective = (prior.get("fable_cap") if suffix else None) or prior
-                if not isinstance(effective, dict) or not isinstance(effective.get("data", {}), dict):
-                    continue
                 previous_ms = fable_observed_ms(prior) if suffix else observed_ms(effective)
-                if receipt <= previous_ms:
+                if receipt <= previous_ms <= time.time_ns() // 1_000_000:
                     continue
                 clears_fable_cap = suffix and effective.get("data", {}).get("oi7_stat") == "rejected"
                 if not rejected and not clears_fable_cap and now - _state["written"].get(key, 0) < WRITE_EVERY:
@@ -217,7 +237,11 @@ def write_cache(label, data):
                 entry = cache_entry(prior, suffix, {"ts": receipt // 1000, "observed_ms": receipt, "data": data}, has_fable)
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(entry, f)
-                os.replace(tmp, path)
+                try:
+                    os.replace(tmp, path)
+                except PermissionError:
+                    time.sleep(0.025)
+                    os.replace(tmp, path)
                 _state["written"][key] = now
         except (OSError, TypeError, ValueError) as e:
             log("cache write failed for %s: %s" % (key, e))
