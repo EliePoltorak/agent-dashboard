@@ -436,10 +436,10 @@ function Get-CacheObservationMs($Cache) {
   return 0
 }
 
-# A proxy Fable rejection in the default cache: an older proxy's only copy of a status-only rejection, or
-# the backup when the proxy's -fable write was skipped (with or without utilization). The newer reading wins.
+# A proxy Fable observation (a rejection or an allowance) in the default cache: an older proxy's only copy of a
+# status-only rejection, or the backup when the proxy's -fable write was skipped. The newer reading wins.
 function Get-LegacyFableCap($Cache) {
-  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat -eq 'rejected') {
+  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat) {
     return @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
   }
   return $Cache.fable_cap
@@ -447,8 +447,9 @@ function Get-LegacyFableCap($Cache) {
 
 function Get-FableObservationMs($Cache) {
   $reading = if ($Cache.fable_cap) { $Cache.fable_cap } else { $Cache }
+  $http = 0; $null = [int]::TryParse([string]$reading.data.http, [ref]$http)   # malformed metadata must not block its repair
   if ($reading.data.ok -and ($reading.data.oi7_stat -or $null -ne $reading.data.oi7_util -or
-      ([int]$reading.data.http -ge 200 -and [int]$reading.data.http -lt 300))) {
+      ($http -ge 200 -and $http -lt 300))) {
     return (Get-CacheObservationMs $reading)
   }
   $stamp = [long]0
@@ -462,8 +463,9 @@ function Read-FableUsageCache($Seat) {
   $legacy = Get-LegacyFableCap (Read-UsageCacheFile (Join-Path $Seat 'usage-cache.json'))
   $legacyAt = Get-CacheObservationMs $legacy
   $fableAt = Get-FableObservationMs $cached
-  if ($legacyAt -gt 0 -and $legacyAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -and
-      $legacyAt -gt $fableAt) {
+  $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  if ($fableAt -gt $nowMs) { $fableAt = 0 }   # a future-dated Fable reading (a clock set back) outranks nothing
+  if ($legacyAt -gt 0 -and $legacyAt -le $nowMs -and $legacyAt -gt $fableAt) {
     return $legacy
   }
   return $reading

@@ -584,6 +584,15 @@ Check 'a newer Fable reading supersedes the legacy rejection' ((Select-RotationT
 $allowedFable.ts = $statusOnly.ts - 60
 $allowedFable | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Check 'a legacy rejection supersedes an older Fable reading' ((Select-RotationTarget 90 'B').label -eq 'C')
+$allowedFable.ts = $nowS + 86400
+$allowedFable | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Check 'a future-dated Fable reading does not outrank a default-cache rejection' ((Select-RotationTarget 90 'B').label -eq 'C')
+$statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+@{ ts = $statusOnly.ts + 60; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; s5_util = 0.1; oi7_stat = 'allowed' } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a newer Fable allowance in the default cache supersedes the Fable cache rejection' ((Select-RotationTarget 90 'B').label -eq 'A')
+$statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+$allowedFable.ts = $statusOnly.ts - 60
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Check 'a status-only Fable rejection is a cap in the Fable cache' (Test-FableCapCached 'A')
 Check 'a status-only Fable rejection supplies no utilization baseline' ($null -eq (Read-FableCache 'A'))

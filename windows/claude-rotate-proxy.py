@@ -191,10 +191,16 @@ def observed_ms(entry):
 def fable_observed_ms(entry):
     reading = entry.get("fable_cap") or entry
     data = reading.get("data", {})
-    status = int(data.get("http") or 0)
+    try:
+        status = int(data.get("http") or 0)
+    except (TypeError, ValueError):
+        status = 0   # malformed metadata must not block the write that repairs it
     if data.get("ok") and (data.get("oi7_stat") or data.get("oi7_util") is not None or 200 <= status < 300):
         return observed_ms(reading)
-    return int(entry.get("fable_confirmed_ms") or 0)
+    try:
+        return int(entry.get("fable_confirmed_ms") or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def cache_entry(prior, suffix, entry, has_fable):
@@ -205,11 +211,11 @@ def cache_entry(prior, suffix, entry, has_fable):
                 and observed_ms(prior) <= entry["observed_ms"]):
             return {**prior, "fable_cap": entry}
     elif not has_fable:
-        # A default-only write must not lose the default cache's copy of a Fable rejection: an older proxy's only
-        # copy, or the backup when the -fable write was skipped. With or without utilization.
+        # A default-only write must not lose the default cache's copy of a Fable observation (a rejection or an
+        # allowance): an older proxy's only copy, or the backup when the -fable write was skipped.
         cap = prior.get("fable_cap")
         old = prior.get("data", {})
-        if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat") == "rejected":
+        if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat"):
             cap = {"ts": prior.get("ts"), "observed_ms": observed_ms(prior), "data": old}
         # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
         if cap and observed_ms(cap) <= entry["observed_ms"]:
@@ -222,27 +228,29 @@ def write_cache(label, data):
     rejected = any(data.get(k) == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
     has_fable = data.get("oi7_util") or data.get("oi7_stat")
     receipt = time.time_ns() // 1_000_000
-    now = receipt / 1000
+    mono = time.monotonic()   # throttle and backoff: a clock set back must not stall writes
+    never = float("-inf")
     for suffix, present in (("", data.get("s5_util") or rejected), ("-fable", has_fable)):
         if not present:
             continue
         key = label + suffix
         # Throttle before any lock or file read: this runs before the response reaches the client.
-        if now - _state["failed"].get(key, 0) < WRITE_EVERY:
+        if mono - _state["failed"].get(key, never) < WRITE_EVERY:
             continue   # the lock was just stuck: at most one lock wait per WRITE_EVERY, whatever the reading
-        if (not rejected and now - _state["written"].get(key, 0) < WRITE_EVERY
+        if (not rejected and mono - _state["written"].get(key, never) < WRITE_EVERY
                 and not (suffix and key in _state["fable_capped"])):
             continue
         path = os.path.join(ROOT, label, "usage-cache%s.json" % suffix)
         tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
         with _lock:
             local_guard = _cache_locks.setdefault(path, threading.Lock())
-        try:
-            with local_guard:
-                # Re-checked here: threads queued behind a failed write must not each wait out the lock again.
-                if now - _state["failed"].get(key, 0) < WRITE_EVERY or (
-                        not rejected and not suffix and now - _state["written"].get(key, 0) < WRITE_EVERY):
-                    continue
+        failure = None
+        with local_guard:
+            # Re-checked here: threads queued behind a failed write must not each wait out the lock again.
+            if mono - _state["failed"].get(key, never) < WRITE_EVERY or (
+                    not rejected and not suffix and mono - _state["written"].get(key, never) < WRITE_EVERY):
+                continue
+            try:
                 with open(path + ".lock", "a+b") as guard, lock_cache(guard):
                     prior = read_cache_for_update(path)
                     effective = (prior.get("fable_cap") if suffix else None) or prior
@@ -253,10 +261,12 @@ def write_cache(label, data):
                         else:
                             _state["fable_capped"].discard(key)
                     previous_ms = fable_observed_ms(prior) if suffix else observed_ms(effective)
-                    if receipt <= previous_ms <= time.time_ns() // 1_000_000:
+                    # An older reading never replaces a newer one. On a same-millisecond tie a rejection wins.
+                    if previous_ms <= time.time_ns() // 1_000_000 and (
+                            receipt < previous_ms or (receipt == previous_ms and not rejected)):
                         continue
                     clears_fable_cap = suffix and effective.get("data", {}).get("oi7_stat") == "rejected"
-                    if not rejected and not clears_fable_cap and now - _state["written"].get(key, 0) < WRITE_EVERY:
+                    if not rejected and not clears_fable_cap and mono - _state["written"].get(key, never) < WRITE_EVERY:
                         continue
                     entry = cache_entry(prior, suffix, {"ts": receipt // 1000, "observed_ms": receipt, "data": data}, has_fable)
                     with open(tmp, "w", encoding="utf-8") as f:
@@ -266,15 +276,17 @@ def write_cache(label, data):
                     except PermissionError:
                         time.sleep(0.025)
                         os.replace(tmp, path)
-                    _state["written"][key] = now
+                    _state["written"][key] = mono
                     if suffix:
                         if ((entry.get("fable_cap") or entry).get("data", {}).get("oi7_stat") == "rejected"):
                             _state["fable_capped"].add(key)
                         else:
                             _state["fable_capped"].discard(key)
-        except (OSError, TypeError, ValueError) as e:
-            log("cache write failed for %s: %s" % (key, e))
-            _state["failed"][key] = now
+            except (OSError, TypeError, ValueError) as e:
+                _state["failed"][key] = mono   # recorded before the next queued thread can take the lock
+                failure = e
+        if failure:
+            log("cache write failed for %s: %s" % (key, failure))
 
 
 # The proxy's own refusal (no eligible seat left), in the API's canonical shape: the code and wording every refusal classifier keys on
@@ -618,7 +630,43 @@ def self_test():
         assert any(c["body"] == LOCAL_REFUSAL.decode() and c["disabled"] is True for c in json.load(handle)), "the local refusal is not a shared fixture"
     assert not is_subscription_disabled(0, "disabled Claude subscription access")
     marker_self_test()
+    cache_self_test()
     print("self-test ok")
+
+
+def cache_self_test():
+    """write_cache against a sandbox root: repair of malformed metadata, same-millisecond ties, carried allowances."""
+    import tempfile
+    global ROOT
+    saved, ROOT = ROOT, tempfile.mkdtemp(prefix="crp-cache-")
+    real_ns = time.time_ns
+    try:
+        os.makedirs(os.path.join(ROOT, "S"))
+        fable = os.path.join(ROOT, "S", "usage-cache-fable.json")
+        default = os.path.join(ROOT, "S", "usage-cache.json")
+        load = lambda path: json.load(open(path, encoding="utf-8"))
+        with open(fable, "w", encoding="utf-8") as f:
+            json.dump({"ts": 1, "data": {"ok": True, "http": "x", "oi7_stat": "rejected"}}, f)
+        write_cache("S", {"ok": True, "http": 200, "src": "proxy", "oi7_stat": "allowed"})
+        assert load(fable)["data"]["oi7_stat"] == "allowed", "malformed http blocked its own repair"
+        tick = real_ns() + 10 ** 9
+        time.time_ns = lambda: tick
+        _state["written"].clear()
+        write_cache("S", {"ok": True, "http": 200, "src": "proxy", "oi7_stat": "allowed"})
+        write_cache("S", {"ok": True, "http": 429, "src": "proxy", "oi7_stat": "rejected"})
+        assert load(fable)["data"]["oi7_stat"] == "rejected", "a same-millisecond rejection was dropped"
+        write_cache("S", {"ok": True, "http": 200, "src": "proxy", "oi7_stat": "allowed"})
+        assert load(fable)["data"]["oi7_stat"] == "rejected", "a same-millisecond allowance replaced a rejection"
+        time.time_ns = real_ns
+        _state["written"].clear()
+        with open(default, "w", encoding="utf-8") as f:
+            json.dump({"ts": 2, "observed_ms": 2000, "data": {"ok": True, "src": "proxy", "s5_util": "0.1", "oi7_stat": "allowed"}}, f)
+        write_cache("S", {"ok": True, "http": 200, "src": "proxy", "s5_util": "0.2"})
+        assert load(default).get("fable_cap", {}).get("data", {}).get("oi7_stat") == "allowed", "a default refresh lost a Fable allowance"
+    finally:
+        time.time_ns = real_ns
+        _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()
+        ROOT = saved
 
 
 def marker_self_test():
