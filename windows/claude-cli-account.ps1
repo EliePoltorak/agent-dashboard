@@ -1022,14 +1022,17 @@ function Get-ProxySample {
     $c = Get-Content $cf -Raw | ConvertFrom-Json
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
-    # A Fable-only proxy rejection is nested under the default reading (fable_cap), not at the top level.
-    # A fresh one is still the rejection that just happened: overlay its verdict so the trigger sees it.
+    # A Fable-only proxy rejection is nested under the default reading (fable_cap), which keeps its own
+    # timestamp and source. Judge the nested reading on its own: a fresh one (not future-dated) is the
+    # rejection that just happened, whatever wrote the reading above it or how old that is. It carries
+    # no default-window values, so it is returned as its own sample and never feeds the session projection.
     $n = $c.fable_cap
-    if ($n -and $n.data.src -eq 'proxy' -and $n.data.ok -and $n.data.status -eq 'rejected' -and $d.status -ne 'rejected' -and
-        ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - (Get-CacheObservationMs $n)) -le ($ProxyFreshSec * 1000)) {
-      $d = $d.PSObject.Copy()
-      $d | Add-Member -NotePropertyName status -NotePropertyValue 'rejected' -Force
-      $d | Add-Member -NotePropertyName claim -NotePropertyValue $n.data.claim -Force
+    if ($n -and $n.data.src -eq 'proxy' -and $n.data.ok -and ($n.data.status -eq 'rejected' -or $n.data.oi7_stat -eq 'rejected')) {
+      $nAge = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - (Get-CacheObservationMs $n)
+      if ($nAge -ge 0 -and $nAge -le ($ProxyFreshSec * 1000)) {
+        return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $n.data.claim
+                                  oi7_stat = $n.data.oi7_stat; fable_only_rejection = $true }
+      }
     }
     $rejected = ($d.status -eq 'rejected' -or $d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected')
     if ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_util -or $rejected) -and $age -le $ProxyFreshSec -and
@@ -1071,6 +1074,8 @@ function Invoke-CheckRotateCore {
     # A reading the proxy took off real traffic in the last 2 min is as good as a probe, and free.
     $u = Get-ProxySample $act $ForceNow
     if (-not $u) { $u = Get-UsageCached $act $true }          # live, haiku only: ~1s, ~9 tokens
+    # A Fable-only 429 the proxy just saw: a Haiku probe cannot see that window, so rotate on it now.
+    if ($u.fable_only_rejection) { $trigger = "FABLE window REJECTED by the server (claim $($u.claim); Gate C cannot run)"; $capped = 'fable' }
     # An explicit 403 (oauth_org_not_allowed / subscription disabled) is not a blip. Do not probe
     # it twice and do not go blind: rotate. A timeout or any other non-403 is still retried once.
     if (-not $u.ok -and $u.access -eq 'disabled') {
@@ -1132,7 +1137,7 @@ function Invoke-CheckRotateCore {
     elseif ($u.s5_stat -eq 'rejected') { $trigger = "SESSION window CAPPED at $s5% (weekly $w7%)"; $capped = 'session' }
     # The server's overall verdict. Rank-Accounts treats it as a cap unless oi7_stat is rejected
     # (then it is a Fable cap, judged on the Fable reading); this branch rotates off the active seat
-    # either way (Get-ProxySample overlays a fresh nested Fable-only rejection), and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
+    # either way (a fresh nested Fable-only rejection is its own trigger, above), and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
     # proxy re-asked every 20s and nothing moved (Fable review 2026-10-30, P2-4).
     elseif ($u.status -eq 'rejected') { $trigger = "account REJECTED by the server (claim $($u.claim); session $s5%, weekly $w7%)"; $capped = 'session' }
     elseif ($s5 -ge $sessBar)      { $trigger = "session at $s5% >= $sessBar% (weekly $w7%, left to burn)" }
