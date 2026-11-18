@@ -120,6 +120,7 @@ $invalidWorkspaces = @(
   '\\?\C:\draft\..\release'
   '\\?\C:\draft\.\release'
   '\\?\C:\work/project'
+  '\\?\C:\work\\project'
   '\\.\C:\work\trailing.'
   '//?/C:/work/project'
   'C:\work\NUL'

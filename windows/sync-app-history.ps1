@@ -116,6 +116,12 @@ param(
   [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); -AssumeAppRunning wins if both are given
 )
 $ErrorActionPreference = 'Stop'
+# Keep configuration and lock setup at Idle too, even when invoked in the caller's shell.
+$selfProc = Get-Process -Id $PID
+$prevPriority = $selfProc.PriorityClass
+$runLock = $null
+try { $selfProc.PriorityClass = 'Idle' } catch { }
+try {
 
 if (-not $PSBoundParameters.ContainsKey('Cwd')) {
   $workspaceFile = Join-Path $env:USERPROFILE '.claude\history-sync-workspace.txt'
@@ -146,7 +152,7 @@ if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified(
     ($unc -and -not $uncRoot) -or
     (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
     ($path.StartsWith('\\?\', [StringComparison]::Ordinal) -and $inputPath.Contains('/')) -or
-    ($verbatim -and $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)') -or
+    ($verbatim -and ($directoryNames.Contains('\\') -or $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)')) -or
     (-not $verbatim -and -not $unc -and $directoryNames -match '(^|\\)NUL(?:\\|$)') -or
     -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Use a valid absolute Windows workspace path with -Cwd or in ~/.claude/history-sync-workspace.txt. Check for quotes, trailing spaces or unsupported characters.'
@@ -181,7 +187,7 @@ $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
 # Interactive runs (a seat switch, claude-sync-history) wait up to 3 min for a run already in progress, so the
 # user isn't told to reopen the app while it is still writing; -Quiet (the scheduled task) skips at once.
-$runLock = $null; $lockUntil = [DateTime]::UtcNow.AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
+$lockUntil = [DateTime]::UtcNow.AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
 while (-not $runLock) {
   try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
   catch [IO.IOException] {
@@ -191,12 +197,7 @@ while (-not $runLock) {
     Start-Sleep -Seconds 2
   }
 }
-# Run at Idle CPU priority so a long scan yields to anything else; the rotator runs this in its own process,
-# so the caller's priority is put back when the run ends.
-$selfProc = Get-Process -Id $PID; $prevPriority = $selfProc.PriorityClass
-try { $selfProc.PriorityClass = 'Idle' } catch { }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock; local time, so the repeated hour at a DST fall-back can reuse a name
-try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
 # The CLI's project-folder name: every character other than A-Z, a-z, 0-9 becomes '-' (case-sensitive match, as
 # the CLI's regex is); a name over 200 characters is cut to 200 plus '-' and a hash, so look that one up by prefix.
@@ -991,4 +992,7 @@ if (-not $Quiet) {
   "${verb}added $made, cloned $cloned, retitled $retitled record(s) for $Cwd"
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
 }
-} finally { $runLock.Dispose(); try { $selfProc.PriorityClass = $prevPriority } catch { } }
+} finally {
+  try { if ($runLock) { $runLock.Dispose() } }
+  finally { try { $selfProc.PriorityClass = $prevPriority } catch { } }
+}
