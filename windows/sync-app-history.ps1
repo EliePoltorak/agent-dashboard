@@ -120,16 +120,27 @@ $ErrorActionPreference = 'Stop'
 if (-not $PSBoundParameters.ContainsKey('Cwd')) {
   $workspaceFile = Join-Path $env:USERPROFILE '.claude\history-sync-workspace.txt'
   if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
-    $Cwd = ([string](Get-Content -LiteralPath $workspaceFile -Raw)).TrimEnd([char[]](13, 10))
+    try {
+      $utf8 = [Text.UTF8Encoding]::new($false, $true)
+      $Cwd = $utf8.GetString([IO.File]::ReadAllBytes($workspaceFile)).TrimStart([char]0xFEFF).TrimEnd([char[]](13, 10))
+    } catch [Text.DecoderFallbackException] {
+      throw 'Save ~/.claude/history-sync-workspace.txt as UTF-8.'
+    }
   }
 }
 # Check syntax without touching the workspace. An offline share can still have local transcripts.
 $path = ([string]$Cwd).Replace('/', '\')
-$pathSyntax = $path -replace '^\\\\[?.]\\UNC(?:\\|$)', '\\'
-$unc = $pathSyntax.StartsWith('\\') -and $pathSyntax -notmatch '^\\\\[?.]\\'
-$pathNames = $pathSyntax -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
+$device = $path -match '^\\\\[?.]\\'
+$extendedUnc = $path -match '^\\\\[?.]\\UNC(?:\\|$)'
+$unc = $extendedUnc -or (-not $device -and $path.StartsWith('\\'))
+$pathNames = if ($extendedUnc) {
+  $path -replace '^\\\\[?.]\\UNC(?:\\|$)', '\\'
+} else {
+  $path -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
+}
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
-    ($unc -and $pathSyntax -notmatch '^\\\\[^\\]+\\[^\\]+') -or
+    ($unc -and $pathNames -notmatch '^\\\\[^\\]+\\[^\\]+') -or
+    (-not $device -and $pathNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
     -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
@@ -202,7 +213,7 @@ foreach ($workspacePath in $workspacePaths) {
     if ($transcripts.Count) { break }
   }
 }
-if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; return }
+if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
 # a run killed between writing a .sync-tmp and moving it into place leaves it in the app's index; the suffix is
 # only ours and the lock means no other run is mid-write, so any found now is a leftover
 if (-not $DryRun -and (Test-Path -LiteralPath $ccs)) {

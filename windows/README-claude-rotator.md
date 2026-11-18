@@ -641,7 +641,7 @@ The script itself lives at `%USERPROFILE%\.grok\bin\sync-app-history.ps1` (the s
 there to deploy a change. `rotator-sync --pull` does not deploy it: it copies the file into the live rotator folder,
 which nothing runs it from, so a clean `rotator-sync --check` does not mean the running copy is current.
 
-Before deploying this version, save the absolute workspace path as a single unquoted line in
+Before deploying this version, save the absolute workspace path as a single unquoted UTF-8 line in
 `%USERPROFILE%\.claude\history-sync-workspace.txt`. The account-switch hook and the scheduled task
 read that file on each run.
 

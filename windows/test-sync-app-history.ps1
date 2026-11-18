@@ -34,7 +34,7 @@
 $Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
 $sb = Join-Path ([IO.Path]::GetTempPath()) "sync-app-history-test's-[fixture]-$([guid]::NewGuid())"
 # This path is only a transcript key. Keep its encoded directory name independent of TEMP.
-$workspace = Join-Path ([IO.Path]::GetPathRoot($PSHOME)) "sync-fixture's-[workspace]"
+$workspace = Join-Path ([IO.Path]::GetPathRoot($PSHOME)) "sync-fixture's-[workspace]-café"
 $encoded = $workspace -creplace '[^A-Za-z0-9]', '-'
 $proj = "$sb\home\.claude\projects\$encoded"
 $ccs = "$sb\app\Claude\claude-code-sessions"
@@ -103,10 +103,16 @@ function inIdx($r) { $p = Join-Path (Split-Path -LiteralPath $r.f) 'archived-ses
 $initialIndex = recHash
 run @{ Quiet = $true }
 check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
+[IO.File]::WriteAllBytes($workspaceFile, [byte[]](0x43, 0x3A, 0x5C, 0xE9))
+run @{ Quiet = $true }
+check 'a non-UTF-8 setting fails before writing state' ($rc -ne 0 -and ($out -match 'as UTF-8') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
 $invalidWorkspaces = @(
   'relative-path'
   ($workspace + '"')
   ($workspace + ':archive')
+  ($workspace + ' ')
+  ($workspace + '.')
+  '\\?\UNC\?\C:\x'
   '\\server\share:stream\workspace'
   '\\server\sh*re\workspace'
   '\\server'
