@@ -571,6 +571,9 @@ Check 'a Fable-only rejection is no default cap' (-not (Test-CapCached 'A' 'defa
 Check 'the network fallback honors a legacy rejection stored only in the default cache' ((Select-RotationTarget 90 'B').label -eq 'C')
 $allowedFable = @{ ts = $statusOnly.ts + 60; data = @{ ok = $true; oi7_stat = 'allowed'; oi7_util = 0.1 } }
 $fablePath = Join-Path $seatA 'usage-cache-fable.json'
+@{ ts = $statusOnly.ts + 60; data = @{ ok = $true; http = 500 } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Check 'an older rotator unable to read Fable cannot mask a legacy rejection' ((Select-RotationTarget 90 'B').label -eq 'C')
 $allowedFable | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Check 'a newer Fable reading supersedes the legacy rejection' ((Select-RotationTarget 90 'B').label -eq 'A')
 $allowedFable.ts = $statusOnly.ts - 60
@@ -602,6 +605,20 @@ $allowedFable | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $fablePath -E
 $baseline = Read-FableCache 'A'
 Check 'a status-only cap preserves the older measured baseline' ($baseline.pct -eq 10 -and $baseline.ts -eq $allowedFable.ts -and -not $baseline.capped)
 Check 'cap checks use the status-only rejection alongside the measured baseline' (Test-FableCapCached 'A')
+$allowedFable.data.oi7_stat = 'rejected'
+$statusOnly.data.oi7_reset = $nowS - 60
+$allowedFable | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Check 'a preserved rejected measurement does not supply a watcher cap once the newer rejection resets' (-not (Read-FableCache 'A').capped)
+
+Reset-Case
+$statusOnly.ts = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$statusOnly | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $defaultPath -Encoding UTF8
+$statusOnly | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+$a = Rank-Accounts $false $false | Where-Object label -eq 'A'
+Check 'fresh default cache does not classify a Fable-only rejection as a default cap' $a.usable
+$fableFromCache = Get-UsageCached 'A' $false 'fable' '-fable' $true
+Check 'a fresh cached Fable rejection is no longer returned after its reset' (-not $fableFromCache.ok)
+Check 'a malformed reset formats as unknown' ((FmtReset 'invalid reset') -eq '(unknown)')
 
 Reset-Case
 $script:plan['A'] = 'fable-overlap'
@@ -610,6 +627,13 @@ Check 'a successful Fable response supersedes a proxy rejection received during 
 $script:plan['A'] = 'fable-500'
 $null = Get-UsageCached 'A' $true 'fable' '-fable'
 Check 'a subsequent headerless Fable probe does not revive the superseded cap' (-not (Test-FableCapCached 'A'))
+
+Reset-Case
+$second = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$observed = $second * 1000
+Write-UsageCacheFile $fablePath 'A' @{ ts = $second; observed_ms = $observed + 200; data = @{ ok = $true; http = 200; oi7_stat = 'allowed' } } $true
+Write-UsageCacheFile $fablePath 'A' @{ ts = $second; observed_ms = $observed + 100; data = @{ ok = $true; http = 429; oi7_stat = 'rejected' } } $true
+Check 'a delayed cache write cannot reinstate a rejection from earlier in the same second' ((Read-FableUsageCache $seatA).data.oi7_stat -eq 'allowed')
 
 # With no usable reset, a headerless probe preserves both the cap and its original timestamp for up to a week.
 $week = 7 * 86400

@@ -412,29 +412,94 @@ function Probe-Usage {
   }
 }
 
-function Read-UsageCacheFile($Path) {
-  try { Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch {}
+function Read-UsageCacheFile($Path, [switch]$ForUpdate) {
+  try {
+    $file = [IO.File]::Open($Path, 'Open', 'Read', ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete))
+    $reader = [IO.StreamReader]::new($file)
+    try {
+      $text = $reader.ReadToEnd()
+      if ($ForUpdate -and [string]::IsNullOrWhiteSpace($text)) { throw 'Incomplete usage cache' }
+      $text | ConvertFrom-Json -ErrorAction Stop
+    } finally { $reader.Dispose() }
+  } catch [IO.FileNotFoundException] {} catch { if ($ForUpdate) { throw } }
+}
+
+function Get-CacheObservationMs($Cache) {
+  $stamp = [long]0
+  if ([long]::TryParse([string]$Cache.observed_ms, [ref]$stamp) -and $stamp -gt 0) { return $stamp }
+  if ([long]::TryParse([string]$Cache.ts, [ref]$stamp) -and $stamp -gt 0 -and $stamp -le 253402300799) { return ($stamp * 1000) }
+  return 0
 }
 
 # Proxies before this fix could put a status-only Fable rejection only in the default cache.
 function Get-LegacyFableCap($Cache) {
   if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat -eq 'rejected' -and $null -eq $Cache.data.oi7_util) {
-    return @{ ts = $Cache.ts; data = $Cache.data }
+    return @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
   }
   return $Cache.fable_cap
+}
+
+function Get-FableObservationMs($Cache) {
+  $reading = if ($Cache.fable_cap) { $Cache.fable_cap } else { $Cache }
+  if ($reading.data.ok -and ($reading.data.oi7_stat -or $null -ne $reading.data.oi7_util -or
+      ([int]$reading.data.http -ge 200 -and [int]$reading.data.http -lt 300))) {
+    return (Get-CacheObservationMs $reading)
+  }
+  $stamp = [long]0
+  if ([long]::TryParse([string]$Cache.fable_confirmed_ms, [ref]$stamp)) { return $stamp }
+  return 0
 }
 
 function Read-FableUsageCache($Seat) {
   $cached = Read-UsageCacheFile (Join-Path $Seat 'usage-cache-fable.json')
   $reading = if ($cached.fable_cap) { $cached.fable_cap } else { $cached }
   $legacy = Get-LegacyFableCap (Read-UsageCacheFile (Join-Path $Seat 'usage-cache.json'))
-  $legacyAt = [int64]0; $fableAt = [int64]0
-  [void][int64]::TryParse([string]$reading.ts, [ref]$fableAt)
-  if ($legacy -and [int64]::TryParse([string]$legacy.ts, [ref]$legacyAt) -and $legacyAt -gt $fableAt -and
-      $legacyAt -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) {
+  $legacyAt = Get-CacheObservationMs $legacy
+  $fableAt = Get-FableObservationMs $cached
+  if ($legacyAt -gt 0 -and $legacyAt -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() -and
+      $legacyAt -gt $fableAt) {
     return $legacy
   }
   return $reading
+}
+
+function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
+  $guard = $null
+  $tmp = "$Path.tmp-$([guid]::NewGuid().ToString('N'))"
+  try {
+    # Both writers lock the same byte of this path's guard. Readers see an atomic replacement.
+    $guard = [IO.File]::Open("$Path.lock", 'OpenOrCreate', 'ReadWrite', 'ReadWrite')
+    for ($attempt = 0; ; $attempt++) {
+      try { $guard.Lock(0, 1); break }
+      catch { if ($attempt -ge 4) { throw }; Start-Sleep -Milliseconds 25 }
+    }
+    $prior = Read-UsageCacheFile $Path -ForUpdate
+    $priorAt = if ($IsFable) { Get-FableObservationMs $prior } else { Get-CacheObservationMs $prior }
+    if ($Entry.observed_ms -le $priorAt) { return }
+    $d = $Entry.data
+    $non2xx = [int]$d.http -lt 200 -or [int]$d.http -ge 300
+    if ($IsFable) {
+      if ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util) {
+        if (Test-CapCached $Label 'fable') { return }
+        # A headerless response cannot clear a legacy cap or undo an earlier Fable allowance.
+        if ($priorAt) { $Entry.fable_confirmed_ms = $priorAt }
+      }
+      if ($d.oi7_stat -and $null -eq $d.oi7_util -and $null -ne $prior.data.oi7_util) {
+        $Entry = @{ ts = $prior.ts; observed_ms = $prior.observed_ms; data = $prior.data; fable_cap = $Entry }
+      }
+    } else {
+      if ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and
+          (Test-CapCached $Label 'default')) { return }
+      # A default-model refresh has no authority over the older Fable-only rejection.
+      $legacy = Get-LegacyFableCap $prior
+      if ($legacy) { $Entry.fable_cap = $legacy }
+    }
+    [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $Entry -Depth 6))
+    [IO.File]::Move($tmp, $Path, $true)
+  } catch {} finally {
+    if ($guard) { $guard.Dispose() }
+    try { [IO.File]::Delete($tmp) } catch {}
+  }
 }
 
 function Get-UsageCached {
@@ -459,7 +524,8 @@ function Get-UsageCached {
   if (-not $Refresh) {
     try {
       $c = if ($isFable) { Read-FableUsageCache $seat } else { Read-UsageCacheFile $cf }
-      if ($c.ts -and (($now - [int64]$c.ts) -le $ttl)) {
+      if ($c.ts -and (($now - [int64]$c.ts) -le $ttl) -and
+          (-not $isFable -or $c.data.oi7_stat -ne 'rejected' -or (Test-FableReadingCap $c $now))) {
         $d = $c.data; $d | Add-Member -NotePropertyName ageSec -NotePropertyValue ([int]($now - [int64]$c.ts)) -Force
         return $d
       }
@@ -469,7 +535,7 @@ function Get-UsageCached {
   if ($CacheOnly) { return [pscustomobject]@{ label=$Label; ok=$false; access='unknown'; note='not probed (run claude-usage)' } }
   $d = Probe-Usage $Label $Model
   # Order competing cache records by when the response was observed. A proxy can write while the probe is in flight.
-  $observedAt = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  $observedAt = [DateTimeOffset]::UtcNow
   if (-not ($d.PSObject.Properties.Name -contains 'access') -or -not $d.access) {
     $d | Add-Member -NotePropertyName access -NotePropertyValue $(if ($d.ok) { 'ok' } else { 'unknown' }) -Force
   }
@@ -482,25 +548,7 @@ function Get-UsageCached {
     $proved = ([int]$d.http -ge 200 -and [int]$d.http -lt 300 -and ($d.status -or $d.s5_util -or $d.oi7_util))
     if ($isFable -and $proved) { Clear-AccessDisabled $Label }
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
-    # A probe that read no window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not overwrite a
-    # cached cap still in force: ranking, selection and the fallback read that file through Test-CapCached until the cap's reset
-    # or, with no usable reset, for up to seven days after the reading. For a Fable probe the window is oi7 (no oi7_stat or oi7_util); for any
-    # other model it is the session or weekly one (no status, s5_stat, w7_stat or s5_util).
-    $non2xx = -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300)
-    $keepCap = if ($isFable) { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
-               else { ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and (Test-CapCached $Label 'default')) }
-    if (-not $keepCap) {
-      $entry = @{ ts = $observedAt; data = $d }
-      if (-not $isFable) {
-        # A default-model refresh has no authority over the older Fable-only rejection.
-        $legacy = Get-LegacyFableCap (Read-UsageCacheFile $cf)
-        if ($legacy) { $entry.fable_cap = $legacy }
-      } elseif ($d.oi7_stat -eq 'rejected' -and $null -eq $d.oi7_util) {
-        $prior = Read-UsageCacheFile $cf
-        if ($null -ne $prior.data.oi7_util) { $entry = @{ ts = $prior.ts; data = $prior.data; fable_cap = $entry } }
-      }
-      try { $entry | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {}
-    }
+    Write-UsageCacheFile $cf $Label @{ ts = $observedAt.ToUnixTimeSeconds(); observed_ms = $observedAt.ToUnixTimeMilliseconds(); data = $d } $isFable
   } elseif ($HonorAccessCooldown -and $d.access -eq 'unknown') {
     $script:UnknownProbeMemo[$memoKey] = $d
   }
@@ -535,7 +583,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-LegacyFableCap','Read-FableUsageCache','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(Get-PrefetchWork $Labels $models $HonorAccessCooldown)
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
@@ -567,6 +615,7 @@ function RelReset { param($epoch)
 
 # Renewal time: countdown + the actual local clock time the window resets at.
 function FmtReset { param($epoch)
+  $epoch = Get-UsableReset $epoch
   if (-not $epoch) { return '(unknown)' }
   $secs = [int64]$epoch - [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   if ($secs -le 0) { return 'available now' }
@@ -749,7 +798,8 @@ function Rank-Accounts {
     # The cached cap counts only for the reading $keepCap in Get-UsageCached leaves a cap on disk for (the same test): an ok non-2xx
     # carrying none of the session/weekly window's fields. Any other reading is not checked against the cache (though within the TTL,
     # $u itself may be the cached reading: Get-UsageCached serves a fresh-enough file).
-    $capLive = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or ($u.status -eq 'rejected')
+    $capLive = ($u.s5_stat -eq 'rejected') -or ($u.w7_stat -eq 'rejected') -or
+               ($u.status -eq 'rejected' -and $u.oi7_stat -ne 'rejected')
     $noWin   = (-not ([int]$u.http -ge 200 -and [int]$u.http -lt 300) -and -not $u.status -and -not $u.s5_stat -and -not $u.w7_stat -and $null -eq $u.s5_util)
     $capped  = $capLive -or ($noWin -and (Test-CapCached $l 'default'))
     # A fable-capped account is NOT a rotation target (owner, 2026-08-16): Fable is what runs
@@ -884,13 +934,12 @@ $FableMaxSec     = 3600  # 1h at the arming line
 function Read-FableCache {
   param([string]$Label)
   $cf = Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'
-  if (-not (Test-Path $cf)) { return $null }
   try {
-    $c = Get-Content $cf -Raw | ConvertFrom-Json
+    $c = Read-UsageCacheFile $cf
     if ($c.data -and $null -ne $c.data.oi7_util) {
       return [pscustomobject]@{ pct = [int][math]::Round([double]$c.data.oi7_util * 100)
                                 ts  = [int64]$c.ts
-                                capped = ($c.data.oi7_stat -eq 'rejected') }
+                                capped = ($c.data.oi7_stat -eq 'rejected' -and (-not $c.fable_cap -or (Test-FableCapCached $Label))) }
     }
   } catch {}
   return $null
@@ -1172,6 +1221,21 @@ function Invoke-EnsureCliSeat {
   return (Invoke-CheckRotate 0 $false $true 'ensure')
 }
 
+function Get-UsableReset($Value) {
+  $epoch = [int64]0
+  if ([int64]::TryParse([string]$Value, [ref]$epoch) -and $epoch -gt 0 -and $epoch -le 253402300799) { return $epoch }
+  return 0
+}
+
+function Test-FableReadingCap($Reading, [int64]$Now) {
+  if (-not $Reading.data.ok -or $Reading.data.oi7_stat -ne 'rejected') { return $false }
+  $reset = Get-UsableReset $Reading.data.oi7_reset
+  if ($reset) { return ($reset -gt $Now) }
+  $sampledAt = [int64]0
+  return ([int64]::TryParse([string]$Reading.ts, [ref]$sampledAt) -and $sampledAt -gt 0 -and
+          $sampledAt -le $Now -and ($Now - $sampledAt) -lt (7 * 86400))
+}
+
 # Does this seat's cached reading say a window is capped, with the cap still in force? Which = 'fable' reads the weekly Fable window
 # (usage-cache-fable.json, oi7_*); 'default' reads the default-model reading (usage-cache.json): the session window (s5_*), the weekly
 # window (w7_*), or an overall rejection with no rejected window named. A rejection holds until its reset (epoch seconds).
@@ -1185,17 +1249,17 @@ function Test-CapCached {
   $d = $c.data
   if (-not $d -or -not $d.ok) { return $false }
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  if ($Which -eq 'fable') { return (Test-FableReadingCap $c $now) }
   $sampledAt = [int64]0
   [void][int64]::TryParse([string]$c.ts, [ref]$sampledAt)
   $withinWeek = $sampledAt -gt 0 -and $sampledAt -le $now -and ($now - $sampledAt) -lt (7 * 86400)
   $inForce = {
     param($stat, $resetRaw)
     if ($stat -ne 'rejected') { return $false }
-    $reset = [int64]0
-    if (-not [int64]::TryParse([string]$resetRaw, [ref]$reset) -or $reset -le 0) { return $withinWeek }
+    $reset = Get-UsableReset $resetRaw
+    if (-not $reset) { return $withinWeek }
     return ($reset -gt $now)
   }
-  if ($Which -eq 'fable') { return (& $inForce $d.oi7_stat $d.oi7_reset) }
   if (& $inForce $d.s5_stat $d.s5_reset) { return $true }
   if (& $inForce $d.w7_stat $d.w7_reset) { return $true }
   # The proxy also writes Fable rejections to the Fable cache. An overall rejection tied to that window belongs there.
@@ -1248,7 +1312,7 @@ function Select-RotationTarget {
     if ($fu.ok -and $fu.oi7_stat -eq 'rejected') { continue }         # Gate C needs Fable
     $fNoWin = ($fu.ok -and -not ([int]$fu.http -ge 200 -and [int]$fu.http -lt 300) -and -not $fu.oi7_stat -and $null -eq $fu.oi7_util)
     if ($fNoWin -and (Test-FableCapCached $c.label)) {               # an ok non-2xx that read no Fable window left a cap in force on disk ($keepCap)
-      Write-RotateLog ("skipped '{0}' as a target: its Fable probe (http {1}) read no Fable window and a Fable cap is still in force on disk (usage-cache-fable.json)" -f $c.label, $fu.http) Yellow
+      Write-RotateLog ("skipped '{0}' as a target: its Fable probe (http {1}) read no Fable window and a cached Fable cap is still in force" -f $c.label, $fu.http) Yellow
       continue
     }
     $c | Add-Member -NotePropertyName fable -NotePropertyValue $(if ($fu.ok -and $null -ne $fu.oi7_util) { [double]$fu.oi7_util } else { $null }) -Force

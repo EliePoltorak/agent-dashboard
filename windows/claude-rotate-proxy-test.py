@@ -34,6 +34,11 @@ class Fake(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("content-length") or 0))
         tok = (self.headers.get("authorization") or "")[7:]
         seen.append(tok)
+        if self.path.endswith("?fable-allowed"):
+            self.send_response(200)
+            self.send_header(RL + "7d_oi-status", "allowed")
+            self.end_headers()
+            return
         fable_status_only = self.path.endswith("?fable-status-only")
         if tok == "tok-A" or fable_status_only:
             body = b'{"type":"error","error":{"type":"rate_limit_error","message":"spent"}}'
@@ -169,6 +174,13 @@ def main():
         cap = saved.pop("fable_cap")
         assert saved == measurement and cap["ts"] > measurement["ts"], (saved, cap)
         assert cap["data"]["oi7_stat"] == "rejected" and cap["data"]["oi7_util"] is None, cap
+        status, _ = call(port, "tok-A", "/v1/messages?fable-allowed")
+        assert status == 200
+        with open(fable_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        allowance = saved.pop("fable_cap")
+        assert saved == measurement and allowance["data"]["oi7_stat"] == "allowed", (saved, allowance)
+        assert allowance["observed_ms"] > cap["observed_ms"], (cap, allowance)
         with open(os.path.join(root, ".active"), "w") as f:
             f.write("A")
         print("ok  status-only Fable rejection preserves the last measured utilization and its timestamp")

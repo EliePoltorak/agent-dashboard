@@ -62,7 +62,8 @@ WRITE_EVERY = 5        # s between cache writes per seat (a rejection always wri
 ROTATE_COOLDOWN = 20   # s: after a rotation attempt that changed nothing, don't ask again yet
 LOG_MAX = 1_000_000
 
-_lock = threading.Lock()          # tokens, cache-write stamps, log
+_lock = threading.Lock()          # tokens and log
+_cache_lock = threading.Lock()    # cache-write stamps and same-process writes
 _rotate_lock = threading.Lock()   # one rotation request at a time
 _state = {"tokens": {}, "by_label": {}, "loaded": 0.0, "written": {}, "last_rotate": 0.0}
 
@@ -122,7 +123,7 @@ def usage_record(label, status, model, headers):
     # A rejection is worth recording even with no utilisation numbers: it is what a --now check
     # must see (Grok review 2026-10-30).
     rejected = any(data[k] == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
-    return data if (data["s5_util"] or data["oi7_util"] or rejected) else None
+    return data if (data["s5_util"] or data["oi7_util"] or data["oi7_stat"] or rejected) else None
 
 
 def is_quota_rejection(status, headers):
@@ -132,30 +133,50 @@ def is_quota_rejection(status, headers):
     return any(headers.get(RL + k) == "rejected" for k in ("status", "5h-status", "7d-status", "7d_oi-status"))
 
 
-def status_only_fable(data):
-    return data.get("oi7_stat") == "rejected" and data.get("oi7_util") is None
+def lock_cache(stream):
+    """Take the same byte-range lock as the PowerShell cache writer."""
+    if os.name == "nt":
+        import msvcrt
+        acquire = lambda: msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+    else:
+        import fcntl
+        acquire = lambda: fcntl.lockf(stream, fcntl.LOCK_EX | fcntl.LOCK_NB, 1)
+    for _ in range(4):
+        try:
+            acquire()
+            return
+        except OSError:
+            time.sleep(0.025)
+    acquire()
 
 
-def cache_entry(path, suffix, data, now, has_fable):
-    entry = {"ts": int(now), "data": data}
-    if not (status_only_fable(data) and suffix or not has_fable and not suffix):
-        return entry
+def observed_ms(entry):
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            prior = json.load(f)
-    except (OSError, ValueError):
-        return entry
-    if not isinstance(prior, dict) or not isinstance(prior.get("data"), dict):
-        return entry
+        return int(entry.get("observed_ms") or int(entry.get("ts") or 0) * 1000)
+    except (TypeError, ValueError):
+        return 0
+
+
+def fable_observed_ms(entry):
+    reading = entry.get("fable_cap") or entry
+    data = reading.get("data", {})
+    status = int(data.get("http") or 0)
+    if data.get("ok") and (data.get("oi7_stat") or data.get("oi7_util") is not None or 200 <= status < 300):
+        return observed_ms(reading)
+    return int(entry.get("fable_confirmed_ms") or 0)
+
+
+def cache_entry(prior, suffix, entry, has_fable):
     if suffix:
         # Keep the last measurement and its timestamp for the watcher and usage history.
-        if prior["data"].get("oi7_util") is not None:
-            return {"ts": prior.get("ts"), "data": prior["data"], "fable_cap": entry}
-    else:
+        if entry["data"].get("oi7_util") is None and prior.get("data", {}).get("oi7_util") is not None:
+            return {**prior, "fable_cap": entry}
+    elif not has_fable:
         # A default-only write must not lose an older proxy's only copy of the cap.
         cap = prior.get("fable_cap")
-        if prior["data"].get("src") == "proxy" and prior["data"].get("ok") and status_only_fable(prior["data"]):
-            cap = {"ts": prior.get("ts"), "data": prior["data"]}
+        old = prior.get("data", {})
+        if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat") == "rejected" and old.get("oi7_util") is None:
+            cap = {"ts": prior.get("ts"), "observed_ms": observed_ms(prior), "data": old}
         if cap:
             entry["fable_cap"] = cap
     return entry
@@ -164,7 +185,9 @@ def cache_entry(path, suffix, data, now, has_fable):
 def write_cache(label, data):
     """Atomic write of <label>/usage-cache.json (and -fable when the Fable window rode along)."""
     rejected = any(data.get(k) == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
-    has_fable = data.get("oi7_util") or data.get("oi7_stat") == "rejected"
+    has_fable = data.get("oi7_util") or data.get("oi7_stat")
+    receipt = time.time_ns() // 1_000_000
+    now = receipt / 1000
     for suffix, present in (("", data.get("s5_util") or rejected), ("-fable", has_fable)):
         if not present:
             continue
@@ -172,16 +195,31 @@ def write_cache(label, data):
         path = os.path.join(ROOT, label, "usage-cache%s.json" % suffix)
         tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
         try:
-            with _lock:
-                now = time.time()
-                if not rejected and now - _state["written"].get(key, 0) < WRITE_EVERY:
+            with _cache_lock, open(path + ".lock", "a+b") as guard:
+                guard.seek(0)
+                lock_cache(guard)
+                try:
+                    with open(path, encoding="utf-8-sig") as f:
+                        prior = json.load(f)
+                except FileNotFoundError:
+                    prior = {}
+                if not isinstance(prior, dict) or not isinstance(prior.get("data", {}), dict):
                     continue
-                entry = cache_entry(path, suffix, data, now, has_fable)
+                effective = (prior.get("fable_cap") if suffix else None) or prior
+                if not isinstance(effective, dict) or not isinstance(effective.get("data", {}), dict):
+                    continue
+                previous_ms = fable_observed_ms(prior) if suffix else observed_ms(effective)
+                if receipt <= previous_ms:
+                    continue
+                clears_fable_cap = suffix and effective.get("data", {}).get("oi7_stat") == "rejected"
+                if not rejected and not clears_fable_cap and now - _state["written"].get(key, 0) < WRITE_EVERY:
+                    continue
+                entry = cache_entry(prior, suffix, {"ts": receipt // 1000, "observed_ms": receipt, "data": data}, has_fable)
                 with open(tmp, "w", encoding="utf-8") as f:
                     json.dump(entry, f)
                 os.replace(tmp, path)
                 _state["written"][key] = now
-        except OSError as e:
+        except (OSError, TypeError, ValueError) as e:
             log("cache write failed for %s: %s" % (key, e))
 
 
