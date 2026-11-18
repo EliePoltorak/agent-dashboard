@@ -140,17 +140,23 @@ $pathNames = if ($extendedUnc) {
 } else {
   $path -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
 }
+$uncRoot = if ($unc) { [regex]::Match($pathNames, '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}(?:\\|$))[^\\]+').Value }
 $directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
-    ($unc -and $pathNames -notmatch '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}(?:\\|$))[^\\]+') -or
-    (-not $device -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
+    ($unc -and -not $uncRoot) -or
+    (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
     ($path.StartsWith('\\?\', [StringComparison]::Ordinal) -and $inputPath.Contains('/')) -or
     ($verbatim -and $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)') -or
-    (-not $device -and -not $unc -and $directoryNames -match '(^|\\)(?:CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3]) *(?:\.|\\|$)') -or
+    (-not $verbatim -and -not $unc -and $directoryNames -match '(^|\\)NUL(?:\\|$)') -or
     -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
-  throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
+  throw 'Use a valid absolute Windows workspace path with -Cwd or in ~/.claude/history-sync-workspace.txt. Check for quotes, trailing spaces or unsupported characters.'
 }
-$root = [IO.Path]::GetPathRoot($path)
+$root = if ($unc) {
+  # Keep the original prefix spelling and use the same share boundary as validation.
+  $path.Substring(0, $path.Length - $pathNames.Length + $uncRoot.Length)
+} else {
+  [IO.Path]::GetPathRoot($path)
+}
 $components = [Collections.Generic.List[string]]::new()
 foreach ($component in ($path.Substring($root.Length) -split '\\')) {
   if ([string]::Equals($component, '..', [StringComparison]::Ordinal)) {

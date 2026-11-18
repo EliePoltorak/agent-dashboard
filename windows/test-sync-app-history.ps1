@@ -34,7 +34,7 @@
 $Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
 $sb = Join-Path ([IO.Path]::GetTempPath()) "sync-app-history-test's-[fixture]-$([guid]::NewGuid())"
 # This path is only a transcript key. Keep its encoded directory name independent of TEMP.
-$workspace = [IO.Path]::Combine([IO.Path]::GetPathRoot($PSHOME), "sync-fixture's-[workspace]-café\..$([char]0xAD)")
+$workspace = [IO.Path]::Combine([IO.Path]::GetPathRoot($PSHOME), "sync-fixture's-[workspace]-café\NUL.txt\COM1\..$([char]0xAD)")
 $encoded = $workspace -creplace '[^A-Za-z0-9]', '-'
 $proj = "$sb\home\.claude\projects\$encoded"
 $ccs = "$sb\app\Claude\claude-code-sessions"
@@ -102,7 +102,7 @@ function inIdx($r) { $p = Join-Path (Split-Path -LiteralPath $r.f) 'archived-ses
 
 $initialIndex = recHash
 run @{ Quiet = $true }
-check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
+check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Use a valid absolute Windows workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
 [IO.File]::WriteAllBytes($workspaceFile, [byte[]](0x43, 0x3A, 0x5C, 0xE9))
 run @{ Quiet = $true }
 check 'a non-UTF-8 setting fails before writing state' ($rc -ne 0 -and ($out -match 'as UTF-8') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
@@ -120,16 +120,16 @@ $invalidWorkspaces = @(
   '\\?\C:\draft\..\release'
   '\\?\C:\draft\.\release'
   '\\?\C:\work/project'
+  '\\.\C:\work\trailing.'
   '//?/C:/work/project'
-  'C:\work\NUL.txt'
-  'C:\work\COM1\workspace'
+  'C:\work\NUL'
   '\\?\'
   '\\.\'
 )
 foreach ($invalidWorkspace in $invalidWorkspaces) {
   Set-Content -LiteralPath $workspaceFile $invalidWorkspace
   run @{ Quiet = $true }
-  check "an invalid workspace setting ($invalidWorkspace) fails before writing state" ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
+  check "an invalid workspace setting ($invalidWorkspace) fails before writing state" ($rc -ne 0 -and ($out -match 'Use a valid absolute Windows workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
 }
 $overrideWorkspace = $workspace.Replace('\', '/') + '/ignored/.././'
 run @{ Cwd = $overrideWorkspace; DryRun = $true }
@@ -560,7 +560,7 @@ touch $Y 0; run
 check 'kept: resumed: stays archived on every seat' (@(ofSession $Y | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $Y) -like 'kept *')
 
 # A share root can already have local transcripts and app records keyed with the final separator.
-$uncWorkspace = '\\history-root-fixture.invalid.\share\'
+$uncWorkspace = '\\?\unc\history-root-fixture.invalid.\share\'
 $uncEncoded = $uncWorkspace -creplace '[^A-Za-z0-9]', '-'
 $uncProj = "$sb\home\.claude\projects\$uncEncoded"
 $uncBucket = "$ccs\A\unc-share-root-fixture"

@@ -646,6 +646,12 @@ Before deploying this version, save the absolute workspace path as a single unqu
 read that file on each run. Use the spelling recorded by Claude Code, including a final backslash
 when the workspace is a share root and Claude Code recorded it with one.
 
+For example, replace the workspace path in this PowerShell command.
+
+```powershell
+Set-Content -LiteralPath "$env:USERPROFILE\.claude\history-sync-workspace.txt" -Encoding utf8 -Value 'C:\path\to\workspace'
+```
+
 For a workspace the desktop app has never used, start and save one session in the app on any account
 so the sync can reuse the app's workspace ID. Before replacing the installed script, run the checkout
 copy from the repo root in PowerShell. The preview runs at Idle priority in its own process.
