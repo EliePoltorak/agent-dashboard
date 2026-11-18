@@ -643,7 +643,8 @@ which nothing runs it from, so a clean `rotator-sync --check` does not mean the 
 
 Before deploying this version, save the absolute workspace path as a single unquoted UTF-8 line in
 `%USERPROFILE%\.claude\history-sync-workspace.txt`. The account-switch hook and the scheduled task
-read that file on each run.
+read that file on each run. Use the spelling recorded by Claude Code, including a final backslash
+when the workspace is a share root and Claude Code recorded it with one.
 
 For a workspace the desktop app has never used, start and save one session in the app on any account
 so the sync can reuse the app's workspace ID. Before replacing the installed script, run the checkout

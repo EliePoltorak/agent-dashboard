@@ -154,18 +154,9 @@ foreach ($component in ($path.Substring($root.Length) -split '\\')) {
   }
 }
 $Cwd = [IO.Path]::Combine($root, ($components -join '\'))
-$workspacePaths = @($Cwd)
-if ($unc -and -not $components.Count) {
-  # Both share-root spellings can already be present in the local transcript and app indexes.
-  $shareRoot = $Cwd.TrimEnd('\')
-  $shareRootWithSeparator = $shareRoot + '\'
-  if ($path.EndsWith('\')) {
-    $Cwd = $shareRootWithSeparator
-    $workspacePaths = @($shareRootWithSeparator, $shareRoot)
-  } else {
-    $Cwd = $shareRoot
-    $workspacePaths = @($shareRoot, $shareRootWithSeparator)
-  }
+# Share roots with a final separator already have a distinct transcript key.
+if ($unc -and -not $components.Count -and $path.EndsWith('\')) {
+  $Cwd = $Cwd.TrimEnd('\') + '\'
 }
 
 $ccs = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
@@ -197,23 +188,19 @@ try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
 # The CLI's project-folder name: every character other than A-Z, a-z, 0-9 becomes '-' (case-sensitive match, as
 # the CLI's regex is); a name over 200 characters is cut to 200 plus '-' and a hash, so look that one up by prefix.
+$enc = $Cwd -creplace '[^A-Za-z0-9]', '-'
 $projRoot = Join-Path $env:USERPROFILE '.claude\projects'
-$transcripts = @()
-foreach ($workspacePath in $workspacePaths) {
-  $enc = $workspacePath -creplace '[^A-Za-z0-9]', '-'
-  $projDir = Join-Path $projRoot $enc
-  if ($enc.Length -gt 200) {
-    # A single folder with that prefix is taken as this one. With more than one, stop.
-    $cand = @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($enc.Substring(0, 200) + '-', [StringComparison]::OrdinalIgnoreCase) })
-    if ($cand.Count -eq 1) { $projDir = $cand[0].FullName }
-    elseif ($cand.Count -gt 1) { if (-not $Quiet) { "no transcripts for $($Cwd): $($cand.Count) project folders share its 200-character prefix; can't tell which is this one" }; return }
-  }
-  if (Test-Path -LiteralPath $projDir) {
-    $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
-    if ($transcripts.Count) { break }
-  }
+$projDir = Join-Path $projRoot $enc
+if ($enc.Length -gt 200) {
+  # The hash can't be recomputed here, so a single folder with that prefix is taken as this one; with
+  # more than one the run cannot tell them apart and stops. Case-insensitive, as the filesystem is.
+  $cand = @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($enc.Substring(0, 200) + '-', [StringComparison]::OrdinalIgnoreCase) })
+  if ($cand.Count -eq 1) { $projDir = $cand[0].FullName }
+  elseif ($cand.Count -gt 1) { if (-not $Quiet) { "no transcripts for $($Cwd): $($cand.Count) project folders share its 200-character prefix; can't tell which is this one" }; return }
 }
-if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
+if (-not (Test-Path -LiteralPath $projDir)) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
+$transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
+if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; return }
 # a run killed between writing a .sync-tmp and moving it into place leaves it in the app's index; the suffix is
 # only ours and the lock means no other run is mid-write, so any found now is a leftover
 if (-not $DryRun -and (Test-Path -LiteralPath $ccs)) {
@@ -463,7 +450,7 @@ foreach ($acct in $accts) {
       try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { continue }
       if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
-      if ($workspacePaths -contains $j.cwd) {
+      if ($j.cwd -eq $Cwd) {
         $cnt++
         $cli = [string]$j.cliSessionId
         if ($cli) {
@@ -633,7 +620,7 @@ if (-not $flagSkip) {
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
-      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $workspacePaths -contains $_.j.cwd }).Count
+      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
       # An un-archive seen this run is remembered at ANY age, and in ANY run (also with -MaxAgeDays 0, another -Cwd, or no
       # transcript here: the baseline is saved for it either way, so a later run could not see it as a change), or the
       # session would be archived once it grows old. (A plain-date entry the user un-archived becomes a kept entry.)
@@ -738,7 +725,7 @@ $byCli = @{}
 foreach ($kv in $bucketRecs.GetEnumerator()) {
   foreach ($r in $kv.Value) {
     $cli = [string]$r.j.cliSessionId
-    if ($workspacePaths -contains $r.j.cwd -and $cli -and $r.j.lastAssistantUuid) {
+    if ($r.j.cwd -eq $Cwd -and $cli -and $r.j.lastAssistantUuid) {
       if (-not $byCli.ContainsKey($cli)) { $byCli[$cli] = New-Object System.Collections.Generic.List[object] }
       $byCli[$cli].Add($r)
     }

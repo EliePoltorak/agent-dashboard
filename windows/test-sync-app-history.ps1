@@ -564,11 +564,12 @@ $seedId = "local_$([guid]::NewGuid())"
   ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $uncBucket "$seedId.json") -NoNewline
 $uncSession = [guid]::NewGuid().ToString()
 Set-Content -LiteralPath (Join-Path $uncProj "$uncSession.jsonl") (@('{"type":"user","message":{"role":"user","content":"test a share root"}}') + $asst)
+run @{ Cwd = $uncWorkspace }
+$newUncRecords = @(ofSession $uncSession | ForEach-Object { Get-Content -LiteralPath $_.f -Raw | ConvertFrom-Json })
+check 'a trailing UNC share-root separator is preserved in new app pointers' ($rc -eq 0 -and $newUncRecords.Count -gt 0 -and -not ($newUncRecords | Where-Object { $_.cwd -ne $uncWorkspace -or $_.originCwd -ne $uncWorkspace }))
 $beforeUnc = recHash
-foreach ($spelling in $uncWorkspace, $uncWorkspace.TrimEnd('\')) {
-  run @{ Cwd = $spelling; DryRun = $true }
-  check "preview finds existing UNC share-root keys ($spelling)" ($rc -eq 0 -and ($out -match '^WOULD: added [1-9]\d*,') -and (recHash) -eq $beforeUnc)
-}
+run @{ Cwd = $uncWorkspace.TrimEnd('\'); DryRun = $true }
+check 'a UNC root without a separator does not import from a different transcript key' ($rc -eq 0 -and ($out -match '^no transcripts') -and (recHash) -eq $beforeUnc)
 
 "$fail failure(s)"
 if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }
