@@ -236,6 +236,12 @@ def cache_entry(prior, suffix, entry, has_fable):
         # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
         if cap and observed_ms(cap) <= time.time_ns() // 1_000_000:   # not future-dated; a newer cap is kept
             entry["fable_cap"] = cap
+    else:
+        # A full Fable reading is the newer Fable word, unless a Fable observation it raced (nested a moment later by
+        # another response) is newer still and not future-dated: keep that one.
+        cap = default_fable_observation(prior)
+        if cap and entry["observed_ms"] < observed_ms(cap) <= time.time_ns() // 1_000_000:
+            entry["fable_cap"] = cap
     return entry
 
 
@@ -702,6 +708,10 @@ def cache_self_test():
         assert cache_entry(prior, "", dict(late), False).get("fable_cap") == nested, "a late default write dropped a newer Fable rejection"
         future = dict(nested, observed_ms=now + 3_600_000)
         assert "fable_cap" not in cache_entry(dict(prior, fable_cap=future), "", dict(late), False), "a future-dated cap was carried"
+        late_full = {"ts": (now - 2000) // 1000, "observed_ms": now - 2000, "data": {"ok": True, "src": "proxy", "s5_util": 0.2, "oi7_stat": "allowed", "oi7_util": 0.3}}
+        assert cache_entry(prior, "", dict(late_full), True).get("fable_cap") == nested, "a late full Fable reading dropped a newer Fable rejection"
+        older = dict(nested, observed_ms=now - 9000)
+        assert "fable_cap" not in cache_entry(dict(prior, fable_cap=older), "", dict(late_full), True), "a full Fable reading kept an older Fable cap"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()

@@ -513,10 +513,10 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
     } else {
       if ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and
           (Test-CapCached $Label 'default')) { return }
-      # A default-model refresh has no authority over the older Fable observation (a rejection or an allowance).
+      # A default-model refresh has no authority over a Fable observation (a rejection or an allowance), older or newer.
       $legacy = Get-LegacyFableCap $prior
       # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
-      # Only a reading without Fable fields leaves it to the cap (as in the proxy): one with them is the newer Fable word.
+      # Only a reading without Fable fields leaves it to the cap (as in the proxy, which keeps it under a Fable reading only when it is newer).
       if ($legacy -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and
           (Get-CacheObservationMs $legacy) -le [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()) { $Entry.fable_cap = $legacy }   # newer than this reading is fine
     }
