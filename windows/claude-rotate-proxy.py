@@ -265,6 +265,8 @@ def write_cache(label, data):
                         _state["fable_capped"].discard(key)
         except (OSError, TypeError, ValueError) as e:
             log("cache write failed for %s: %s" % (key, e))
+            if not rejected:
+                _state["written"][key] = now   # a stuck lock must not cost the lock wait on every response
 
 
 # The proxy's own refusal (no eligible seat left), in the API's canonical shape: the code and wording every refusal classifier keys on

@@ -130,7 +130,7 @@ the live probe answered without reading it: a non-2xx carrying none of `status`,
 to seven days from the cached reading. A new reading can replace it sooner (a 2xx, or a non-2xx
 carrying one of those fields). The proxy saves a Fable rejection to `usage-cache-fable.json` even
 when the response has no Fable utilization. The last measured utilization keeps its original
-timestamp. Older status-only rejections in the default cache also survive default-model refreshes.
+timestamp, unless that timestamp is in the future (a clock set back), when the rejection is saved alone. Older status-only rejections in the default cache also survive default-model refreshes.
 A Fable probe that fails
 (any unknown reading, e.g. the network, a model-catalog HTTP or parse error, no token) still reads
 as not-capped, as any unknown Fable reading does (see the inference note below; #20).
