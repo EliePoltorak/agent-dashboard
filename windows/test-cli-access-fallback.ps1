@@ -591,6 +591,9 @@ $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Enc
 @{ ts = $statusOnly.ts + 60; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; s5_util = 0.1; oi7_stat = 'allowed' } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a newer Fable allowance in the default cache supersedes the Fable cache rejection' ((Select-RotationTarget 90 'B').label -eq 'A')
+@{ ts = $statusOnly.ts + 60; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; s5_util = 0.1; oi7_util = 0.2 } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a newer Fable utilization reading in the default cache supersedes the Fable cache rejection' ((Select-RotationTarget 90 'B').label -eq 'A')
 $measuredCap = @{ ts = $statusOnly.ts; data = @{ ok = $true; http = 429; oi7_stat = 'rejected'; oi7_util = 1.0; oi7_reset = [string]($nowS + 3600) } }
 $measuredCap | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache.json')

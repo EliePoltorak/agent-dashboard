@@ -176,6 +176,7 @@ def main():
         cap = saved.pop("fable_cap")
         assert saved == measurement and cap["ts"] > measurement["ts"], (saved, cap)
         assert cap["data"]["oi7_stat"] == "rejected" and cap["data"]["oi7_util"] is None, cap
+        time.sleep(0.02)   # a later millisecond: on a tie the rejection is meant to win
         status, _ = call(port, "tok-A", "/v1/messages?fable-allowed")
         assert status == 200
         with open(fable_path, encoding="utf-8") as f:

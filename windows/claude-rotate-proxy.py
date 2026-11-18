@@ -184,7 +184,7 @@ def read_cache_for_update(path):
 def observed_ms(entry):
     try:
         return int(entry.get("observed_ms") or int(entry.get("ts") or 0) * 1000)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
@@ -193,14 +193,28 @@ def fable_observed_ms(entry):
     data = reading.get("data", {})
     try:
         status = int(data.get("http") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         status = 0   # malformed metadata must not block the write that repairs it
     if data.get("ok") and (data.get("oi7_stat") or data.get("oi7_util") is not None or 200 <= status < 300):
         return observed_ms(reading)
     try:
         return int(entry.get("fable_confirmed_ms") or 0)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return 0
+
+
+DEFAULT_WINDOW = ("s5_util", "s5_stat", "w7_util", "w7_stat")
+
+
+def default_fable_observation(cached):
+    """The newest Fable observation in a default-cache record: its own proxy reading, or the one nested under it."""
+    old = cached.get("data", {})
+    nested = cached.get("fable_cap")
+    if old.get("src") == "proxy" and old.get("ok") and (old.get("oi7_stat") or old.get("oi7_util") is not None):
+        own = {"ts": cached.get("ts"), "observed_ms": observed_ms(cached), "data": old}
+        if not nested or observed_ms(nested) <= own["observed_ms"]:
+            return own
+    return nested
 
 
 def cache_entry(prior, suffix, entry, has_fable):
@@ -210,13 +224,14 @@ def cache_entry(prior, suffix, entry, has_fable):
         if (entry["data"].get("oi7_util") is None and prior.get("data", {}).get("oi7_util") is not None
                 and observed_ms(prior) <= entry["observed_ms"]):
             return {**prior, "fable_cap": entry}
+    elif has_fable and all(entry["data"].get(k) is None for k in DEFAULT_WINDOW) and prior.get("data") and             observed_ms(prior) <= entry["observed_ms"]:
+        # A Fable-only response names no default window: keep the default reading (and any cap it holds) and add this
+        # as the Fable backup, as the -fable file nests a status-only reading.
+        return {**prior, "fable_cap": entry}
     elif not has_fable:
         # A default-only write must not lose the default cache's copy of a Fable observation (a rejection or an
         # allowance): an older proxy's only copy, or the backup when the -fable write was skipped.
-        cap = prior.get("fable_cap")
-        old = prior.get("data", {})
-        if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat"):
-            cap = {"ts": prior.get("ts"), "observed_ms": observed_ms(prior), "data": old}
+        cap = default_fable_observation(prior)
         # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
         if cap and observed_ms(cap) <= entry["observed_ms"]:
             entry["fable_cap"] = cap
@@ -282,7 +297,7 @@ def write_cache(label, data):
                             _state["fable_capped"].add(key)
                         else:
                             _state["fable_capped"].discard(key)
-            except (OSError, TypeError, ValueError) as e:
+            except Exception as e:   # a cache write must never stop the response from being relayed
                 _state["failed"][key] = mono   # recorded before the next queued thread can take the lock
                 failure = e
         if failure:
@@ -664,6 +679,20 @@ def cache_self_test():
             json.dump({"ts": 2, "observed_ms": 2000, "data": {"ok": True, "src": "proxy", "s5_util": "0.1", "oi7_stat": "allowed"}}, f)
         write_cache("S", {"ok": True, "http": 200, "src": "proxy", "s5_util": "0.2"})
         assert load(default).get("fable_cap", {}).get("data", {}).get("oi7_stat") == "allowed", "a default refresh lost a Fable allowance"
+        _state["written"].clear()
+        with open(default, "w", encoding="utf-8") as f:
+            json.dump({"ts": 3, "observed_ms": 3000, "data": {"ok": True, "src": "proxy", "s5_util": "0.3", "oi7_util": "0.5"}}, f)
+        write_cache("S", {"ok": True, "http": 200, "src": "proxy", "s5_util": "0.4"})
+        assert load(default).get("fable_cap", {}).get("data", {}).get("oi7_util") == "0.5", "a default refresh lost a Fable utilization reading"
+        with open(default, "w", encoding="utf-8") as f:
+            json.dump({"ts": 4, "observed_ms": 4000, "data": {"ok": True, "src": "proxy", "s5_stat": "rejected", "status": "rejected"}}, f)
+        write_cache("S", {"ok": True, "http": 429, "src": "proxy", "status": "rejected", "oi7_stat": "rejected"})
+        saved_default = load(default)
+        assert saved_default["data"].get("s5_stat") == "rejected" and saved_default["fable_cap"]["data"]["oi7_stat"] == "rejected",             "a Fable-only rejection replaced the default cap"
+        with open(fable, "w", encoding="utf-8") as f:
+            f.write('{"ts": 5, "observed_ms": Infinity, "data": {"ok": true, "http": 200, "oi7_stat": "allowed"}}')
+        _state["failed"].clear()
+        write_cache("S", {"ok": True, "http": 429, "src": "proxy", "oi7_stat": "rejected"})   # must not raise
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()

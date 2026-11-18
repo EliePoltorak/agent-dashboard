@@ -439,11 +439,14 @@ function Get-CacheObservationMs($Cache) {
 # A proxy Fable observation (a rejection or an allowance) in the default cache: an older proxy's only copy of a
 # status-only rejection, or the backup when the proxy's -fable write was skipped. The newer reading wins.
 # Despite the name (and the fable_cap key it fills), the result can be an allowance: never read it as "capped".
+# The newer of the record's own proxy reading and the one nested under it wins.
 function Get-LegacyFableCap($Cache) {
-  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat) {
-    return @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
+  $nested = $Cache.fable_cap
+  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and ($Cache.data.oi7_stat -or $null -ne $Cache.data.oi7_util)) {
+    $own = @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
+    if (-not $nested -or (Get-CacheObservationMs $nested) -le $own.observed_ms) { return $own }
   }
-  return $Cache.fable_cap
+  return $nested
 }
 
 function Get-FableObservationMs($Cache) {
