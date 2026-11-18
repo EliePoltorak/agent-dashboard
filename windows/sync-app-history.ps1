@@ -124,15 +124,25 @@ if (-not $PSBoundParameters.ContainsKey('Cwd')) {
   }
 }
 # Check syntax without touching the workspace. An offline share can still have local transcripts.
-$pathSyntax = ([string]$Cwd).Replace('/', '\') -replace '^\\\\\?\\UNC\\', '\\'
+$path = ([string]$Cwd).Replace('/', '\')
+$pathSyntax = $path -replace '^\\\\[?.]\\UNC(?:\\|$)', '\\'
 $unc = $pathSyntax.StartsWith('\\') -and $pathSyntax -notmatch '^\\\\[?.]\\'
-$pathNames = $pathSyntax -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:', ''
-if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd) -or
+$pathNames = $pathSyntax -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
+if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
     ($unc -and $pathSyntax -notmatch '^\\\\[^\\]+\\[^\\]+') -or
     $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
-$Cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Cwd))
+$root = [IO.Path]::GetPathRoot($path)
+$components = [Collections.Generic.List[string]]::new()
+foreach ($component in ($path.Substring($root.Length) -split '\\')) {
+  if ($component -eq '..') {
+    if ($components.Count) { $components.RemoveAt($components.Count - 1) }
+  } elseif ($component -and $component -ne '.') {
+    $components.Add($component)
+  }
+}
+$Cwd = [IO.Path]::Combine($root, ($components -join '\'))
 
 $ccs = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
 if (-not (Test-Path -LiteralPath $ccs)) { throw "App session index not found: $ccs (is the desktop app installed?)" }

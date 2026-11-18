@@ -103,13 +103,25 @@ function inIdx($r) { $p = Join-Path (Split-Path -LiteralPath $r.f) 'archived-ses
 $initialIndex = recHash
 run @{ Quiet = $true }
 check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
-foreach ($invalidWorkspace in 'relative-path', ($workspace + '"'), ($workspace + ':archive'), '\\server\share:stream\workspace', '\\server\sh*re\workspace', '\\server') {
+$invalidWorkspaces = @(
+  'relative-path'
+  ($workspace + '"')
+  ($workspace + ':archive')
+  '\\server\share:stream\workspace'
+  '\\server\sh*re\workspace'
+  '\\server'
+  '\\?\C:project'
+)
+foreach ($invalidWorkspace in $invalidWorkspaces) {
   Set-Content -LiteralPath $workspaceFile $invalidWorkspace
   run @{ Quiet = $true }
   check "an invalid workspace setting ($invalidWorkspace) fails before writing state" ($rc -ne 0 -and ($out -match 'Pass an absolute workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
 }
-run @{ Cwd = "$workspace\"; DryRun = $true }
+$overrideWorkspace = $workspace.Replace('\', '/') + '/ignored/.././'
+run @{ Cwd = $overrideWorkspace; DryRun = $true }
 check 'an explicit workspace overrides an invalid setting and plans additions on all three seats' ($rc -eq 0 -and ($out -match '^WOULD: added 3,') -and (recHash) -eq $initialIndex)
+run @{ Cwd = '\\history-sync-fixture.invalid\share\PROJEC~1'; DryRun = $true }
+check 'a valid UNC workspace with no local transcripts can be previewed' ($rc -eq 0 -and ($out -match '^no transcripts') -and (recHash) -eq $initialIndex)
 Set-Content -LiteralPath $workspaceFile "$workspace\"
 
 # The sandbox index agrees across seats, so plant a disagreement for the first run to resolve.
