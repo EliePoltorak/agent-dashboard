@@ -129,7 +129,9 @@ if (-not $PSBoundParameters.ContainsKey('Cwd')) {
   }
 }
 # Check syntax without touching the workspace. An offline share can still have local transcripts.
-$path = ([string]$Cwd).Replace('/', '\')
+$inputPath = [string]$Cwd
+$verbatim = $inputPath.StartsWith('\\?\', [StringComparison]::Ordinal)
+$path = if ($verbatim) { $inputPath } else { $inputPath.Replace('/', '\') }
 $device = $path -match '^\\\\[?.]\\'
 $extendedUnc = $path -match '^\\\\[?.]\\UNC(?:\\|$)'
 $unc = $extendedUnc -or (-not $device -and $path.StartsWith('\\'))
@@ -139,11 +141,12 @@ $pathNames = if ($extendedUnc) {
   $path -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
 }
 $directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
-$verbatim = $path.StartsWith('\\?\', [StringComparison]::Ordinal)
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
     ($unc -and $pathNames -notmatch '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}(?:\\|$))[^\\]+') -or
     (-not $device -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
+    ($path.StartsWith('\\?\', [StringComparison]::Ordinal) -and $inputPath.Contains('/')) -or
     ($verbatim -and $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)') -or
+    (-not $device -and -not $unc -and $directoryNames -match '(^|\\)(?:CON|PRN|AUX|NUL|COM[1-9\u00B9\u00B2\u00B3]|LPT[1-9\u00B9\u00B2\u00B3]) *(?:\.|\\|$)') -or
     -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }

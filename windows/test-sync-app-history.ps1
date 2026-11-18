@@ -119,6 +119,10 @@ $invalidWorkspaces = @(
   '\\?\C:project'
   '\\?\C:\draft\..\release'
   '\\?\C:\draft\.\release'
+  '\\?\C:\work/project'
+  '//?/C:/work/project'
+  'C:\work\NUL.txt'
+  'C:\work\COM1\workspace'
   '\\?\'
   '\\.\'
 )

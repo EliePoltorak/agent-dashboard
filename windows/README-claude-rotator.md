@@ -648,7 +648,15 @@ when the workspace is a share root and Claude Code recorded it with one.
 
 For a workspace the desktop app has never used, start and save one session in the app on any account
 so the sync can reuse the app's workspace ID. Before replacing the installed script, run the checkout
-copy from the repo root with `pwsh -NoProfile -File .\windows\sync-app-history.ps1 -DryRun`.
+copy from the repo root in PowerShell. The preview runs at Idle priority in its own process.
+
+```powershell
+pwsh -NoProfile -Command {
+  (Get-Process -Id $PID).PriorityClass = 'Idle'
+  & .\windows\sync-app-history.ps1 -DryRun
+}
+```
+
 Confirm that the `WOULD: added … record(s) for …` summary names the intended workspace. If a CLI
 session that meets the copy rules above is missing from the app, the preview should plan an addition
 or a clone. Zero is expected when every eligible session is already present or none qualify. If the
