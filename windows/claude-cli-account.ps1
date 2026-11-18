@@ -412,6 +412,31 @@ function Probe-Usage {
   }
 }
 
+function Read-UsageCacheFile($Path) {
+  try { Get-Content -LiteralPath $Path -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop } catch {}
+}
+
+# Proxies before this fix could put a status-only Fable rejection only in the default cache.
+function Get-LegacyFableCap($Cache) {
+  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and $Cache.data.oi7_stat -eq 'rejected' -and $null -eq $Cache.data.oi7_util) {
+    return @{ ts = $Cache.ts; data = $Cache.data }
+  }
+  return $Cache.fable_cap
+}
+
+function Read-FableUsageCache($Seat) {
+  $cached = Read-UsageCacheFile (Join-Path $Seat 'usage-cache-fable.json')
+  $reading = if ($cached.fable_cap) { $cached.fable_cap } else { $cached }
+  $legacy = Get-LegacyFableCap (Read-UsageCacheFile (Join-Path $Seat 'usage-cache.json'))
+  $legacyAt = [int64]0; $fableAt = [int64]0
+  [void][int64]::TryParse([string]$reading.ts, [ref]$fableAt)
+  if ($legacy -and [int64]::TryParse([string]$legacy.ts, [ref]$legacyAt) -and $legacyAt -gt $fableAt -and
+      $legacyAt -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()) {
+    return $legacy
+  }
+  return $reading
+}
+
 function Get-UsageCached {
   param([string]$Label, [bool]$Refresh, [string]$Model = 'haiku', [string]$CacheSuffix = '', [bool]$CacheOnly = $false, [bool]$HonorAccessCooldown = $true)
   if (-not $script:UnknownProbeMemo) { $script:UnknownProbeMemo = @{} }
@@ -426,12 +451,14 @@ function Get-UsageCached {
     $marked = Read-AccessDisabled $Label
     if ($marked) { return (New-AccessDisabledResult $Label ([string]$marked.code) 'cooldown, not re-probed') }
   }
-  $cf  = Join-Path (Join-Path $Root $Label) "usage-cache$CacheSuffix.json"
-  $ttl = if ($Model -like '*fable*') { $FableTTL } else { $UsageTTL }
+  $seat = Join-Path $Root $Label
+  $cf  = Join-Path $seat "usage-cache$CacheSuffix.json"
+  $isFable = $Model -like '*fable*'
+  $ttl = if ($isFable) { $FableTTL } else { $UsageTTL }
   $now = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-  if (-not $Refresh -and (Test-Path $cf)) {
+  if (-not $Refresh) {
     try {
-      $c = Get-Content $cf -Raw | ConvertFrom-Json
+      $c = if ($isFable) { Read-FableUsageCache $seat } else { Read-UsageCacheFile $cf }
       if ($c.ts -and (($now - [int64]$c.ts) -le $ttl)) {
         $d = $c.data; $d | Add-Member -NotePropertyName ageSec -NotePropertyValue ([int]($now - [int64]$c.ts)) -Force
         return $d
@@ -451,16 +478,27 @@ function Get-UsageCached {
     # Only a Fable probe that PROVES access clears the seat's shared refusal marker: a 2xx carrying the usage headers. A Haiku probe
     # running beside a refused Fable one, or an ok=$true 500 / unrelated 403 with no usage headers, proves nothing.
     $proved = ([int]$d.http -ge 200 -and [int]$d.http -lt 300 -and ($d.status -or $d.s5_util -or $d.oi7_util))
-    if ($Model -like '*fable*' -and $proved) { Clear-AccessDisabled $Label }
+    if ($isFable -and $proved) { Clear-AccessDisabled $Label }
     if ($script:UnknownProbeMemo.ContainsKey($memoKey)) { [void]$script:UnknownProbeMemo.Remove($memoKey) }
     # A probe that read no window (an ok non-2xx with no usage headers) says nothing about the cap, so it does not overwrite a
     # cached cap still in force: ranking, selection and the fallback read that file through Test-CapCached until the cap's reset
     # or, with no usable reset, for up to seven days after the reading. For a Fable probe the window is oi7 (no oi7_stat or oi7_util); for any
     # other model it is the session or weekly one (no status, s5_stat, w7_stat or s5_util).
     $non2xx = -not ([int]$d.http -ge 200 -and [int]$d.http -lt 300)
-    $keepCap = if ($Model -like '*fable*') { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
+    $keepCap = if ($isFable) { ($non2xx -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and (Test-CapCached $Label 'fable')) }
                else { ($non2xx -and -not $d.status -and -not $d.s5_stat -and -not $d.w7_stat -and $null -eq $d.s5_util -and (Test-CapCached $Label 'default')) }
-    if (-not $keepCap) { try { @{ ts=$now; data=$d } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {} }
+    if (-not $keepCap) {
+      $entry = @{ ts = $now; data = $d }
+      if (-not $isFable) {
+        # A default-model refresh has no authority over the older Fable-only rejection.
+        $legacy = Get-LegacyFableCap (Read-UsageCacheFile $cf)
+        if ($legacy) { $entry.fable_cap = $legacy }
+      } elseif ($d.oi7_stat -eq 'rejected' -and $null -eq $d.oi7_util) {
+        $prior = Read-UsageCacheFile $cf
+        if ($null -ne $prior.data.oi7_util) { $entry = @{ ts = $prior.ts; data = $prior.data; fable_cap = $entry } }
+      }
+      try { $entry | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $cf -Encoding UTF8 } catch {}
+    }
   } elseif ($HonorAccessCooldown -and $d.access -eq 'unknown') {
     $script:UnknownProbeMemo[$memoKey] = $d
   }
@@ -495,7 +533,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-LegacyFableCap','Read-FableUsageCache','Test-CapCached','Test-FableCapCached','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(Get-PrefetchWork $Labels $models $HonorAccessCooldown)
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
@@ -1140,29 +1178,13 @@ function Invoke-EnsureCliSeat {
 # Never probes.
 function Test-CapCached {
   param([string]$Label, [string]$Which = 'default')
-  $name = if ($Which -eq 'fable') { 'usage-cache-fable.json' } else { 'usage-cache.json' }
   $seat = Join-Path $Root $Label
-  $c = $null
-  try { $c = Get-Content -LiteralPath (Join-Path $seat $name) -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
+  $c = if ($Which -eq 'fable') { Read-FableUsageCache $seat } else { Read-UsageCacheFile (Join-Path $seat 'usage-cache.json') }
+  $d = $c.data
+  if (-not $d -or -not $d.ok) { return $false }
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   $sampledAt = [int64]0
   [void][int64]::TryParse([string]$c.ts, [ref]$sampledAt)
-  if ($Which -eq 'fable') {
-    # Older proxies saved status-only Fable rejections in the default file. A Fable reading of
-    # the same age or newer takes precedence, including a probe that cleared the rejection.
-    try {
-      $legacy = Get-Content -LiteralPath (Join-Path $seat 'usage-cache.json') -Raw -ErrorAction Stop | ConvertFrom-Json
-      $legacyAt = [int64]0
-      if ($legacy.data.ok -and $legacy.data.src -eq 'proxy' -and $legacy.data.oi7_stat -eq 'rejected' -and
-          $null -eq $legacy.data.oi7_util -and [int64]::TryParse([string]$legacy.ts, [ref]$legacyAt) -and
-          $legacyAt -gt $sampledAt -and $legacyAt -le $now) {
-        $c = $legacy
-        $sampledAt = $legacyAt
-      }
-    } catch {}
-  }
-  $d = $c.data
-  if (-not $d -or -not $d.ok) { return $false }
   $withinWeek = $sampledAt -gt 0 -and $sampledAt -le $now -and ($now - $sampledAt) -lt (7 * 86400)
   $inForce = {
     param($stat, $resetRaw)

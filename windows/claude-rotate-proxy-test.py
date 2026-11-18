@@ -34,10 +34,11 @@ class Fake(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("content-length") or 0))
         tok = (self.headers.get("authorization") or "")[7:]
         seen.append(tok)
-        if tok == "tok-A":   # seat A is an ordinary seat whose session window is spent
+        fable_status_only = self.path.endswith("?fable-status-only")
+        if tok == "tok-A" or fable_status_only:
             body = b'{"type":"error","error":{"type":"rate_limit_error","message":"spent"}}'
             self.send_response(429)
-            if self.path.endswith("?fable-status-only"):
+            if fable_status_only:
                 fields = (("7d_oi-status", "rejected"), ("7d_oi-reset", "1893456000"))
             else:
                 fields = (("status", "rejected"), ("5h-status", "rejected"), ("5h-utilization", "1.0"))
@@ -155,6 +156,22 @@ def main():
             fab = json.load(f)["data"]
         assert fab["oi7_stat"] == "rejected" and fab["oi7_reset"] == "1893456000" and fab["oi7_util"] is None, fab
         print("ok  status-only Fable rejection is cached, original 429 returned when no seat can rotate")
+
+        fable_path = os.path.join(root, "B", "usage-cache-fable.json")
+        with open(fable_path, encoding="utf-8") as f:
+            measurement = json.load(f)
+        with open(os.path.join(root, ".active"), "w") as f:
+            f.write("B")
+        status, _ = call(port, "tok-A", "/v1/messages?fable-status-only")
+        assert status == 429
+        with open(fable_path, encoding="utf-8") as f:
+            saved = json.load(f)
+        cap = saved.pop("fable_cap")
+        assert saved == measurement and cap["ts"] > measurement["ts"], (saved, cap)
+        assert cap["data"]["oi7_stat"] == "rejected" and cap["data"]["oi7_util"] is None, cap
+        with open(os.path.join(root, ".active"), "w") as f:
+            f.write("A")
+        print("ok  status-only Fable rejection preserves the last measured utilization and its timestamp")
 
         # 5. health
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)

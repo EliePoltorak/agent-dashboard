@@ -132,25 +132,55 @@ def is_quota_rejection(status, headers):
     return any(headers.get(RL + k) == "rejected" for k in ("status", "5h-status", "7d-status", "7d_oi-status"))
 
 
+def status_only_fable(data):
+    return data.get("oi7_stat") == "rejected" and data.get("oi7_util") is None
+
+
+def cache_entry(path, suffix, data, now, has_fable):
+    entry = {"ts": int(now), "data": data}
+    if not (status_only_fable(data) and suffix or not has_fable and not suffix):
+        return entry
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            prior = json.load(f)
+    except (OSError, ValueError):
+        return entry
+    if not isinstance(prior, dict) or not isinstance(prior.get("data"), dict):
+        return entry
+    if suffix:
+        # Keep the last measurement and its timestamp for the watcher and usage history.
+        if prior["data"].get("oi7_util") is not None:
+            return {"ts": prior.get("ts"), "data": prior["data"], "fable_cap": entry}
+    else:
+        # A default-only write must not lose an older proxy's only copy of the cap.
+        cap = prior.get("fable_cap")
+        if prior["data"].get("src") == "proxy" and prior["data"].get("ok") and status_only_fable(prior["data"]):
+            cap = {"ts": prior.get("ts"), "data": prior["data"]}
+        if cap:
+            entry["fable_cap"] = cap
+    return entry
+
+
 def write_cache(label, data):
     """Atomic write of <label>/usage-cache.json (and -fable when the Fable window rode along)."""
     rejected = any(data.get(k) == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
     has_fable = data.get("oi7_util") or data.get("oi7_stat") == "rejected"
-    now = time.time()
     for suffix, present in (("", data.get("s5_util") or rejected), ("-fable", has_fable)):
         if not present:
             continue
         key = label + suffix
-        with _lock:
-            if not rejected and now - _state["written"].get(key, 0) < WRITE_EVERY:
-                continue
-            _state["written"][key] = now
         path = os.path.join(ROOT, label, "usage-cache%s.json" % suffix)
         tmp = "%s.tmp-%d-%d" % (path, os.getpid(), threading.get_ident())
         try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"ts": int(now), "data": data}, f)
-            os.replace(tmp, path)
+            with _lock:
+                now = time.time()
+                if not rejected and now - _state["written"].get(key, 0) < WRITE_EVERY:
+                    continue
+                entry = cache_entry(path, suffix, data, now, has_fable)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    json.dump(entry, f)
+                os.replace(tmp, path)
+                _state["written"][key] = now
         except OSError as e:
             log("cache write failed for %s: %s" % (key, e))
 

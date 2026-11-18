@@ -580,6 +580,23 @@ foreach ($name in $cacheNames) {
 }
 Check 'the network fallback can use the seat after its Fable reset' ((Select-RotationTarget 90 'B').label -eq 'A')
 
+Reset-Case
+foreach ($l in 'B','C','D','E','F') { $script:plan[$l] = 'http401' }
+$script:plan['A'] = 'fable-500'
+$statusOnly.data.oi7_reset = [string]($nowS + 3600)
+$defaultPath = Join-Path $seatA 'usage-cache.json'
+$statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $defaultPath -Encoding UTF8
+Check 'normal selection honors the legacy Fable cap after a healthy default refresh and a headerless Fable probe' ($null -eq (Select-RotationTarget 90))
+$refreshed = Read-UsageCacheFile $defaultPath
+Check 'the default refresh saves its new reading and retains the original Fable cap timestamp' ($refreshed.data.http -eq 200 -and $refreshed.fable_cap.ts -eq $statusOnly.ts)
+
+Reset-Case
+$allowedFable.fable_cap = $statusOnly
+$allowedFable | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+$baseline = Read-FableCache 'A'
+Check 'a status-only cap preserves the older measured baseline' ($baseline.pct -eq 10 -and $baseline.ts -eq $allowedFable.ts -and -not $baseline.capped)
+Check 'cap checks use the status-only rejection alongside the measured baseline' (Test-FableCapCached 'A')
+
 # With no usable reset, a headerless probe preserves both the cap and its original timestamp for up to a week.
 $week = 7 * 86400
 foreach ($case in @(
