@@ -111,6 +111,8 @@ $invalidWorkspaces = @(
   '\\server\sh*re\workspace'
   '\\server'
   '\\?\C:project'
+  '\\?\'
+  '\\.\'
 )
 foreach ($invalidWorkspace in $invalidWorkspaces) {
   Set-Content -LiteralPath $workspaceFile $invalidWorkspace
@@ -544,6 +546,23 @@ foreach ($r in (ofSession $Y)) { setRec $r.f 'isArchived' $true }; run
 check 'kept: archived by hand on every seat' (@(ofSession $Y | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $Y) -like 'kept *')
 touch $Y 0; run
 check 'kept: resumed: stays archived on every seat' (@(ofSession $Y | Where-Object { -not $_.arch }).Count -eq 0 -and (autoVal $Y) -like 'kept *')
+
+# A share root can already have local transcripts and app records keyed with the final separator.
+$uncWorkspace = '\\history-root-fixture.invalid\share\'
+$uncEncoded = $uncWorkspace -creplace '[^A-Za-z0-9]', '-'
+$uncProj = "$sb\home\.claude\projects\$uncEncoded"
+$uncBucket = "$ccs\A\unc-share-root-fixture"
+New-Item -ItemType Directory $uncProj, $uncBucket -Force | Out-Null
+$seedId = "local_$([guid]::NewGuid())"
+@{ sessionId = $seedId; cliSessionId = [guid]::NewGuid().ToString(); cwd = $uncWorkspace; originCwd = $uncWorkspace } |
+  ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $uncBucket "$seedId.json") -NoNewline
+$uncSession = [guid]::NewGuid().ToString()
+Set-Content -LiteralPath (Join-Path $uncProj "$uncSession.jsonl") (@('{"type":"user","message":{"role":"user","content":"test a share root"}}') + $asst)
+$beforeUnc = recHash
+foreach ($spelling in $uncWorkspace, $uncWorkspace.TrimEnd('\')) {
+  run @{ Cwd = $spelling; DryRun = $true }
+  check "preview finds existing UNC share-root keys ($spelling)" ($rc -eq 0 -and ($out -match '^WOULD: added [1-9]\d*,') -and (recHash) -eq $beforeUnc)
+}
 
 "$fail failure(s)"
 if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }
