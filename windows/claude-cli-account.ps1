@@ -470,6 +470,7 @@ function Read-FableUsageCache($Seat) {
 
 function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
   $guard = $null
+  $failure = $null
   $locked = $false
   $tmp = "$Path.tmp-$([guid]::NewGuid().ToString('N'))"
   try {
@@ -506,7 +507,8 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
           (Test-CapCached $Label 'default')) { return }
       # A default-model refresh has no authority over the older Fable-only rejection.
       $legacy = Get-LegacyFableCap $prior
-      if ($legacy) { $Entry.fable_cap = $legacy }
+      # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
+      if ($legacy -and (Get-CacheObservationMs $legacy) -le $Entry.observed_ms) { $Entry.fable_cap = $legacy }
     }
     [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $Entry -Depth 6))
     try { [IO.File]::Move($tmp, $Path, $true) }
@@ -514,11 +516,13 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
       Start-Sleep -Milliseconds 25
       [IO.File]::Move($tmp, $Path, $true)
     }
-  } catch { Write-RotateLog ("usage cache write failed for '{0}': {1}" -f $Label, $_.Exception.Message) DarkYellow } finally {
+  } catch { $failure = $_.Exception.Message } finally {
     if ($locked) { try { $guard.Unlock(0, 1) } catch {} }
     if ($guard) { $guard.Dispose() }
     try { [IO.File]::Delete($tmp) } catch {}
   }
+  # Logged after the unlock, so a slow console or log file does not hold the proxy's cache writes.
+  if ($failure) { Write-RotateLog ("usage cache write failed for '{0}': {1}" -f $Label, $failure) DarkYellow }
 }
 
 function Get-UsageCached {

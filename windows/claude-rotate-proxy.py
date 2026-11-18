@@ -59,8 +59,8 @@ FIELDS = {"status": RL + "status", "s5_util": RL + "5h-utilization", "s5_stat": 
           "w7_reset": RL + "7d-reset", "oi7_util": RL + "7d_oi-utilization",
           "oi7_stat": RL + "7d_oi-status", "oi7_reset": RL + "7d_oi-reset",
           "claim": RL + "representative-claim", "org": "anthropic-organization-id"}
-WRITE_EVERY = 5        # s between cache writes per seat (a rejection, or a reading that can clear a cached Fable
-                       # rejection, skips it; a reading older than the file's is never written)
+WRITE_EVERY = 5        # s between cache writes per seat. A rejection skips it, and so does a Fable reading while this
+                       # proxy last saw a Fable rejection in that file. After a failed write, nothing is written for this long.
 CACHE_LOCK_TRIES = 40  # x 25 ms: a cold PowerShell writer can hold the cache lock for over 100 ms
 ROTATE_COOLDOWN = 20   # s: after a rotation attempt that changed nothing, don't ask again yet
 LOG_MAX = 1_000_000
@@ -69,7 +69,7 @@ _lock = threading.Lock()          # tokens and log
 _cache_locks = {}                  # same-process writers to each cache path
 _rotate_lock = threading.Lock()   # one rotation request at a time
 _state = {"tokens": {}, "by_label": {}, "loaded": 0.0, "written": {}, "last_rotate": 0.0,
-          "fable_capped": set()}   # -fable keys whose file held a rejection when this proxy last read or wrote it
+          "fable_capped": set(), "failed": {}}   # -fable keys whose file held a rejection when this proxy last read or wrote it
 
 
 def log(msg):
@@ -210,7 +210,8 @@ def cache_entry(prior, suffix, entry, has_fable):
         old = prior.get("data", {})
         if old.get("src") == "proxy" and old.get("ok") and old.get("oi7_stat") == "rejected" and old.get("oi7_util") is None:
             cap = {"ts": prior.get("ts"), "observed_ms": observed_ms(prior), "data": old}
-        if cap:
+        # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
+        if cap and observed_ms(cap) <= entry["observed_ms"]:
             entry["fable_cap"] = cap
     return entry
 
@@ -226,6 +227,8 @@ def write_cache(label, data):
             continue
         key = label + suffix
         # Throttle before any lock or file read: this runs before the response reaches the client.
+        if now - _state["failed"].get(key, 0) < WRITE_EVERY:
+            continue   # the lock was just stuck: at most one lock wait per WRITE_EVERY, whatever the reading
         if (not rejected and now - _state["written"].get(key, 0) < WRITE_EVERY
                 and not (suffix and key in _state["fable_capped"])):
             continue
@@ -238,7 +241,7 @@ def write_cache(label, data):
                 prior = read_cache_for_update(path)
                 effective = (prior.get("fable_cap") if suffix else None) or prior
                 if suffix:
-                    # Learned on each read, so a rejection another writer saved is cleared within WRITE_EVERY.
+                    # Learned on each read. A rejection another writer saved since is seen on the next unthrottled write.
                     if effective.get("data", {}).get("oi7_stat") == "rejected":
                         _state["fable_capped"].add(key)
                     else:
@@ -265,8 +268,7 @@ def write_cache(label, data):
                         _state["fable_capped"].discard(key)
         except (OSError, TypeError, ValueError) as e:
             log("cache write failed for %s: %s" % (key, e))
-            if not rejected:
-                _state["written"][key] = now   # a stuck lock must not cost the lock wait on every response
+            _state["failed"][key] = now
 
 
 # The proxy's own refusal (no eligible seat left), in the API's canonical shape: the code and wording every refusal classifier keys on

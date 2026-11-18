@@ -598,6 +598,11 @@ $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $defaultPath -E
 Check 'normal selection honors the legacy Fable cap after a healthy default refresh and a headerless Fable probe' ($null -eq (Select-RotationTarget 90))
 $refreshed = Read-UsageCacheFile $defaultPath
 Check 'the default refresh saves its new reading and retains the original Fable cap timestamp' ($refreshed.data.http -eq 200 -and $refreshed.fable_cap.ts -eq $statusOnly.ts)
+$future = $statusOnly | ConvertTo-Json -Depth 4 | ConvertFrom-Json
+$future.ts = $nowS + 86400; $future | Add-Member -NotePropertyName observed_ms -NotePropertyValue (($nowS + 86400) * 1000) -Force
+$future | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $defaultPath -Encoding UTF8
+Write-UsageCacheFile $defaultPath 'A' @{ ts = $nowS; observed_ms = $nowS * 1000 + 1; data = @{ ok = $true; http = 200; s5_util = 0.1 } } $false
+Check 'a default refresh drops a future-dated legacy Fable cap' (-not (Read-UsageCacheFile $defaultPath).fable_cap)
 
 Reset-Case
 $allowedFable.fable_cap = $statusOnly
