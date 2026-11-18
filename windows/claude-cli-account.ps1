@@ -509,7 +509,9 @@ function Write-UsageCacheFile($Path, $Label, $Entry, [bool]$IsFable) {
       # A default-model refresh has no authority over the older Fable-only rejection.
       $legacy = Get-LegacyFableCap $prior
       # A future-dated cap (a clock set back) is dropped, or it would come back once the clock passes it.
-      if ($legacy -and (Get-CacheObservationMs $legacy) -le $Entry.observed_ms) { $Entry.fable_cap = $legacy }
+      # Only a reading without Fable fields leaves it to the cap (as in the proxy): one with them is the newer Fable word.
+      if ($legacy -and -not $d.oi7_stat -and $null -eq $d.oi7_util -and
+          (Get-CacheObservationMs $legacy) -le $Entry.observed_ms) { $Entry.fable_cap = $legacy }
     }
     [IO.File]::WriteAllText($tmp, (ConvertTo-Json -InputObject $Entry -Depth 6))
     try { [IO.File]::Move($tmp, $Path, $true) }
