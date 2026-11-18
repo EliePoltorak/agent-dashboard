@@ -1141,15 +1141,29 @@ function Invoke-EnsureCliSeat {
 function Test-CapCached {
   param([string]$Label, [string]$Which = 'default')
   $name = if ($Which -eq 'fable') { 'usage-cache-fable.json' } else { 'usage-cache.json' }
-  $cf = Join-Path (Join-Path $Root $Label) $name
-  if (-not (Test-Path -LiteralPath $cf)) { return $false }
-  try { $c = Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json } catch { return $false }
-  $d = $c.data
-  if (-not $d -or -not $d.ok) { return $false }
+  $seat = Join-Path $Root $Label
+  $c = $null
+  try { $c = Get-Content -LiteralPath (Join-Path $seat $name) -Raw -ErrorAction Stop | ConvertFrom-Json } catch {}
   $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
   $sampledAt = [int64]0
-  $withinWeek = [int64]::TryParse([string]$c.ts, [ref]$sampledAt) -and $sampledAt -gt 0 -and
-                $sampledAt -le $now -and ($now - $sampledAt) -lt (7 * 86400)
+  [void][int64]::TryParse([string]$c.ts, [ref]$sampledAt)
+  if ($Which -eq 'fable') {
+    # Older proxies saved status-only Fable rejections in the default file. A Fable reading of
+    # the same age or newer takes precedence, including a probe that cleared the rejection.
+    try {
+      $legacy = Get-Content -LiteralPath (Join-Path $seat 'usage-cache.json') -Raw -ErrorAction Stop | ConvertFrom-Json
+      $legacyAt = [int64]0
+      if ($legacy.data.ok -and $legacy.data.src -eq 'proxy' -and $legacy.data.oi7_stat -eq 'rejected' -and
+          $null -eq $legacy.data.oi7_util -and [int64]::TryParse([string]$legacy.ts, [ref]$legacyAt) -and
+          $legacyAt -gt $sampledAt -and $legacyAt -le $now) {
+        $c = $legacy
+        $sampledAt = $legacyAt
+      }
+    } catch {}
+  }
+  $d = $c.data
+  if (-not $d -or -not $d.ok) { return $false }
+  $withinWeek = $sampledAt -gt 0 -and $sampledAt -le $now -and ($now - $sampledAt) -lt (7 * 86400)
   $inForce = {
     param($stat, $resetRaw)
     if ($stat -ne 'rejected') { return $false }

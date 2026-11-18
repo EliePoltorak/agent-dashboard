@@ -560,10 +560,17 @@ $seatA = Join-Path $Root 'A'
 $statusOnly = @{ ts = $nowS - $stale; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429
                  status = 'rejected'; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600); oi7_util = $null } }
 $cacheNames = 'usage-cache.json','usage-cache-fable.json'
-foreach ($name in $cacheNames) {
-  $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA $name) -Encoding UTF8
-}
+$statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a Fable-only rejection is no default cap' (-not (Test-CapCached 'A' 'default'))
+Check 'the network fallback honors a legacy rejection stored only in the default cache' ((Select-RotationTarget 90 'B').label -eq 'C')
+$allowedFable = @{ ts = $statusOnly.ts + 60; data = @{ ok = $true; oi7_stat = 'allowed'; oi7_util = 0.1 } }
+$fablePath = Join-Path $seatA 'usage-cache-fable.json'
+$allowedFable | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Check 'a newer Fable reading supersedes the legacy rejection' ((Select-RotationTarget 90 'B').label -eq 'A')
+$allowedFable.ts = $statusOnly.ts - 60
+$allowedFable | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
+Check 'a legacy rejection supersedes an older Fable reading' ((Select-RotationTarget 90 'B').label -eq 'C')
+$statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 Check 'a status-only Fable rejection is a cap in the Fable cache' (Test-FableCapCached 'A')
 Check 'a status-only Fable rejection supplies no utilization baseline' ($null -eq (Read-FableCache 'A'))
 Check 'the network fallback skips the Fable-capped seat' ((Select-RotationTarget 90 'B').label -eq 'C')
