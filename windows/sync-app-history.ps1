@@ -123,9 +123,10 @@ if (-not $PSBoundParameters.ContainsKey('Cwd')) {
     $Cwd = ([string](Get-Content -LiteralPath $workspaceFile -Raw)).TrimEnd([char[]](13, 10))
   }
 }
+# The filesystem syntax check allows stream names. Only a drive prefix can contain a colon.
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($Cwd) -or
     -not (Test-Path -LiteralPath "FileSystem::$Cwd" -IsValid) -or
-    $Cwd.Substring([IO.Path]::GetPathRoot($Cwd).Length).Contains(':')) {
+    $Cwd -notmatch '^(?:(?:[\\/]{2}[?.][\\/])?[A-Z]:)?[^:]*$') {
   throw 'Pass an absolute workspace path with -Cwd or save one in ~/.claude/history-sync-workspace.txt.'
 }
 $Cwd = [IO.Path]::TrimEndingDirectorySeparator([IO.Path]::GetFullPath($Cwd))
