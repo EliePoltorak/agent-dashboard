@@ -1047,6 +1047,15 @@ function Get-ProxySample {
                                   oi7_stat = $n.data.oi7_stat; fable_only_rejection = $true }
       }
     }
+    # With no default reading to nest under (a fresh seat, or an unreadable cache), the proxy stores a Fable-only
+    # rejection at the top level: same test as the nested case, judged on this reading's own freshness.
+    $dDefault = ($null -ne $d.s5_util -or $d.s5_stat -or $null -ne $d.w7_util -or $d.w7_stat)
+    $dReset = Get-UsableReset $d.oi7_reset
+    if ($d.src -eq 'proxy' -and $d.ok -and -not $dDefault -and ($d.oi7_stat -eq 'rejected' -or $d.status -eq 'rejected') -and
+        $age -ge 0 -and $age -le $ProxyFreshSec -and -not ($dReset -and $dReset -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) {
+      return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $d.claim
+                                oi7_stat = $d.oi7_stat; fable_only_rejection = $true }
+    }
     $rejected = ($d.status -eq 'rejected' -or $d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected')
     if ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_util -or $rejected) -and $age -le $ProxyFreshSec -and
         ($rejected -or -not $RejectedOnly)) { return $d }

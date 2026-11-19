@@ -633,6 +633,10 @@ Check 'a nested rejection whose Fable window already renewed does not trigger' (
 $weeklyCarried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day'; w7_util = 1.0; oi7_stat = 'allowed'; oi7_util = 0.2 }
 Set-NestedRej $nowS 'proxy' $nowS $weeklyCarried
 Check 'a carried reading naming only weekly utilization is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $oiOnly } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a top-level Fable-only rejection (no default reading to nest under) is seen as a Fable rejection' ((Get-ProxySample 'A' $true).fable_only_rejection)
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $rej429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a top-level Fable-only rejection with an overall status is a Fable rejection, not a session cap' ((Get-ProxySample 'A' $true).fable_only_rejection)
 $carried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; s5_util = 1.0; s5_stat = 'rejected'; oi7_stat = 'allowed'; oi7_util = 0.2 }
 Set-NestedRej $nowS 'proxy' $nowS $carried
 Check 'a carried full reading rejected on a default window is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
