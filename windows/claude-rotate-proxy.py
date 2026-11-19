@@ -719,6 +719,7 @@ def cache_self_test():
         late_only = {"ts": (now - 2000) // 1000, "observed_ms": now - 2000, "data": {"ok": True, "src": "proxy", "http": 200, "oi7_stat": "allowed"}}
         assert cache_entry(prior, "", dict(late_only), True).get("fable_cap") == nested, "a late Fable-only response replaced a newer nested Fable observation"
         assert cache_entry(dict(prior, fable_cap=older), "", dict(late_only), True)["fable_cap"]["observed_ms"] == now - 2000, "a Fable-only response did not replace an older nested observation"
+        assert cache_entry(dict(prior, fable_cap=dict(nested, observed_ms=now + 3_600_000)), "", dict(late_only), True)["fable_cap"]["observed_ms"] == now - 2000, "a future-dated nested observation blocked a Fable-only response"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()

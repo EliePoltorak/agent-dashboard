@@ -1028,8 +1028,9 @@ function Get-ProxySample {
     # timestamp and source. Judge the nested reading on its own freshness (not future-dated): it is the
     # rejection that just happened, returned as its own sample, never feeding the session projection.
     # fable_cap can also hold a carried full reading: its overall rejection counts only when it names no
-    # default window. Two things override it: a fresh session or weekly cap above it (the limit to report),
-    # and a newer Fable cache reading that is an allowance (a live Fable probe's; a newer rejection keeps it).
+    # default window. Three things override it: a fresh session or weekly cap above it (the limit to report),
+    # a newer Fable cache reading that is an allowance (a live Fable probe's; a newer rejection keeps it),
+    # and its own oi7_reset having passed (the Fable window has renewed).
     $n = $c.fable_cap
     $nDefault = ($null -ne $n.data.s5_util -or $n.data.s5_stat -or $null -ne $n.data.w7_util -or $n.data.w7_stat)   # the proxy's DEFAULT_WINDOW
     $topCap = ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected') -and $age -le $ProxyFreshSec)
