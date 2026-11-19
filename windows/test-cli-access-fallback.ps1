@@ -1058,6 +1058,15 @@ $nestedFableRej | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path 
 $null = Invoke-CheckRotate 0 $false $true 'test'
 Check 'a fresh nested Fable-only rejection rotates the watcher off the seat' ((Get-ActiveLabel) -ne 'A') ("active=$(Get-ActiveLabel)")
 Check '... and the ping names the fable limit' (($script:pings -join ' ') -match 'fable') ("pings=$($script:pings -join ' | ')")
+$rlN = Join-Path $Root '.rotate-log.txt'
+$logN = if (Test-Path -LiteralPath $rlN) { Get-Content -LiteralPath $rlN -Raw } else { '' }
+Check '... and its trigger line leaves out the weekly % of a default reading older than the proxy freshness window' ($logN -match 'FABLE window REJECTED by the server \(claim seven_day_oi; Gate C cannot run\)') ("log=$logN")
+$nestedFresh = $nestedFableRej.Clone(); $nestedFresh.ts = $tn; $nestedFresh.observed_ms = $tn * 1000
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+$nestedFresh | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logN = if (Test-Path -LiteralPath $rlN) { Get-Content -LiteralPath $rlN -Raw } else { '' }
+Check '... and with a fresh default reading the nested trigger line carries its weekly %' ($logN -match 'claim seven_day_oi; weekly 30%; ') ("log=$logN")
 Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 foreach ($l in 'B','C','D','E','F') { $script:plan[$l] = 'quota' }
 @{ acct = 'A'; nextHaiku = 0; lastWorst = 55; lastTs = $tn - 300; fableBase = 0; fableTs = 0; nextFable = 0; rotations = @() } |
@@ -1082,7 +1091,19 @@ Check 'a fresh production-shape Fable 429 rotates the watcher off the seat' ((Ge
 Check '... and the ping names the fable limit, not the session' (($script:pings -join ' ') -match 'fable' -and ($script:pings -join ' ') -notmatch 'session limit') ("pings=$($script:pings -join ' | ')")
 $rlP = Join-Path $Root '.rotate-log.txt'
 $logP = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
-Check '... and its trigger line keeps the weekly reading for usage history' ($logP -match 'FABLE window REJECTED by the server \(claim seven_day_oi; weekly 62%; ') ("log=$logP")
+Check '... and its trigger line keeps the weekly reading, and invents no Fable %, for usage history' ($logP -match 'FABLE window REJECTED by the server \(claim seven_day_oi; weekly 62%; ') ("log=$logP")
+$wMeas = $wProd.Clone(); $wMeas.oi7_util = 0.2
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+@{ ts = $tn; observed_ms = $tn * 1000; data = $wMeas } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logM = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
+Check '... and a measured Fable % rides the trigger line' ($logM -match 'claim seven_day_oi; fable 20%; weekly 62%; ') ("log=$logM")
+$wBad = $wProd.Clone(); $wBad.w7_util = 'abc'; $wBad.oi7_util = 'NaN'
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+@{ ts = $tn; observed_ms = $tn * 1000; data = $wBad } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logB = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
+Check 'malformed utilization headers on a Fable 429 still rotate, and stay out of the trigger line' ((Get-ActiveLabel) -ne 'A' -and $logB -match 'claim seven_day_oi; Gate C cannot run') ("active=$(Get-ActiveLabel) log=$logB")
 # A sparse nested 429 whose Fable window says allowed (another limit rejected it) is not a Fable cap.
 $sparse = @{ ts = $tn - 900; observed_ms = ($tn - 900) * 1000
   data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; status = 'allowed'; s5_util = 0.2; w7_util = 0.3 }
@@ -1150,6 +1171,9 @@ Check 'rotations persisted the token through the mock only' (@($script:envWrites
 Check 'access rotation pinged sessions through the mock only' ($script:pings.Count -ge 1) ("pings=$($script:pings.Count)")
 $hkcuAfter = (Get-ItemProperty -Path 'HKCU:\Environment' -Name $EnvName -ErrorAction SilentlyContinue).$EnvName
 Check 'HKCU:\Environment is untouched' ($hkcuAfter -eq $hkcuBefore)
+} catch {
+  # A throw skips every check after it: it is a failure, never a silent ALL PASSED.
+  $fail++; Write-Host "  FAIL  the run threw, so the checks after it never ran: $($_.Exception.Message) at $($_.InvocationInfo.PositionMessage)" -ForegroundColor Red
 } finally {
   foreach ($n in $envKeep.Keys) { [Environment]::SetEnvironmentVariable($n, $envKeep[$n], 'Process') }
   Remove-Item $root -Recurse -Force -ErrorAction SilentlyContinue

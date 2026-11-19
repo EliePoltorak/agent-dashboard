@@ -1046,10 +1046,11 @@ function Get-ProxySample {
       $reset = Get-UsableReset $r.data.oi7_reset
       $renewed = ($reset -and $reset -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())   # its Fable window has already renewed
       if ($rAge -ge 0 -and $rAge -le ($ProxyFreshSec * 1000) -and -not $superseded -and -not $renewed) {
-        # w7_util is for the trigger log line only (usage-history backfill reads its weekly %).
+        # oi7_util and w7_util are for the trigger log line only (usage-history backfill reads their measured %).
+        # The default reading's weekly value stands in for a nested reading only while that reading is fresh.
         return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $r.data.claim
-                                  oi7_stat = $r.data.oi7_stat; fable_only_rejection = $true
-                                  w7_util = $(if ($null -ne $r.data.w7_util) { $r.data.w7_util } else { $d.w7_util }) }
+                                  oi7_stat = $r.data.oi7_stat; fable_only_rejection = $true; oi7_util = $r.data.oi7_util
+                                  w7_util = $(if ($null -ne $r.data.w7_util) { $r.data.w7_util } elseif ($age -ge 0 -and $age -le $ProxyFreshSec) { $d.w7_util }) }
       }
     }
     if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
@@ -1117,8 +1118,15 @@ function Invoke-CheckRotateCore {
     # A Fable rejection the proxy just saw (Fable-only, or a full Fable 429 whose 5h/7d windows are allowed):
     # a Haiku probe cannot see that window, so rotate on it now.
     if ($u.fable_only_rejection) {
-      $wk = if ($null -ne $u.w7_util) { "; weekly $([int][math]::Round([double]$u.w7_util * 100))%" } else { '' }
-      $trigger = "FABLE window REJECTED by the server (claim $($u.claim)$wk; Gate C cannot run)"; $capped = 'fable'
+      # Measured percentages only: a status-only rejection is no utilization sample. The proxy stores raw header
+      # strings, so a malformed value is left out of the line rather than allowed to throw before the rotation.
+      $pctOf = { param($x) $v = 0.0
+        if ($null -ne $x -and [double]::TryParse([string]$x, [Globalization.NumberStyles]::Float,
+            [Globalization.CultureInfo]::InvariantCulture, [ref]$v) -and $v -ge 0 -and $v -le 10) { [int][math]::Round($v * 100) } }
+      $fp = & $pctOf $u.oi7_util; $wp = & $pctOf $u.w7_util
+      $fk = if ($null -ne $fp) { "; fable $fp%" } else { '' }
+      $wk = if ($null -ne $wp) { "; weekly $wp%" } else { '' }
+      $trigger = "FABLE window REJECTED by the server (claim $($u.claim)$fk$wk; Gate C cannot run)"; $capped = 'fable'
     }
     # An explicit 403 (oauth_org_not_allowed / subscription disabled) is not a blip. Do not probe
     # it twice and do not go blind: rotate. A timeout or any other non-403 is still retried once.

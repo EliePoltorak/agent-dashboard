@@ -2089,8 +2089,10 @@ def parse_log_line(msg):
         c = re.search(r"(FABLE|WEEKLY) window CAPPED at (\d+)%", msg)
         if c:
             v["f" if c.group(1) == "FABLE" else "w"] = _pct(c, 2)
-        elif "FABLE window REJECTED" in msg:   # the proxy saw the Fable window rejected: spent, no percentage given
-            v["f"] = 1.0
+        elif "FABLE window REJECTED" in msg:   # only a measured Fable %: a status-only rejection is no sample
+            c = re.search(r"\bfable (\d+)%", msg)
+            if c:
+                v["f"] = _pct(c)
         c = re.search(r"\bweekly (\d+)%", msg)
         if c:
             v["w"] = _pct(c)
@@ -4412,8 +4414,9 @@ def selftest():
     assert parse_log_line("NO USABLE TARGET - staying on 'Work'. A=sn/a/w10% (capped (cached cap in force)) B=sn/a/wn/a (capped (cached cap in force)) C=s5%/w20%") == {"A": {"w": 0.1}, "C": {"w": 0.2}}
     assert parse_log_line("TRIGGER: active account 'Personal' WEEKLY window CAPPED at 100% (session 20%) [via proxy]") == {"Personal": {"w": 1.0}}
     assert parse_log_line("TRIGGER: active account 'Work' at 49% (session 49%, weekly 49%) >= 1%") == {"Work": {"w": 0.49}}
-    assert parse_log_line("TRIGGER: active account 'A' FABLE window REJECTED by the server (claim seven_day_oi; Gate C cannot run)") == {"A": {"f": 1.0}}
-    assert parse_log_line("TRIGGER: active account 'A' FABLE window REJECTED by the server (claim seven_day_oi; weekly 62%; Gate C cannot run)") == {"A": {"f": 1.0, "w": 0.62}}
+    assert parse_log_line("TRIGGER: active account 'A' FABLE window REJECTED by the server (claim seven_day_oi; Gate C cannot run)") == {}
+    assert parse_log_line("TRIGGER: active account 'A' FABLE window REJECTED by the server (claim seven_day_oi; weekly 62%; Gate C cannot run)") == {"A": {"w": 0.62}}
+    assert parse_log_line("TRIGGER: active account 'A' FABLE window REJECTED by the server (claim seven_day_oi; fable 20%; weekly 62%; Gate C cannot run)") == {"A": {"f": 0.2, "w": 0.62}}
     mlog = "\n".join([ts(L - 4 * 86400) + "  ROTATED 'Personal' -> Work (w@x.org) session 0%, weekly 41%, fable 14%",
                       ts(L - 3 * 86400) + "  DRY RUN: would rotate 'Work' -> Personal (p@x.org) worst 0%, fable 0%"])
     mrecs, mem = backfill_records(mlog, {"Work": {"w": 0.5, "wr": wr}, "Personal": {"w": 0.2, "wr": wr}}, L - 8 * 86400, L)
