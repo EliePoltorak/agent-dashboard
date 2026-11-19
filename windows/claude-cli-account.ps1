@@ -1046,12 +1046,14 @@ function Get-ProxySample {
       $reset = Get-UsableReset $r.data.oi7_reset
       $renewed = ($reset -and $reset -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())   # its Fable window has already renewed
       if ($rAge -ge 0 -and $rAge -le ($ProxyFreshSec * 1000) -and -not $superseded -and -not $renewed) {
+        # w7_util is for the trigger log line only (usage-history backfill reads its weekly %).
         return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $r.data.claim
-                                  oi7_stat = $r.data.oi7_stat; fable_only_rejection = $true }
+                                  oi7_stat = $r.data.oi7_stat; fable_only_rejection = $true
+                                  w7_util = $(if ($null -ne $r.data.w7_util) { $r.data.w7_util } else { $d.w7_util }) }
       }
     }
     if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
-        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault))) {
+        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault -and $n.data.oi7_stat -ne 'allowed'))) {
       $hit = & $fableRejection $n
       if ($hit) { return $hit }
     }
@@ -1114,7 +1116,10 @@ function Invoke-CheckRotateCore {
     if (-not $u) { $u = Get-UsageCached $act $true }          # live, haiku only: ~1s, ~9 tokens
     # A Fable rejection the proxy just saw (Fable-only, or a full Fable 429 whose 5h/7d windows are allowed):
     # a Haiku probe cannot see that window, so rotate on it now.
-    if ($u.fable_only_rejection) { $trigger = "FABLE window REJECTED by the server (claim $($u.claim); Gate C cannot run)"; $capped = 'fable' }
+    if ($u.fable_only_rejection) {
+      $wk = if ($null -ne $u.w7_util) { "; weekly $([int][math]::Round([double]$u.w7_util * 100))%" } else { '' }
+      $trigger = "FABLE window REJECTED by the server (claim $($u.claim)$wk; Gate C cannot run)"; $capped = 'fable'
+    }
     # An explicit 403 (oauth_org_not_allowed / subscription disabled) is not a blip. Do not probe
     # it twice and do not go blind: rotate. A timeout or any other non-403 is still retried once.
     if (-not $u.ok -and $u.access -eq 'disabled') {

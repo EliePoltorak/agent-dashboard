@@ -1080,6 +1080,18 @@ Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 $null = Invoke-CheckRotate 0 $false $true 'test'
 Check 'a fresh production-shape Fable 429 rotates the watcher off the seat' ((Get-ActiveLabel) -ne 'A') ("active=$(Get-ActiveLabel)")
 Check '... and the ping names the fable limit, not the session' (($script:pings -join ' ') -match 'fable' -and ($script:pings -join ' ') -notmatch 'session limit') ("pings=$($script:pings -join ' | ')")
+$rlP = Join-Path $Root '.rotate-log.txt'
+$logP = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
+Check '... and its trigger line keeps the weekly reading for usage history' ($logP -match 'FABLE window REJECTED by the server \(claim seven_day_oi; weekly 62%; ') ("log=$logP")
+# A sparse nested 429 whose Fable window says allowed (another limit rejected it) is not a Fable cap.
+$sparse = @{ ts = $tn - 900; observed_ms = ($tn - 900) * 1000
+  data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 200; status = 'allowed'; s5_util = 0.2; w7_util = 0.3 }
+  fable_cap = @{ ts = $tn; observed_ms = $tn * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; oi7_stat = 'allowed' } } }
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+$sparse | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logS = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
+Check 'a nested 429 whose Fable window says allowed is not reported as a Fable cap' ($logS -notmatch 'FABLE window REJECTED' -and ($script:pings -join ' ') -notmatch 'fable') ("log=$logS pings=$($script:pings -join ' | ')")
 # Renewed, on a healthy seat: no trigger at all, on a --now check and on a scheduled one (which reads the
 # status-rewritten copy). Every seat is equally healthy here, so a wrong trigger would only 'stay put':
 # assert on the trigger log line, not on which seat ends up active.
