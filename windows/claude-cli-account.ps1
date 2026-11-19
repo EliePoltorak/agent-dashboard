@@ -1056,12 +1056,13 @@ function Get-ProxySample {
       if ($hit) { return $hit }
     }
     # With no default reading to nest under (a fresh seat, or an unreadable cache), the proxy stores a Fable-only
-    # rejection at the top level. Only Fable responses are ever nested, but a top-level 429 can come from any
-    # model, so here the Fable window itself must say rejected.
+    # rejection at the top level. A nested reading is a Fable-only response or a carried full reading that $nDefault
+    # screens out; a top-level 429 can come from any model, so here the Fable window itself must say rejected.
+    # This reading is the Fable rejection itself: when it is stale, renewed or superseded, there is nothing else
+    # to report, and it must not fall through to the overall-rejection sample below.
     $dDefault = ($null -ne $d.s5_util -or $d.s5_stat -or $null -ne $d.w7_util -or $d.w7_stat)
     if ($d.src -eq 'proxy' -and $d.ok -and -not $dDefault -and $d.oi7_stat -eq 'rejected') {
-      $hit = & $fableRejection $c
-      if ($hit) { return $hit }
+      return (& $fableRejection $c)
     }
     $rejected = ($d.status -eq 'rejected' -or $d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected')
     if ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_util -or $rejected) -and $age -le $ProxyFreshSec -and
