@@ -437,8 +437,9 @@ function Get-CacheObservationMs($Cache) {
 }
 
 # A proxy Fable observation (a rejection or an allowance) in the default cache: at the top level (an older proxy's
-# only copy, or the backup when the -fable write was skipped) or nested as fable_cap (a Fable-only proxy response,
-# kept under the default reading). The newer reading wins.
+# only copy, the backup when the -fable write was skipped, or a Fable-only response on a seat with no default reading
+# to nest under) or nested as fable_cap (a Fable-only proxy response, kept under the default reading). The newer
+# reading wins.
 # Despite the name (and the fable_cap key it fills), the result can be an allowance: never read it as "capped".
 # The newer of the record's own proxy reading and the one nested under it wins.
 function Get-LegacyFableCap($Cache) {
@@ -1034,27 +1035,33 @@ function Get-ProxySample {
     $n = $c.fable_cap
     $nDefault = ($null -ne $n.data.s5_util -or $n.data.s5_stat -or $null -ne $n.data.w7_util -or $n.data.w7_stat)   # the proxy's DEFAULT_WINDOW
     $topCap = ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected') -and $age -le $ProxyFreshSec)
-    if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
-        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault))) {
-      $nAt = Get-CacheObservationMs $n
-      $nAge = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $nAt
+    # One test for a Fable-only rejection, wherever it is stored: fresh on its own clock (not future-dated),
+    # its Fable window not yet renewed, and not superseded by a newer Fable cache allowance.
+    $fableRejection = {
+      param($r)
+      $rAt = Get-CacheObservationMs $r
+      $rAge = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $rAt
       $fableAt = Get-FableObservationMs (Read-UsageCacheFile (Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'))
-      $superseded = ($fableAt -gt $nAt -and $fableAt -le ($nAt + $nAge) -and -not (Test-FableCapCached $Label))   # not future-dated, not a cap
-      $reset = Get-UsableReset $n.data.oi7_reset
+      $superseded = ($fableAt -gt $rAt -and $fableAt -le ($rAt + $rAge) -and -not (Test-FableCapCached $Label))   # not future-dated, not a cap
+      $reset = Get-UsableReset $r.data.oi7_reset
       $renewed = ($reset -and $reset -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())   # its Fable window has already renewed
-      if ($nAge -ge 0 -and $nAge -le ($ProxyFreshSec * 1000) -and -not $superseded -and -not $renewed) {
-        return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $n.data.claim
-                                  oi7_stat = $n.data.oi7_stat; fable_only_rejection = $true }
+      if ($rAge -ge 0 -and $rAge -le ($ProxyFreshSec * 1000) -and -not $superseded -and -not $renewed) {
+        return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $r.data.claim
+                                  oi7_stat = $r.data.oi7_stat; fable_only_rejection = $true }
       }
     }
+    if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
+        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault))) {
+      $hit = & $fableRejection $n
+      if ($hit) { return $hit }
+    }
     # With no default reading to nest under (a fresh seat, or an unreadable cache), the proxy stores a Fable-only
-    # rejection at the top level: same test as the nested case, judged on this reading's own freshness.
+    # rejection at the top level. Only Fable responses are ever nested, but a top-level 429 can come from any
+    # model, so here the Fable window itself must say rejected.
     $dDefault = ($null -ne $d.s5_util -or $d.s5_stat -or $null -ne $d.w7_util -or $d.w7_stat)
-    $dReset = Get-UsableReset $d.oi7_reset
-    if ($d.src -eq 'proxy' -and $d.ok -and -not $dDefault -and ($d.oi7_stat -eq 'rejected' -or $d.status -eq 'rejected') -and
-        $age -ge 0 -and $age -le $ProxyFreshSec -and -not ($dReset -and $dReset -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())) {
-      return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $d.claim
-                                oi7_stat = $d.oi7_stat; fable_only_rejection = $true }
+    if ($d.src -eq 'proxy' -and $d.ok -and -not $dDefault -and $d.oi7_stat -eq 'rejected') {
+      $hit = & $fableRejection $c
+      if ($hit) { return $hit }
     }
     $rejected = ($d.status -eq 'rejected' -or $d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected')
     if ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_util -or $rejected) -and $age -le $ProxyFreshSec -and
@@ -1159,7 +1166,7 @@ function Invoke-CheckRotateCore {
     elseif ($u.s5_stat -eq 'rejected') { $trigger = "SESSION window CAPPED at $s5% (weekly $w7%)"; $capped = 'session' }
     # The server's overall verdict. Rank-Accounts treats it as a cap unless oi7_stat is rejected
     # (then it is a Fable cap, judged on the Fable reading); this branch rotates off the active seat
-    # either way (a fresh nested Fable-only rejection is its own trigger, above), and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
+    # either way (a fresh Fable-only rejection, nested or at the top level, is its own trigger, above), and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
     # proxy re-asked every 20s and nothing moved (Fable review 2026-10-30, P2-4).
     elseif ($u.status -eq 'rejected') { $trigger = "account REJECTED by the server (claim $($u.claim); session $s5%, weekly $w7%)"; $capped = 'session' }
     elseif ($s5 -ge $sessBar)      { $trigger = "session at $s5% >= $sessBar% (weekly $w7%, left to burn)" }

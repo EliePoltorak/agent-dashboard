@@ -637,6 +637,15 @@ Check 'a carried reading naming only weekly utilization is not a Fable-only reje
 Check 'a top-level Fable-only rejection (no default reading to nest under) is seen as a Fable rejection' ((Get-ProxySample 'A' $true).fable_only_rejection)
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = $rej429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a top-level Fable-only rejection with an overall status is a Fable rejection, not a session cap' ((Get-ProxySample 'A' $true).fable_only_rejection)
+$topRenewed = $oiOnly.Clone(); $topRenewed.oi7_reset = [string]($nowS - 60)
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $topRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a top-level Fable rejection whose window already renewed does not trigger' ($null -eq (Get-ProxySample 'A' $true))
+@{ ts = $nowS - 600; observed_ms = ($nowS - 600) * 1000; data = $oiOnly } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a stale top-level Fable rejection does not satisfy a --now check' ($null -eq (Get-ProxySample 'A' $true))
+$plain429 = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour' }
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $plain429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+$sample = Get-ProxySample 'A' $true
+Check 'a top-level 429 whose Fable window is not rejected stays an overall rejection, not a Fable cap' ($sample.status -eq 'rejected' -and -not $sample.fable_only_rejection)
 $carried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; s5_util = 1.0; s5_stat = 'rejected'; oi7_stat = 'allowed'; oi7_util = 0.2 }
 Set-NestedRej $nowS 'proxy' $nowS $carried
 Check 'a carried full reading rejected on a default window is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
@@ -1033,6 +1042,12 @@ $nestedFableRej | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path 
 $null = Invoke-CheckRotate 0 $false $true 'test'
 $stAfter = Get-Content $RotateState -Raw | ConvertFrom-Json
 Check 'with no free seat the Fable-only rejection leaves the session projection state alone' ([int]$stAfter.lastWorst -eq 55 -and [int64]$stAfter.lastTs -eq ($tn - 300)) ("lastWorst=$($stAfter.lastWorst) lastTs=$($stAfter.lastTs)")
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+@{ ts = $tn; observed_ms = $tn * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tn + 3600) } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+Check 'a fresh top-level Fable-only rejection (no default reading) rotates the watcher off the seat' ((Get-ActiveLabel) -ne 'A') ("active=$(Get-ActiveLabel)")
+Check '... and the ping names the fable limit' (($script:pings -join ' ') -match 'fable') ("pings=$($script:pings -join ' | ')")
 Reset-Case
 $global:ClaudeRotatorProbeOverride = $probeBefore; $script:pings = $pingsBefore
 
