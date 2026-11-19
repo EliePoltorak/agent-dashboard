@@ -1080,13 +1080,19 @@ Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 $null = Invoke-CheckRotate 0 $false $true 'test'
 Check 'a fresh production-shape Fable 429 rotates the watcher off the seat' ((Get-ActiveLabel) -ne 'A') ("active=$(Get-ActiveLabel)")
 Check '... and the ping names the fable limit, not the session' (($script:pings -join ' ') -match 'fable' -and ($script:pings -join ' ') -notmatch 'session limit') ("pings=$($script:pings -join ' | ')")
-# Renewed, on a healthy seat: no rotation, and no session-cap label.
+# Renewed, on a healthy seat: no trigger at all, on a --now check and on a scheduled one (which reads the
+# status-rewritten copy). Every seat is equally healthy here, so a wrong trigger would only 'stay put':
+# assert on the trigger log line, not on which seat ends up active.
 $global:ClaudeRotatorProbeOverride = $probeBefore
 $wRenewed = $wProd.Clone(); $wRenewed.oi7_reset = [string]($tn - 60); $wRenewed.s5_util = 0.1; $wRenewed.s5_stat = 'allowed'
-Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
-@{ ts = $tn; observed_ms = $tn * 1000; data = $wRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
-$null = Invoke-CheckRotate 0 $false $true 'test'
-Check 'a renewed production-shape Fable 429 does not rotate off a healthy seat' ((Get-ActiveLabel) -eq 'A') ("active=$(Get-ActiveLabel) pings=$($script:pings -join ' | ')")
+foreach ($forceNow in $true, $false) {
+  Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+  @{ ts = $tn; observed_ms = $tn * 1000; data = $wRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+  $null = Invoke-CheckRotate 0 $false $forceNow 'test'
+  $rl = Join-Path $Root '.rotate-log.txt'
+  $logText = if (Test-Path -LiteralPath $rl) { Get-Content -LiteralPath $rl -Raw } else { '' }
+  Check "a renewed production-shape Fable 429 fires no trigger (forceNow=$forceNow)" ($logText -notmatch 'TRIGGER:' -and $script:pings.Count -eq 0 -and (Get-ActiveLabel) -eq 'A') ("active=$(Get-ActiveLabel) pings=$($script:pings -join ' | ') log=$logText")
+}
 Reset-Case
 $global:ClaudeRotatorProbeOverride = $probeBefore; $script:pings = $pingsBefore
 

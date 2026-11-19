@@ -1061,7 +1061,8 @@ function Get-ProxySample {
     # can come from any model, so the Fable window itself must say rejected.
     # When it is stale, renewed or superseded, its overall rejection is the Fable cap's and must not be reported
     # as a session cap: it is returned, for the session projection only, as a copy with its status rewritten to
-    # allowed (every other field kept), and only while fresh and carrying a session value.
+    # allowed (every other field kept), and only on a scheduled check (never --now, which probes live instead),
+    # while fresh and carrying a session value.
     if ($d.src -eq 'proxy' -and $d.ok -and $d.oi7_stat -eq 'rejected' -and $d.s5_stat -ne 'rejected' -and
         $d.w7_stat -ne 'rejected') {
       $hit = & $fableRejection $c
