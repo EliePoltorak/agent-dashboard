@@ -1026,7 +1026,7 @@ function Get-ProxySample {
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
     # A Fable-only proxy rejection is nested under the default reading (fable_cap), which keeps its own
-    # timestamp and source. Judge the nested reading on its own freshness (not future-dated): it is the
+    # timestamp and source, or, with no default reading to nest under, stored at the top level (below). Judge the nested reading on its own freshness (not future-dated): it is the
     # rejection that just happened, returned as its own sample, never feeding the session projection.
     # fable_cap can also hold a carried full reading: its overall rejection counts only when it names no
     # default window. Three things override it: a fresh session or weekly cap above it (the limit to report),
@@ -1055,14 +1055,20 @@ function Get-ProxySample {
       $hit = & $fableRejection $n
       if ($hit) { return $hit }
     }
-    # With no default reading to nest under (a fresh seat, or an unreadable cache), the proxy stores a Fable-only
-    # rejection at the top level. A nested reading is a Fable-only response or a carried full reading that $nDefault
-    # screens out; a top-level 429 can come from any model, so here the Fable window itself must say rejected.
-    # This reading is the Fable rejection itself: when it is stale, renewed or superseded, there is nothing else
-    # to report, and it must not fall through to the overall-rejection sample below.
-    $dDefault = ($null -ne $d.s5_util -or $d.s5_stat -or $null -ne $d.w7_util -or $d.w7_stat)
-    if ($d.src -eq 'proxy' -and $d.ok -and -not $dDefault -and $d.oi7_stat -eq 'rejected') {
-      return (& $fableRejection $c)
+    # A top-level reading whose Fable window is rejected while neither default window is (the rule Rank-Accounts
+    # and Test-CapCached use) is a Fable cap: a Fable-only response stored with no default reading to nest under
+    # (a fresh seat, or an unreadable cache), or a full Fable 429 whose 5h/7d windows say allowed. A top-level 429
+    # can come from any model, so the Fable window itself must say rejected.
+    # When it is stale, renewed or superseded, its overall rejection is the Fable cap's and must not be reported
+    # as a session cap: only its default-window values remain, for the session projection.
+    if ($d.src -eq 'proxy' -and $d.ok -and $d.oi7_stat -eq 'rejected' -and $d.s5_stat -ne 'rejected' -and
+        $d.w7_stat -ne 'rejected') {
+      $hit = & $fableRejection $c
+      if ($hit) { return $hit }
+      if ($RejectedOnly -or -not $d.s5_util -or $age -lt 0 -or $age -gt $ProxyFreshSec) { return $null }
+      $sample = $d | Select-Object *
+      $sample.status = 'allowed'
+      return $sample
     }
     $rejected = ($d.status -eq 'rejected' -or $d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected')
     if ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_util -or $rejected) -and $age -le $ProxyFreshSec -and

@@ -241,8 +241,9 @@ def cache_entry(prior, suffix, entry, has_fable):
         if cap and observed_ms(cap) <= time.time_ns() // 1_000_000:   # not future-dated; a newer cap is kept
             entry["fable_cap"] = cap
     else:
-        # A full Fable reading is the newer Fable word, unless a Fable observation it raced (nested a moment later by
-        # another response) is newer still and not future-dated: keep that one.
+        # A full Fable reading, or a Fable-only response with no default reading to nest under (stored at the top
+        # level), is the newer Fable word, unless a Fable observation it raced (nested a moment later by another
+        # response) is newer still and not future-dated: keep that one.
         cap = default_fable_observation(prior)
         if cap and entry["observed_ms"] < observed_ms(cap) <= time.time_ns() // 1_000_000:
             entry["fable_cap"] = cap

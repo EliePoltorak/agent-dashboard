@@ -655,6 +655,16 @@ $plain429 = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rej
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = $plain429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $sample = Get-ProxySample 'A' $true
 Check 'a top-level 429 whose Fable window is not rejected stays an overall rejection, not a Fable cap' ($sample.status -eq 'rejected' -and -not $sample.fable_only_rejection)
+# The production Fable 429 shape: 7d window allowed with utilization, overall and Fable windows rejected.
+$prod429 = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day_oi'
+              w7_util = 0.62; w7_stat = 'allowed'; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600) }
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $prod429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a full Fable 429 with an allowed 7d window is a Fable rejection, not a session cap' ((Get-ProxySample 'A' $true).fable_only_rejection)
+$prodRenewed = $prod429.Clone(); $prodRenewed.oi7_reset = [string]($nowS - 60); $prodRenewed.s5_util = 0.3; $prodRenewed.s5_stat = 'allowed'
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $prodRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a renewed full Fable 429 is not reported as a rejection' ($null -eq (Get-ProxySample 'A' $true))
+$sample = Get-ProxySample 'A' $false
+Check '... but its session value still feeds the projection, without the overall rejection' ($sample -and [double]$sample.s5_util -eq 0.3 -and $sample.status -ne 'rejected' -and -not $sample.fable_only_rejection)
 $carried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; s5_util = 1.0; s5_stat = 'rejected'; oi7_stat = 'allowed'; oi7_util = 0.2 }
 Set-NestedRej $nowS 'proxy' $nowS $carried
 Check 'a carried full reading rejected on a default window is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
