@@ -1087,11 +1087,16 @@ $global:ClaudeRotatorProbeOverride = $probeBefore
 $wRenewed = $wProd.Clone(); $wRenewed.oi7_reset = [string]($tn - 60); $wRenewed.s5_util = 0.1; $wRenewed.s5_stat = 'allowed'
 foreach ($forceNow in $true, $false) {
   Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
-  @{ ts = $tn; observed_ms = $tn * 1000; data = $wRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+  $tr = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+  @{ ts = $tr; observed_ms = $tr * 1000; data = $wRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
   $null = Invoke-CheckRotate 0 $false $forceNow 'test'
   $rl = Join-Path $Root '.rotate-log.txt'
   $logText = if (Test-Path -LiteralPath $rl) { Get-Content -LiteralPath $rl -Raw } else { '' }
   Check "a renewed production-shape Fable 429 fires no trigger (forceNow=$forceNow)" ($logText -notmatch 'TRIGGER:' -and $script:pings.Count -eq 0 -and (Get-ActiveLabel) -eq 'A') ("active=$(Get-ActiveLabel) pings=$($script:pings -join ' | ') log=$logText")
+  # --now probes live; a scheduled tick uses the rewritten copy and does not probe.
+  $aProbes = if ($script:probes.ContainsKey('A')) { [int]$script:probes['A'] } else { 0 }
+  if ($forceNow) { Check '... and --now probed A live instead of reading the rewritten copy' ($aProbes -ge 1) ("probes=$aProbes") }
+  else { Check '... and the scheduled tick used the rewritten copy, with no live probe of A' ($aProbes -eq 0) ("probes=$aProbes") }
 }
 Reset-Case
 $global:ClaudeRotatorProbeOverride = $probeBefore; $script:pings = $pingsBefore
