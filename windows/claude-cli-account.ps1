@@ -1060,7 +1060,8 @@ function Get-ProxySample {
     # (a fresh seat, or an unreadable cache), or a full Fable 429 whose 5h/7d windows say allowed. A top-level 429
     # can come from any model, so the Fable window itself must say rejected.
     # When it is stale, renewed or superseded, its overall rejection is the Fable cap's and must not be reported
-    # as a session cap: only its default-window values remain, for the session projection.
+    # as a session cap: it is returned, for the session projection only, as a copy with its status rewritten to
+    # allowed (every other field kept), and only while fresh and carrying a session value.
     if ($d.src -eq 'proxy' -and $d.ok -and $d.oi7_stat -eq 'rejected' -and $d.s5_stat -ne 'rejected' -and
         $d.w7_stat -ne 'rejected') {
       $hit = & $fableRejection $c
@@ -1110,7 +1111,8 @@ function Invoke-CheckRotateCore {
     # A reading the proxy took off real traffic in the last 2 min is as good as a probe, and free.
     $u = Get-ProxySample $act $ForceNow
     if (-not $u) { $u = Get-UsageCached $act $true }          # live, haiku only: ~1s, ~9 tokens
-    # A Fable-only 429 the proxy just saw: a Haiku probe cannot see that window, so rotate on it now.
+    # A Fable rejection the proxy just saw (Fable-only, or a full Fable 429 whose 5h/7d windows are allowed):
+    # a Haiku probe cannot see that window, so rotate on it now.
     if ($u.fable_only_rejection) { $trigger = "FABLE window REJECTED by the server (claim $($u.claim); Gate C cannot run)"; $capped = 'fable' }
     # An explicit 403 (oauth_org_not_allowed / subscription disabled) is not a blip. Do not probe
     # it twice and do not go blind: rotate. A timeout or any other non-403 is still retried once.
@@ -1172,8 +1174,9 @@ function Invoke-CheckRotateCore {
     # did. Rank-Accounts has tested s5_stat all along; only this branch did not.
     elseif ($u.s5_stat -eq 'rejected') { $trigger = "SESSION window CAPPED at $s5% (weekly $w7%)"; $capped = 'session' }
     # The server's overall verdict. Rank-Accounts treats it as a cap unless oi7_stat is rejected
-    # (then it is a Fable cap, judged on the Fable reading); this branch rotates off the active seat
-    # either way (a fresh Fable-only rejection, nested or at the top level, is its own trigger, above), and the proxy rotates on it; without this branch a rejection carried by another claim was invisible here, so the
+    # (then it is a Fable cap, judged on the Fable reading). A proxy reading of that kind never reaches this
+    # branch: Get-ProxySample reports a fresh one as its own trigger, above, and drops or rewrites a stale,
+    # renewed or superseded one. The proxy rotates on an overall rejection; without this branch a rejection carried by another claim was invisible here, so the
     # proxy re-asked every 20s and nothing moved (Fable review 2026-10-30, P2-4).
     elseif ($u.status -eq 'rejected') { $trigger = "account REJECTED by the server (claim $($u.claim); session $s5%, weekly $w7%)"; $capped = 'session' }
     elseif ($s5 -ge $sessBar)      { $trigger = "session at $s5% >= $sessBar% (weekly $w7%, left to burn)" }

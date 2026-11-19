@@ -665,6 +665,11 @@ $prodRenewed = $prod429.Clone(); $prodRenewed.oi7_reset = [string]($nowS - 60); 
 Check 'a renewed full Fable 429 is not reported as a rejection' ($null -eq (Get-ProxySample 'A' $true))
 $sample = Get-ProxySample 'A' $false
 Check '... but its session value still feeds the projection, without the overall rejection' ($sample -and [double]$sample.s5_util -eq 0.3 -and $sample.status -ne 'rejected' -and -not $sample.fable_only_rejection)
+@{ ts = $nowS - 600; observed_ms = ($nowS - 600) * 1000; data = $prodRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a stale renewed full Fable 429 does not feed the projection' ($null -eq (Get-ProxySample 'A' $false))
+$prodNoSession = $prod429.Clone(); $prodNoSession.oi7_reset = [string]($nowS - 60)
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $prodNoSession } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a renewed full Fable 429 with no session value does not feed the projection' ($null -eq (Get-ProxySample 'A' $false))
 $carried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; s5_util = 1.0; s5_stat = 'rejected'; oi7_stat = 'allowed'; oi7_util = 0.2 }
 Set-NestedRej $nowS 'proxy' $nowS $carried
 Check 'a carried full reading rejected on a default window is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
@@ -1067,6 +1072,21 @@ Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 $null = Invoke-CheckRotate 0 $false $true 'test'
 Check 'a fresh top-level Fable-only rejection (no default reading) rotates the watcher off the seat' ((Get-ActiveLabel) -ne 'A') ("active=$(Get-ActiveLabel)")
 Check '... and the ping names the fable limit' (($script:pings -join ' ') -match 'fable') ("pings=$($script:pings -join ' | ')")
+# The production Fable 429 shape: 7d window allowed with utilization, overall and Fable windows rejected.
+$wProd = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day_oi'
+            w7_util = 0.62; w7_stat = 'allowed'; oi7_stat = 'rejected'; oi7_reset = [string]($tn + 3600) }
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+@{ ts = $tn; observed_ms = $tn * 1000; data = $wProd } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+Check 'a fresh production-shape Fable 429 rotates the watcher off the seat' ((Get-ActiveLabel) -ne 'A') ("active=$(Get-ActiveLabel)")
+Check '... and the ping names the fable limit, not the session' (($script:pings -join ' ') -match 'fable' -and ($script:pings -join ' ') -notmatch 'session limit') ("pings=$($script:pings -join ' | ')")
+# Renewed, on a healthy seat: no rotation, and no session-cap label.
+$global:ClaudeRotatorProbeOverride = $probeBefore
+$wRenewed = $wProd.Clone(); $wRenewed.oi7_reset = [string]($tn - 60); $wRenewed.s5_util = 0.1; $wRenewed.s5_stat = 'allowed'
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+@{ ts = $tn; observed_ms = $tn * 1000; data = $wRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+Check 'a renewed production-shape Fable 429 does not rotate off a healthy seat' ((Get-ActiveLabel) -eq 'A') ("active=$(Get-ActiveLabel) pings=$($script:pings -join ' | ')")
 Reset-Case
 $global:ClaudeRotatorProbeOverride = $probeBefore; $script:pings = $pingsBefore
 
