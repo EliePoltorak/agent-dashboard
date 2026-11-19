@@ -226,7 +226,11 @@ def cache_entry(prior, suffix, entry, has_fable):
             return {**prior, "fable_cap": entry}
     elif has_fable and all(entry["data"].get(k) is None for k in DEFAULT_WINDOW) and prior.get("data") and             observed_ms(prior) <= entry["observed_ms"]:
         # A Fable-only response names no default window: keep the default reading (and any cap it holds) and add this
-        # as the Fable backup, as the -fable file nests a status-only reading.
+        # as the Fable backup, as the -fable file nests a status-only reading. A newer nested observation it raced
+        # (and not future-dated) stays.
+        nested = prior.get("fable_cap")
+        if nested and entry["observed_ms"] < observed_ms(nested) <= time.time_ns() // 1_000_000:
+            return prior
         return {**prior, "fable_cap": entry}
     elif not has_fable:
         # A default-only write must not lose the default cache's copy of a Fable observation (a rejection or an
@@ -712,6 +716,9 @@ def cache_self_test():
         assert cache_entry(prior, "", dict(late_full), True).get("fable_cap") == nested, "a late full Fable reading dropped a newer Fable rejection"
         older = dict(nested, observed_ms=now - 9000)
         assert "fable_cap" not in cache_entry(dict(prior, fable_cap=older), "", dict(late_full), True), "a full Fable reading kept an older Fable cap"
+        late_only = {"ts": (now - 2000) // 1000, "observed_ms": now - 2000, "data": {"ok": True, "src": "proxy", "http": 200, "oi7_stat": "allowed"}}
+        assert cache_entry(prior, "", dict(late_only), True).get("fable_cap") == nested, "a late Fable-only response replaced a newer nested Fable observation"
+        assert cache_entry(dict(prior, fable_cap=older), "", dict(late_only), True)["fable_cap"]["observed_ms"] == now - 2000, "a Fable-only response did not replace an older nested observation"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()

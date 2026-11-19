@@ -627,6 +627,12 @@ Set-NestedRej ($nowS - 900) 'proxy' ($nowS + 3600) $rej429
 Check 'a future-dated nested rejection is not a fresh rejection' ($null -eq (Get-ProxySample 'A' $true))
 Set-NestedRej ($nowS - 900) 'proxy' ($nowS - 600) $rej429
 Check 'a stale nested rejection does not satisfy a --now check' ($null -eq (Get-ProxySample 'A' $true))
+$renewedRej = $rej429.Clone(); $renewedRej.oi7_reset = [string]($nowS - 60)
+Set-NestedRej ($nowS - 900) 'proxy' $nowS $renewedRej
+Check 'a nested rejection whose Fable window already renewed does not trigger' ($null -eq (Get-ProxySample 'A' $true))
+$weeklyCarried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day'; w7_util = 1.0; oi7_stat = 'allowed'; oi7_util = 0.2 }
+Set-NestedRej $nowS 'proxy' $nowS $weeklyCarried
+Check 'a carried reading naming only weekly utilization is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
 $carried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; s5_util = 1.0; s5_stat = 'rejected'; oi7_stat = 'allowed'; oi7_util = 0.2 }
 Set-NestedRej $nowS 'proxy' $nowS $carried
 Check 'a carried full reading rejected on a default window is not a Fable-only rejection' ($null -eq (Get-ProxySample 'A' $true))
@@ -647,6 +653,11 @@ Check 'a newer status-only Fable cache rejection keeps the nested Fable rejectio
 @{ ts = $nowS + 3600; observed_ms = ($nowS + 3600) * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.4 } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
 Check 'a future-dated Fable cache allowance does not hide a fresh nested rejection' ((Get-ProxySample 'A' $true).fable_only_rejection)
+Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache.json') -ErrorAction SilentlyContinue
+@{ ts = $nowS + 3600; observed_ms = ($nowS + 3600) * 1000; data = @{ label = 'A'; ok = $true; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 7200) } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
+Check 'a future-dated Fable cache rejection is not a cap in force' (-not (Test-FableCapCached 'A'))
 Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $fablePath -Encoding UTF8
 $statusOnly | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8

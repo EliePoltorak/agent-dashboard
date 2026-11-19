@@ -469,10 +469,12 @@ function Read-FableUsageCache($Seat) {
   $legacyAt = Get-CacheObservationMs $legacy
   $fableAt = Get-FableObservationMs $cached
   $nowMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-  if ($fableAt -gt $nowMs) { $fableAt = 0 }   # a future-dated Fable reading (a clock set back) outranks nothing
+  $future = $fableAt -gt $nowMs
+  if ($future) { $fableAt = 0 }   # a future-dated Fable reading (a clock set back) outranks nothing
   if ($legacyAt -gt 0 -and $legacyAt -le $nowMs -and $legacyAt -gt $fableAt) {
     return $legacy
   }
+  if ($future) { return $null }   # nor is it returned: its reset must not count as a cap in force
   return $reading
 }
 
@@ -1029,7 +1031,7 @@ function Get-ProxySample {
     # default window. Two things override it: a fresh session or weekly cap above it (the limit to report),
     # and a newer Fable cache reading that is an allowance (a live Fable probe's; a newer rejection keeps it).
     $n = $c.fable_cap
-    $nDefault = ($null -ne $n.data.s5_util -or $n.data.s5_stat -or $n.data.w7_stat)
+    $nDefault = ($null -ne $n.data.s5_util -or $n.data.s5_stat -or $null -ne $n.data.w7_util -or $n.data.w7_stat)   # the proxy's DEFAULT_WINDOW
     $topCap = ($d.src -eq 'proxy' -and $d.ok -and ($d.s5_stat -eq 'rejected' -or $d.w7_stat -eq 'rejected') -and $age -le $ProxyFreshSec)
     if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
         ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault))) {
@@ -1037,7 +1039,9 @@ function Get-ProxySample {
       $nAge = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $nAt
       $fableAt = Get-FableObservationMs (Read-UsageCacheFile (Join-Path (Join-Path $Root $Label) 'usage-cache-fable.json'))
       $superseded = ($fableAt -gt $nAt -and $fableAt -le ($nAt + $nAge) -and -not (Test-FableCapCached $Label))   # not future-dated, not a cap
-      if ($nAge -ge 0 -and $nAge -le ($ProxyFreshSec * 1000) -and -not $superseded) {
+      $reset = Get-UsableReset $n.data.oi7_reset
+      $renewed = ($reset -and $reset -le [DateTimeOffset]::UtcNow.ToUnixTimeSeconds())   # its Fable window has already renewed
+      if ($nAge -ge 0 -and $nAge -le ($ProxyFreshSec * 1000) -and -not $superseded -and -not $renewed) {
         return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $n.data.claim
                                   oi7_stat = $n.data.oi7_stat; fable_only_rejection = $true }
       }
