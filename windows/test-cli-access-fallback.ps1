@@ -637,12 +637,15 @@ Check 'a carried reading naming only weekly utilization is not a Fable-only reje
 Check 'a top-level Fable-only rejection (no default reading to nest under) is seen as a Fable rejection' ((Get-ProxySample 'A' $true).fable_only_rejection)
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = $rej429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a top-level Fable-only rejection with an overall status is a Fable rejection, not a session cap' ((Get-ProxySample 'A' $true).fable_only_rejection)
-# $rej429 carries the overall status too, as a real Fable 429 does: none of these may fall through to a session cap.
+# $rej429 carries the overall status too, as a real Fable 429 does: a renewed, future-dated or superseded one must not
+# fall through to a session cap (a stale one is also stopped by the freshness test that sample needs).
 $topRenewed = $rej429.Clone(); $topRenewed.oi7_reset = [string]($nowS - 60)
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = $topRenewed } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a top-level Fable rejection whose window already renewed does not trigger' ($null -eq (Get-ProxySample 'A' $true))
 @{ ts = $nowS - 600; observed_ms = ($nowS - 600) * 1000; data = $rej429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 Check 'a stale top-level Fable rejection does not satisfy a --now check' ($null -eq (Get-ProxySample 'A' $true))
+@{ ts = $nowS + 3600; observed_ms = ($nowS + 3600) * 1000; data = $rej429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+Check 'a future-dated top-level Fable rejection is not a fresh rejection' ($null -eq (Get-ProxySample 'A' $true))
 @{ ts = $nowS - 30; observed_ms = ($nowS - 30) * 1000; data = $rej429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.4 } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
