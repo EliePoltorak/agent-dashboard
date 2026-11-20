@@ -142,7 +142,7 @@ $verbatim = $inputPath.StartsWith('\\?\', [StringComparison]::Ordinal)
 $path = if ($verbatim) { $inputPath } else { $inputPath.Replace('/', '\') }
 $device = $path -match '^\\\\[?.]\\'
 $extendedUnc = $path -match '^\\\\[?.]\\UNC(?:\\|$)'
-$unc = $extendedUnc -or (-not $device -and $path.StartsWith('\\'))
+$unc = $extendedUnc -or (-not $device -and $path.StartsWith('\\', [StringComparison]::Ordinal))
 $pathNames = if ($extendedUnc) {
   $path -replace '^\\\\[?.]\\UNC(?:\\|$)', '\\'
 } else {
@@ -152,9 +152,9 @@ $uncRoot = if ($unc) { [regex]::Match($pathNames, '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}
 $directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
     ($unc -and -not $uncRoot) -or
-    # \\server\pipe\... and \\server\mailslot\... name named pipes and mailslots, never a share
+    # \\server\pipe\..., \\server\mailslot\... and \\server\IPC$\... are never a file share
     # (Windows drops trailing dots and spaces).
-    ($unc -and $uncRoot -match '^\\\\[^\\]+\\(?:pipe|mailslot)[. ]*$') -or
+    ($unc -and $uncRoot -match '^\\\\[^\\]+\\(?:pipe|mailslot|IPC\$)[. ]*$') -or
     # A device path must name a drive or a UNC share (not \\.\pipe\..., a volume GUID or another device).
     ($device -and -not $extendedUnc -and $path -notmatch '^\\\\[?.]\\[A-Z]:\\') -or
     (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
@@ -180,7 +180,7 @@ foreach ($component in ($path.Substring($root.Length) -split '\\')) {
 }
 $Cwd = [IO.Path]::Combine($root, ($components -join '\'))
 # Share roots with a final separator already have a distinct transcript key.
-if ($unc -and -not $components.Count -and $path.EndsWith('\')) {
+if ($unc -and -not $components.Count -and $path.EndsWith('\', [StringComparison]::Ordinal)) {
   $Cwd = $Cwd.TrimEnd('\') + '\'
 }
 
@@ -461,6 +461,7 @@ $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title }
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
 $unreadableRecs = 0   # records skipped below because they could not be read or parsed
+$cwdSpelling = @{}    # sub -> the app's own spelling of this workspace (the match below ignores case)
 foreach ($acct in $accts) {
   $subCounts[$acct.Name] = @{}
   foreach ($sub in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
@@ -473,6 +474,7 @@ foreach ($acct in $accts) {
       $list.Add(@{ file = $f; j = $j })
       if ($j.cwd -eq $Cwd) {
         $cnt++
+        if (-not $cwdSpelling.ContainsKey($sub.Name)) { $cwdSpelling[$sub.Name] = [string]$j.cwd }
         $cli = [string]$j.cliSessionId
         if ($cli) {
           $good = -not ([string]$j.title -match $DateTitleRx)
@@ -487,6 +489,8 @@ foreach ($acct in $accts) {
   }
 }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
+# New records carry the app's spelling of the workspace, not the setting's (which may differ in case).
+if ($wsGuid) { $cwdJson = $cwdSpelling[$wsGuid] -replace '\\', '\\' }
 # Without an app record for this exact workspace there is no workspace ID to file new records under,
 # so pass 2 adds no record on any seat (flag sync below still runs). Say so, rather than reporting a plain zero.
 if (-not $wsGuid -and -not $Quiet) {

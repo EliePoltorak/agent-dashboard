@@ -133,6 +133,7 @@ $invalidWorkspaces = @(
   '\\localhost\pipe \history'
   '\\localhost\mailslot\history'
   '\\?\UNC\localhost\MAILSLOT.\history'
+  '\\localhost\IPC$\history'
   '\\?\UNC\localhost\PIPE\history'
   '\\?\Volume{00000000-0000-0000-0000-000000000000}\work'
 )
@@ -170,7 +171,13 @@ Set-Content -LiteralPath $workspaceFile "$workspace\"
 $U = recs | Where-Object { $_.cli -ne $X } | Group-Object cli | Where-Object { $_.Count -ge 2 -and -not ($_.Group.star -contains $true) -and -not ($_.Group.arch -contains $true) } | Select-Object -First 1
 if (-not $U) { "FAIL no unflagged multi-seat session in the index to test with"; exit 1 }
 setRec $U.Group[0].f 'isArchived' $true
+# Run 1 reads a setting saved the way Windows PowerShell 5.1 saves it (UTF-8 with a BOM, CRLF) and
+# spelled in a different case from the app's records: new records must still carry the app's spelling.
+[IO.File]::WriteAllBytes($workspaceFile, [byte[]](0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes("$($workspace.ToLowerInvariant())\`r`n"))
 "--- run 1 (baseline: first run, no state file)"; run; $R = recs
+Set-Content -LiteralPath $workspaceFile "$workspace\"
+$newCwds = @(Get-ChildItem -LiteralPath $ccs -Recurse -Filter local_*.json | ForEach-Object { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json } | Where-Object { $_.cliSessionId -eq $X } | ForEach-Object { $_.cwd; $_.originCwd })
+check 'a BOM, CRLF, differently cased setting is read, and new records keep the app''s spelling' ($newCwds.Count -ge 4 -and @($newCwds | Where-Object { -not [string]::Equals($_, $workspace, [StringComparison]::Ordinal) }).Count -eq 0)
 check "first run: archived on one seat -> archived on all $($U.Count)" (@(ofSession $U.Name | Where-Object { -not $_.arch }).Count -eq 0)
 check 'run 1 exits 0' ($rc -eq 0)
 check 'state file written' (Test-Path -LiteralPath $statePath)
