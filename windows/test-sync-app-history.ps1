@@ -131,6 +131,8 @@ $invalidWorkspaces = @(
   '\\localhost\pipe\history'
   '\\localhost\pipe.\history'
   '\\localhost\pipe \history'
+  '\\localhost\mailslot\history'
+  '\\?\UNC\localhost\MAILSLOT.\history'
   '\\?\UNC\localhost\PIPE\history'
   '\\?\Volume{00000000-0000-0000-0000-000000000000}\work'
 )

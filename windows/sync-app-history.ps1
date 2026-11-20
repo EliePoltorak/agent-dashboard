@@ -152,8 +152,9 @@ $uncRoot = if ($unc) { [regex]::Match($pathNames, '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}
 $directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
     ($unc -and -not $uncRoot) -or
-    # \\server\pipe\... is the UNC form of a named pipe, never a share (Windows drops trailing dots and spaces).
-    ($unc -and $uncRoot -match '^\\\\[^\\]+\\pipe[. ]*$') -or
+    # \\server\pipe\... and \\server\mailslot\... name named pipes and mailslots, never a share
+    # (Windows drops trailing dots and spaces).
+    ($unc -and $uncRoot -match '^\\\\[^\\]+\\(?:pipe|mailslot)[. ]*$') -or
     # A device path must name a drive or a UNC share (not \\.\pipe\..., a volume GUID or another device).
     ($device -and -not $extendedUnc -and $path -notmatch '^\\\\[?.]\\[A-Z]:\\') -or
     (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
