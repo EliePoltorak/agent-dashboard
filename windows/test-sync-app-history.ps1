@@ -129,6 +129,8 @@ $invalidWorkspaces = @(
   '\\.\'
   '\\.\pipe\history'
   '\\localhost\pipe\history'
+  '\\localhost\pipe.\history'
+  '\\localhost\pipe \history'
   '\\?\UNC\localhost\PIPE\history'
   '\\?\Volume{00000000-0000-0000-0000-000000000000}\work'
 )
@@ -156,6 +158,8 @@ $brokenRec = Join-Path (Get-ChildItem -LiteralPath (Get-ChildItem -LiteralPath $
 Set-Content -LiteralPath $brokenRec '{"cwd":' -NoNewline
 run @{ Cwd = $unrecorded; DryRun = $true }
 check 'an unreadable record turns the notice into a retry-after-the-app-closes hint' ($rc -eq 0 -and ($out -match '^no readable app record on any seat has workspace .*\(1 record\(s\) could not be read\): retry after the desktop app closes') -and (recHash) -eq $initialIndex)
+run @{ Cwd = $unrecorded; DryRun = $true; Quiet = $true }
+check 'the unreadable-record notice stays silent under -Quiet' ($rc -eq 0 -and -not ($out -match 'app record') -and (recHash) -eq $initialIndex)
 Remove-Item -LiteralPath $brokenRec -Force
 Remove-Item -LiteralPath $unrecordedProj -Recurse -Force
 Set-Content -LiteralPath $workspaceFile "$workspace\"

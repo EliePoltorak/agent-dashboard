@@ -601,7 +601,8 @@ whose uuid isn't in the transcript, sessions touched in the last 10 minutes, and
 since the sync read them are left alone. A record that can't be written or added, or an account folder
 that can't be created, is skipped with a warning and retried next run; the rest of the sync carries on. A record
 that can't be read is skipped too, but warned about only when the archive/pin step runs and the record was
-known from the last run; otherwise silently. Every record the sync writes or
+known from the last run, or (outside `-Quiet`) counted in the notice when no record matches the workspace;
+otherwise silently. Every record the sync writes or
 creates goes through a temp file and an atomic replace, so a killed run can't leave one half-written.
 
 **Archive and pin flags follow you across seats (2026-11-03).** Each seat keeps its own record
