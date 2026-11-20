@@ -51,7 +51,7 @@ foreach ($seat in 'A','B','C') {
   }
 }
 # One synthetic, recent, substantive transcript so the script has a session to create records for (pass 2).
-# It is the only transcript in the sandbox, so nothing else is created or auto-archived.
+# It is the fixture workspace's only transcript, so nothing else is created or auto-archived.
 $X = [guid]::NewGuid().ToString()
 $asst = 1..7 | ForEach-Object { '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok ' + $_ + '"}]}}' }
 Set-Content -LiteralPath "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + $asst)
@@ -147,6 +147,8 @@ $null = New-Item -ItemType Directory -Path $unrecordedProj -Force
 Copy-Item -LiteralPath "$proj\$X.jsonl" -Destination "$unrecordedProj\$([guid]::NewGuid()).jsonl"
 run @{ Cwd = $unrecorded; DryRun = $true }
 check 'a workspace with transcripts but no app record says so' ($rc -eq 0 -and ($out -match '^no app record on any seat has workspace') -and ($out -match '^WOULD: added 0,') -and (recHash) -eq $initialIndex)
+run @{ Cwd = $unrecorded; DryRun = $true; Quiet = $true }
+check 'the no-app-record notice stays silent under -Quiet' ($rc -eq 0 -and -not ($out -match 'no app record') -and (recHash) -eq $initialIndex)
 Remove-Item -LiteralPath $unrecordedProj -Recurse -Force
 Set-Content -LiteralPath $workspaceFile "$workspace\"
 

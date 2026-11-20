@@ -563,7 +563,7 @@ more (the exclusions above still apply), un-archived ones included. Rolling back
 sessions again, kept ones included, and forgets `autoArchived`; redeploying this version does not bring them back:
 restore them from `.pruned-history-backups`. Opening the app while the sync is writing can undo an auto-archive; the next
 run then reads that as your un-archive and records the session as `kept`.
-The sync runs at Idle CPU priority and puts the caller's priority back when it ends (the rotator runs it in its own process).
+The sync runs at Idle CPU priority and puts the caller's priority back when it ends, including when it stops on an error (the rotator runs it in-process after a switch).
 
 1. **Substantive** (the only category kept by default) — not an automated dispatch (merge-pr /
    address-pr, review agents, ping tests, bare slash commands) and ≥ `-MinAssistant` assistant

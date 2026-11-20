@@ -484,7 +484,7 @@ foreach ($acct in $accts) {
 }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
 # Without an app record for this exact workspace there is no workspace ID to file new records under,
-# so every seat is skipped below. Say so, rather than reporting a plain zero.
+# so pass 2 adds no record on any seat (flag sync below still runs). Say so, rather than reporting a plain zero.
 if (-not $wsGuid -and -not $Quiet) {
   "no app record on any seat has workspace $($Cwd): save one session for it in the desktop app, or check the path matches the app's spelling"
 }
