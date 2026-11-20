@@ -152,6 +152,8 @@ $uncRoot = if ($unc) { [regex]::Match($pathNames, '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}
 $directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
     ($unc -and -not $uncRoot) -or
+    # \\server\pipe\... is the UNC form of a named pipe, never a share.
+    ($unc -and $uncRoot -match '^\\\\[^\\]+\\pipe$') -or
     # A device path must name a drive or a UNC share (not \\.\pipe\..., a volume GUID or another device).
     ($device -and -not $extendedUnc -and $path -notmatch '^\\\\[?.]\\[A-Z]:\\') -or
     (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
@@ -457,6 +459,7 @@ $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title }
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
+$unreadableRecs = 0   # records skipped below because they could not be read or parsed
 foreach ($acct in $accts) {
   $subCounts[$acct.Name] = @{}
   foreach ($sub in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
@@ -464,8 +467,8 @@ foreach ($acct in $accts) {
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($f in Get-ChildItem -LiteralPath $sub.FullName -File -Filter '*.json') {
       $rawRec = $null; $j = $null
-      try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { continue }
-      if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
+      try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { $unreadableRecs++; continue }
+      if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { $unreadableRecs++; continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
       if ($j.cwd -eq $Cwd) {
         $cnt++
@@ -486,7 +489,12 @@ $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending 
 # Without an app record for this exact workspace there is no workspace ID to file new records under,
 # so pass 2 adds no record on any seat (flag sync below still runs). Say so, rather than reporting a plain zero.
 if (-not $wsGuid -and -not $Quiet) {
-  "no app record on any seat has workspace $($Cwd): save one session for it in the desktop app, or check the path matches the app's spelling"
+  if ($unreadableRecs) {
+    # A locked or half-written record may be the one that matches, so don't blame the path alone.
+    "no readable app record on any seat has workspace $($Cwd) ($unreadableRecs record(s) could not be read): retry after the desktop app closes; if it still says this, save one session for it in the desktop app, or check the path matches the app's spelling"
+  } else {
+    "no app record on any seat has workspace $($Cwd): save one session for it in the desktop app, or check the path matches the app's spelling"
+  }
 }
 
 # ---- pass 1.4: archive and pin flags follow you across seats -------------------

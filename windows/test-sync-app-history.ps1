@@ -128,6 +128,8 @@ $invalidWorkspaces = @(
   '\\?\'
   '\\.\'
   '\\.\pipe\history'
+  '\\localhost\pipe\history'
+  '\\?\UNC\localhost\PIPE\history'
   '\\?\Volume{00000000-0000-0000-0000-000000000000}\work'
 )
 foreach ($invalidWorkspace in $invalidWorkspaces) {
@@ -149,6 +151,12 @@ run @{ Cwd = $unrecorded; DryRun = $true }
 check 'a workspace with transcripts but no app record says so' ($rc -eq 0 -and ($out -match '^no app record on any seat has workspace') -and ($out -match '^WOULD: added 0,') -and (recHash) -eq $initialIndex)
 run @{ Cwd = $unrecorded; DryRun = $true; Quiet = $true }
 check 'the no-app-record notice stays silent under -Quiet' ($rc -eq 0 -and -not ($out -match 'no app record') -and (recHash) -eq $initialIndex)
+# An unreadable record could be the matching one: the notice says so instead of blaming the path.
+$brokenRec = Join-Path (Get-ChildItem -LiteralPath (Get-ChildItem -LiteralPath $ccs -Directory | Select-Object -First 1).FullName -Directory | Select-Object -First 1).FullName 'broken-record.json'
+Set-Content -LiteralPath $brokenRec '{"cwd":' -NoNewline
+run @{ Cwd = $unrecorded; DryRun = $true }
+check 'an unreadable record turns the notice into a retry-after-the-app-closes hint' ($rc -eq 0 -and ($out -match '^no readable app record on any seat has workspace .*\(1 record\(s\) could not be read\): retry after the desktop app closes') -and (recHash) -eq $initialIndex)
+Remove-Item -LiteralPath $brokenRec -Force
 Remove-Item -LiteralPath $unrecordedProj -Recurse -Force
 Set-Content -LiteralPath $workspaceFile "$workspace\"
 

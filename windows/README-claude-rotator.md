@@ -669,7 +669,9 @@ session that meets the copy rules above is missing from the app, the preview sho
 or a clone. Zero is expected when every eligible session is already present or none qualify. If the
 preview says `no transcripts`, check the path and that the workspace has CLI transcripts for this user.
 If it says `no app record on any seat has workspace`, the app has not recorded this exact path: save
-one session for the workspace in the app, or correct the path to the app's spelling.
+one session for the workspace in the app, or correct the path to the app's spelling. If it says
+`no readable app record`, some records could not be read (the app may be writing them): close the
+app and run the preview again before changing the path.
 
 Manual runs can pass an absolute `-Cwd` to override the file. If neither is supplied, the sync stops
 before opening the app's session index.
