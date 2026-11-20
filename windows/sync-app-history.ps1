@@ -132,6 +132,8 @@ if (-not $PSBoundParameters.ContainsKey('Cwd')) {
     } catch [Text.DecoderFallbackException] {
       throw 'Save ~/.claude/history-sync-workspace.txt as UTF-8.'
     }
+  } else {
+    throw 'No history sync workspace is configured. Save its absolute path in ~/.claude/history-sync-workspace.txt (README-claude-rotator.md, "Desktop app session history") or pass -Cwd.'
   }
 }
 # Check syntax without touching the workspace. An offline share can still have local transcripts.
@@ -150,6 +152,8 @@ $uncRoot = if ($unc) { [regex]::Match($pathNames, '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}
 $directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
 if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
     ($unc -and -not $uncRoot) -or
+    # A device path must name a drive or a UNC share (not \\.\pipe\..., a volume GUID or another device).
+    ($device -and -not $extendedUnc -and $path -notmatch '^\\\\[?.]\\[A-Z]:\\') -or
     (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
     ($path.StartsWith('\\?\', [StringComparison]::Ordinal) -and $inputPath.Contains('/')) -or
     ($verbatim -and ($inputPath.Substring(3).Contains('\\') -or $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)')) -or
@@ -479,6 +483,11 @@ foreach ($acct in $accts) {
   }
 }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
+# Without an app record for this exact workspace there is no workspace ID to file new records under,
+# so every seat is skipped below. Say so, rather than reporting a plain zero.
+if (-not $wsGuid -and -not $Quiet) {
+  "no app record on any seat has workspace $($Cwd): save one session for it in the desktop app, or check the path matches the app's spelling"
+}
 
 # ---- pass 1.4: archive and pin flags follow you across seats -------------------
 # isArchived and isStarred (the record's pin flag) live in each seat's own record, with no time of change.

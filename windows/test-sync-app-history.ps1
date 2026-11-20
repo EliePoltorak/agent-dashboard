@@ -51,7 +51,7 @@ foreach ($seat in 'A','B','C') {
   }
 }
 # One synthetic, recent, substantive transcript so the script has a session to create records for (pass 2).
-# The real index's transcripts are NOT copied, so nothing else is created or auto-archived.
+# It is the only transcript in the sandbox, so nothing else is created or auto-archived.
 $X = [guid]::NewGuid().ToString()
 $asst = 1..7 | ForEach-Object { '{"type":"assistant","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"ok ' + $_ + '"}]}}' }
 Set-Content -LiteralPath "$proj\$X.jsonl" (@('{"type":"user","message":{"role":"user","content":"please help me with the flag sync test"}}') + $asst)
@@ -102,7 +102,7 @@ function inIdx($r) { $p = Join-Path (Split-Path -LiteralPath $r.f) 'archived-ses
 
 $initialIndex = recHash
 run @{ Quiet = $true }
-check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'Use a valid absolute Windows workspace path') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
+check 'a missing workspace setting fails before writing state' ($rc -ne 0 -and ($out -match 'No history sync workspace is configured') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
 [IO.File]::WriteAllBytes($workspaceFile, [byte[]](0x43, 0x3A, 0x5C, 0xE9))
 run @{ Quiet = $true }
 check 'a non-UTF-8 setting fails before writing state' ($rc -ne 0 -and ($out -match 'as UTF-8') -and -not (Test-Path -LiteralPath $lockPath) -and (recHash) -eq $initialIndex)
@@ -127,6 +127,8 @@ $invalidWorkspaces = @(
   'C:\work\NUL'
   '\\?\'
   '\\.\'
+  '\\.\pipe\history'
+  '\\?\Volume{00000000-0000-0000-0000-000000000000}\work'
 )
 foreach ($invalidWorkspace in $invalidWorkspaces) {
   Set-Content -LiteralPath $workspaceFile $invalidWorkspace
@@ -138,6 +140,14 @@ run @{ Cwd = $overrideWorkspace; DryRun = $true }
 check 'an explicit workspace overrides an invalid setting and plans additions on all three seats' ($rc -eq 0 -and ($out -match '^WOULD: added 3,') -and (recHash) -eq $initialIndex)
 run @{ Cwd = '\\history-sync-fixture.invalid\share\PROJEC~1'; DryRun = $true }
 check 'a valid UNC workspace with no local transcripts can be previewed' ($rc -eq 0 -and ($out -match '^no transcripts') -and (recHash) -eq $initialIndex)
+# Transcripts but no app record for that exact path: the preview says why nothing is planned.
+$unrecorded = $workspace + 'unrecorded'
+$unrecordedProj = "$sb\home\.claude\projects\$($unrecorded -creplace '[^A-Za-z0-9]', '-')"
+$null = New-Item -ItemType Directory -Path $unrecordedProj -Force
+Copy-Item -LiteralPath "$proj\$X.jsonl" -Destination "$unrecordedProj\$([guid]::NewGuid()).jsonl"
+run @{ Cwd = $unrecorded; DryRun = $true }
+check 'a workspace with transcripts but no app record says so' ($rc -eq 0 -and ($out -match '^no app record on any seat has workspace') -and ($out -match '^WOULD: added 0,') -and (recHash) -eq $initialIndex)
+Remove-Item -LiteralPath $unrecordedProj -Recurse -Force
 Set-Content -LiteralPath $workspaceFile "$workspace\"
 
 # The sandbox index agrees across seats, so plant a disagreement for the first run to resolve.

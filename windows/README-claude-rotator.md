@@ -649,6 +649,7 @@ when the workspace is a share root and Claude Code recorded it with one.
 Run this PowerShell command and paste the path at the prompt.
 
 ```powershell
+New-Item -ItemType Directory -Force -Path "$env:USERPROFILE\.claude" | Out-Null
 Set-Content -LiteralPath "$env:USERPROFILE\.claude\history-sync-workspace.txt" -Encoding utf8 -Value (Read-Host 'Workspace path')
 ```
 
@@ -667,6 +668,8 @@ Confirm that the `WOULD: added … record(s) for …` summary names the intended
 session that meets the copy rules above is missing from the app, the preview should plan an addition
 or a clone. Zero is expected when every eligible session is already present or none qualify. If the
 preview says `no transcripts`, check the path and that the workspace has CLI transcripts for this user.
+If it says `no app record on any seat has workspace`, the app has not recorded this exact path: save
+one session for the workspace in the app, or correct the path to the app's spelling.
 
 Manual runs can pass an absolute `-Cwd` to override the file. If neither is supplied, the sync stops
 before opening the app's session index.
@@ -675,7 +678,7 @@ before opening the app's session index.
 restarted (or the workspace reopened), not in an already-open window.
 
 ```
-claude-sync-history                      # sync the default project (copy recent 7d + substantive; archive older)
+claude-sync-history                      # sync the configured workspace (copy recent 7d + substantive; archive older)
 claude-sync-history -DryRun              # preview what would be added/archived, change nothing
 claude-sync-history -MaxAgeDays 14       # widen/narrow the window (0 = copy all ages, no auto-archive); also the archive age:
                                          # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
