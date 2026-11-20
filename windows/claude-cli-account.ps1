@@ -1054,7 +1054,7 @@ function Get-ProxySample {
       }
     }
     if ($n -and -not $topCap -and $n.data.src -eq 'proxy' -and $n.data.ok -and
-        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault -and $n.data.oi7_stat -ne 'allowed'))) {
+        ($n.data.oi7_stat -eq 'rejected' -or ($n.data.status -eq 'rejected' -and -not $nDefault -and -not $n.data.oi7_stat))) {
       $hit = & $fableRejection $n
       if ($hit) { return $hit }
     }

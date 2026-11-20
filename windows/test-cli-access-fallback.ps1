@@ -655,6 +655,11 @@ $plain429 = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rej
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = $plain429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $sample = Get-ProxySample 'A' $true
 Check 'a top-level 429 whose Fable window is not rejected stays an overall rejection, not a Fable cap' ($sample.status -eq 'rejected' -and -not $sample.fable_only_rejection)
+# The shape the proxy now stores at the top level: another limit's sparse 429 that carries a Fable status.
+$other429 = $plain429.Clone(); $other429.oi7_stat = 'allowed'
+@{ ts = $nowS; observed_ms = $nowS * 1000; data = $other429 } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
+$sample = Get-ProxySample 'A' $true
+Check "a top-level five_hour 429 whose Fable window says allowed is an overall rejection the watcher sees" ($sample.status -eq 'rejected' -and -not $sample.fable_only_rejection)
 # The production Fable 429 shape: 7d window allowed with utilization, overall and Fable windows rejected.
 $prod429 = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day_oi'
               w7_util = 0.62; w7_stat = 'allowed'; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600) }
@@ -1113,6 +1118,12 @@ $sparse | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Pa
 $null = Invoke-CheckRotate 0 $false $true 'test'
 $logS = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
 Check 'a nested 429 whose Fable window says allowed is not reported as a Fable cap' ($logS -notmatch 'FABLE window REJECTED' -and ($script:pings -join ' ') -notmatch 'fable') ("log=$logS pings=$($script:pings -join ' | ')")
+$sparse.fable_cap.data.oi7_stat = 'allowed_warning'
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+$sparse | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logS = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
+Check '... nor one whose Fable window says allowed_warning' ($logS -notmatch 'FABLE window REJECTED' -and ($script:pings -join ' ') -notmatch 'fable') ("log=$logS pings=$($script:pings -join ' | ')")
 # Renewed, on a healthy seat: no trigger at all, on a --now check and on a scheduled one (which reads the
 # status-rewritten copy). Every seat is equally healthy here, so a wrong trigger would only 'stay put':
 # assert on the trigger log line, not on which seat ends up active.

@@ -217,6 +217,11 @@ def default_fable_observation(cached):
     return nested
 
 
+def other_limit_rejection(data):
+    """A rejection whose Fable window names a status that is not rejected: some other limit refused it."""
+    return data.get("status") == "rejected" and bool(data.get("oi7_stat")) and data.get("oi7_stat") != "rejected"
+
+
 def cache_entry(prior, suffix, entry, has_fable):
     if suffix:
         # Keep the last measurement and its timestamp for the watcher and usage history.
@@ -224,10 +229,11 @@ def cache_entry(prior, suffix, entry, has_fable):
         if (entry["data"].get("oi7_util") is None and prior.get("data", {}).get("oi7_util") is not None
                 and observed_ms(prior) <= entry["observed_ms"]):
             return {**prior, "fable_cap": entry}
-    elif has_fable and all(entry["data"].get(k) is None for k in DEFAULT_WINDOW) and prior.get("data") and             observed_ms(prior) <= entry["observed_ms"]:
+    elif has_fable and all(entry["data"].get(k) is None for k in DEFAULT_WINDOW) and prior.get("data") and             observed_ms(prior) <= entry["observed_ms"] and not other_limit_rejection(entry["data"]):
         # A Fable-only response names no default window: keep the default reading (and any cap it holds) and add this
         # as the Fable backup, as the -fable file nests a status-only reading. A newer nested observation it raced
-        # (and not future-dated) stays.
+        # (and not future-dated) stays. A rejection whose Fable window says it is not the Fable cap (another limit's,
+        # e.g. claim five_hour with no 5h fields) is stored at the top level, where default-cap readers see it.
         nested = prior.get("fable_cap")
         if nested and entry["observed_ms"] < observed_ms(nested) <= time.time_ns() // 1_000_000:
             return prior
@@ -721,6 +727,11 @@ def cache_self_test():
         assert cache_entry(prior, "", dict(late_only), True).get("fable_cap") == nested, "a late Fable-only response replaced a newer nested Fable observation"
         assert cache_entry(dict(prior, fable_cap=older), "", dict(late_only), True)["fable_cap"]["observed_ms"] == now - 2000, "a Fable-only response did not replace an older nested observation"
         assert cache_entry(dict(prior, fable_cap=dict(nested, observed_ms=now + 3_600_000)), "", dict(late_only), True)["fable_cap"]["observed_ms"] == now - 2000, "a future-dated nested observation blocked a Fable-only response"
+        for fable_word in ("allowed", "allowed_warning"):
+            other = {"ts": now // 1000, "observed_ms": now, "data": {"ok": True, "src": "proxy", "http": 429, "status": "rejected",
+                                                                     "claim": "five_hour", "oi7_stat": fable_word}}
+            stored = cache_entry(dict(prior), "", dict(other), True)
+            assert stored["data"].get("status") == "rejected" and stored["data"].get("claim") == "five_hour",                 "another limit's sparse rejection was nested out of the default readers' sight"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()
