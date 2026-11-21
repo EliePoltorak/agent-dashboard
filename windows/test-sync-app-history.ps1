@@ -631,14 +631,16 @@ Set-Content -LiteralPath (Join-Path $spellProj "$spellSession.jsonl") (@('{"type
 $spellClone = [guid]::NewGuid().ToString()
 Set-Content -LiteralPath (Join-Path $spellProj "$spellClone.jsonl") (@('{"type":"user","message":{"role":"user","content":"test a cloned record''s spelling"}}') + $asst)
 $id = "local_$([guid]::NewGuid())"
-@{ sessionId = $id; cliSessionId = $spellClone; cwd = $spellA; originCwd = $spellA; title = 'Titled by the app' } |
+# Its originCwd names another directory, which clones must keep.
+$cloneOrigin = $spellRoot + 'Some-Other-Origin'
+@{ sessionId = $id; cliSessionId = $spellClone; cwd = $spellA; originCwd = $cloneOrigin; title = 'Titled by the app' } |
   ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $ccs 'A') 'spelling-fixture') "$id.json") -NoNewline
 run @{ Cwd = $spellA.ToLowerInvariant() }
 $spellOf = { param($cli) $m = @{}; foreach ($r in (ofSession $cli)) { $j = Get-Content -LiteralPath $r.f -Raw | ConvertFrom-Json; $m[(key $r.f).Split('\')[0]] = @($j.cwd, $j.originCwd, $j.title) }; $m }
 $made = & $spellOf $spellSession; $cloned = & $spellOf $spellClone
 $seatOk = { param($m, $s, $want) $m[$s] -and @($m[$s][0, 1] | Where-Object { -not [string]::Equals($_, $want, [StringComparison]::Ordinal) }).Count -eq 0 }
 check 'new records take the destination seat''s own spelling of the workspace' ($rc -eq 0 -and (& $seatOk $made 'A' $spellA) -and (& $seatOk $made 'B' $spellB) -and (& $seatOk $made 'C' $spellA))
-check 'cloned records take the destination seat''s spelling and keep the app''s title' ((& $seatOk $cloned 'B' $spellB) -and (& $seatOk $cloned 'C' $spellA) -and $cloned['B'][2] -eq 'Titled by the app')
+check 'cloned records take the destination seat''s spelling and keep the app''s title and a different origin' ($cloned['B'] -and $cloned['C'] -and [string]::Equals($cloned['B'][0], $spellB, [StringComparison]::Ordinal) -and [string]::Equals($cloned['C'][0], $spellA, [StringComparison]::Ordinal) -and $cloned['B'][1] -eq $cloneOrigin -and $cloned['C'][1] -eq $cloneOrigin -and $cloned['B'][2] -eq 'Titled by the app')
 
 # A record for 'café' (one character) is a different directory from 'cafe' + combining accent: no match.
 $accentRec = $spellRoot + "accent-caf$([char]0xE9)"; $accentCwd = $spellRoot + "accent-cafe$([char]0x301)"

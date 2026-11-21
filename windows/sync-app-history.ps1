@@ -904,8 +904,13 @@ foreach ($acct in $accts) {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
-          # the destination folder's spelling of the workspace, not the source seat's
-          if ($destSpelling) { foreach ($ck in 'cwd', 'originCwd') { $cj | Add-Member -NotePropertyName $ck -NotePropertyValue $destSpelling -Force } }
+          # the destination folder's spelling of the workspace (else the shared one), not the source seat's;
+          # originCwd only when it names the same workspace, so a different origin path is kept
+          $cloneSpelling = if ($destSpelling) { $destSpelling } else { $cwdSpelling[$wsGuid] }
+          if ($cloneSpelling) {
+            if ($cj.originCwd -is [string] -and [string]::Equals($cj.originCwd, $cj.cwd, [StringComparison]::OrdinalIgnoreCase)) { $cj.originCwd = $cloneSpelling }
+            $cj.cwd = $cloneSpelling
+          }
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
           else {   # flags not resolved, or not saved, this run: write a neutral (off) record, which the next run
