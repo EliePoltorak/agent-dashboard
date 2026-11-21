@@ -627,11 +627,18 @@ foreach ($pair in @(@('A', $spellA), @('B', $spellB))) {
 }
 $spellSession = [guid]::NewGuid().ToString()
 Set-Content -LiteralPath (Join-Path $spellProj "$spellSession.jsonl") (@('{"type":"user","message":{"role":"user","content":"test per-seat workspace spelling"}}') + $asst)
+# A titled record on seat A only: seats B and C get clones of it, which must not keep A's spelling on B.
+$spellClone = [guid]::NewGuid().ToString()
+Set-Content -LiteralPath (Join-Path $spellProj "$spellClone.jsonl") (@('{"type":"user","message":{"role":"user","content":"test a cloned record''s spelling"}}') + $asst)
+$id = "local_$([guid]::NewGuid())"
+@{ sessionId = $id; cliSessionId = $spellClone; cwd = $spellA; originCwd = $spellA; title = 'Titled by the app' } |
+  ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path (Join-Path (Join-Path $ccs 'A') 'spelling-fixture') "$id.json") -NoNewline
 run @{ Cwd = $spellA.ToLowerInvariant() }
-$spellBySeat = @{}
-foreach ($r in (ofSession $spellSession)) { $j = Get-Content -LiteralPath $r.f -Raw | ConvertFrom-Json; $spellBySeat[(key $r.f).Split('\')[0]] = @($j.cwd, $j.originCwd) }
-$seatOk = { param($s, $want) $spellBySeat[$s] -and @($spellBySeat[$s] | Where-Object { -not [string]::Equals($_, $want, [StringComparison]::Ordinal) }).Count -eq 0 }
-check 'new records take the destination seat''s own spelling of the workspace' ($rc -eq 0 -and (& $seatOk 'A' $spellA) -and (& $seatOk 'B' $spellB) -and (& $seatOk 'C' $spellA))
+$spellOf = { param($cli) $m = @{}; foreach ($r in (ofSession $cli)) { $j = Get-Content -LiteralPath $r.f -Raw | ConvertFrom-Json; $m[(key $r.f).Split('\')[0]] = @($j.cwd, $j.originCwd, $j.title) }; $m }
+$made = & $spellOf $spellSession; $cloned = & $spellOf $spellClone
+$seatOk = { param($m, $s, $want) $m[$s] -and @($m[$s][0, 1] | Where-Object { -not [string]::Equals($_, $want, [StringComparison]::Ordinal) }).Count -eq 0 }
+check 'new records take the destination seat''s own spelling of the workspace' ($rc -eq 0 -and (& $seatOk $made 'A' $spellA) -and (& $seatOk $made 'B' $spellB) -and (& $seatOk $made 'C' $spellA))
+check 'cloned records take the destination seat''s spelling and keep the app''s title' ((& $seatOk $cloned 'B' $spellB) -and (& $seatOk $cloned 'C' $spellA) -and $cloned['B'][2] -eq 'Titled by the app')
 
 # A record for 'café' (one character) is a different directory from 'cafe' + combining accent: no match.
 $accentRec = $spellRoot + "accent-caf$([char]0xE9)"; $accentCwd = $spellRoot + "accent-cafe$([char]0x301)"
