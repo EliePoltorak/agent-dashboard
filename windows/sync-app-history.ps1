@@ -189,6 +189,9 @@ if (-not (Test-Path -LiteralPath $ccs)) { throw "App session index not found: $c
 
 
 $cwdJson = $Cwd -replace '\\', '\\'
+# A record belongs to this workspace when its cwd is a string equal to -Cwd ignoring case only. Not -eq: that
+# compares by culture, so 'é' and 'e' + combining accent match although they are two NTFS directories.
+function Test-IsWorkspace($recCwd) { $recCwd -is [string] -and [string]::Equals($recCwd, $Cwd, [StringComparison]::OrdinalIgnoreCase) }
 # One run at a time: two runs share temp-file names and the flag baseline. Held until the script ends.
 $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
@@ -461,7 +464,7 @@ $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title }
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
 $unreadableRecs = 0   # records skipped below because they could not be read or parsed
-$cwdSpelling = @{}    # sub -> the app's own spelling of this workspace (the match below ignores case)
+$cwdSpelling = @{}    # sub and "acct|sub" -> the app's own spelling of this workspace (the match below ignores case)
 foreach ($acct in $accts) {
   $subCounts[$acct.Name] = @{}
   foreach ($sub in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
@@ -472,9 +475,10 @@ foreach ($acct in $accts) {
       try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { $unreadableRecs++; continue }
       if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { $unreadableRecs++; continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
-      if ($j.cwd -eq $Cwd) {
+      if (Test-IsWorkspace $j.cwd) {
         $cnt++
-        if (-not $cwdSpelling.ContainsKey($sub.Name)) { $cwdSpelling[$sub.Name] = [string]$j.cwd }
+        if (-not $cwdSpelling.ContainsKey($sub.Name)) { $cwdSpelling[$sub.Name] = $j.cwd }
+        if (-not $cwdSpelling.ContainsKey("$($acct.Name)|$($sub.Name)")) { $cwdSpelling["$($acct.Name)|$($sub.Name)"] = $j.cwd }
         $cli = [string]$j.cliSessionId
         if ($cli) {
           $good = -not ([string]$j.title -match $DateTitleRx)
@@ -489,8 +493,10 @@ foreach ($acct in $accts) {
   }
 }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
-# New records carry the app's spelling of the workspace, not the setting's (which may differ in case).
+# New records carry the app's spelling of the workspace, not the setting's (which may differ in case): the
+# destination folder's own spelling when it has one (pass 2), else this shared one.
 if ($wsGuid) { $cwdJson = $cwdSpelling[$wsGuid] -replace '\\', '\\' }
+$sharedCwdJson = $cwdJson
 # Without an app record for this exact workspace there is no workspace ID to file new records under,
 # so pass 2 adds no record on any seat (flag sync below still runs). Say so, rather than reporting a plain zero.
 if (-not $wsGuid -and -not $Quiet) {
@@ -655,7 +661,7 @@ if (-not $flagSkip) {
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
-      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
+      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { Test-IsWorkspace $_.j.cwd }).Count
       # An un-archive seen this run is remembered at ANY age, and in ANY run (also with -MaxAgeDays 0, another -Cwd, or no
       # transcript here: the baseline is saved for it either way, so a later run could not see it as a change), or the
       # session would be archived once it grows old. (A plain-date entry the user un-archived becomes a kept entry.)
@@ -760,7 +766,7 @@ $byCli = @{}
 foreach ($kv in $bucketRecs.GetEnumerator()) {
   foreach ($r in $kv.Value) {
     $cli = [string]$r.j.cliSessionId
-    if ($r.j.cwd -eq $Cwd -and $cli -and $r.j.lastAssistantUuid) {
+    if ((Test-IsWorkspace $r.j.cwd) -and $cli -and $r.j.lastAssistantUuid) {
       if (-not $byCli.ContainsKey($cli)) { $byCli[$cli] = New-Object System.Collections.Generic.List[object] }
       $byCli[$cli].Add($r)
     }
@@ -856,6 +862,8 @@ foreach ($acct in $accts) {
     }
   }
   $bestSub = Join-Path $acct.FullName $bestSubName
+  $destSpelling = $cwdSpelling["$($acct.Name)|$bestSubName"]
+  $cwdJson = if ($destSpelling) { $destSpelling -replace '\\', '\\' } else { $sharedCwdJson }   # read by Write-Record
 
   # Retitle datestamp-titled records; index what's present.
   # Walks EVERY sub of the account, not just the primary one (records for this cwd can sit in a secondary

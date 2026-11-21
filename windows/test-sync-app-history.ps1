@@ -612,6 +612,40 @@ $beforeUnc = recHash
 run @{ Cwd = $uncWorkspace.TrimEnd('\'); DryRun = $true }
 check 'a UNC root without a separator does not import from a different transcript key' ($rc -eq 0 -and ($out -match '^no transcripts') -and (recHash) -eq $beforeUnc)
 
+# Two seats spell one workspace in different case: each seat's new records take that seat's own spelling,
+# and a seat with no record of it takes the shared (first-seen) spelling.
+$spellRoot = [IO.Path]::GetPathRoot($PSHOME)
+$spellA = $spellRoot + 'Sync-Spelling-Fixture'; $spellB = $spellRoot + 'SYNC-SPELLING-FIXTURE'
+$spellProj = "$sb\home\.claude\projects\$($spellA -creplace '[^A-Za-z0-9]', '-')"
+New-Item -ItemType Directory $spellProj -Force | Out-Null
+foreach ($pair in @(@('A', $spellA), @('B', $spellB))) {
+  $dir = Join-Path (Join-Path $ccs $pair[0]) 'spelling-fixture'
+  New-Item -ItemType Directory $dir -Force | Out-Null
+  $id = "local_$([guid]::NewGuid())"
+  @{ sessionId = $id; cliSessionId = [guid]::NewGuid().ToString(); cwd = $pair[1]; originCwd = $pair[1]; title = 'Synthetic session' } |
+    ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $dir "$id.json") -NoNewline
+}
+$spellSession = [guid]::NewGuid().ToString()
+Set-Content -LiteralPath (Join-Path $spellProj "$spellSession.jsonl") (@('{"type":"user","message":{"role":"user","content":"test per-seat workspace spelling"}}') + $asst)
+run @{ Cwd = $spellA.ToLowerInvariant() }
+$spellBySeat = @{}
+foreach ($r in (ofSession $spellSession)) { $j = Get-Content -LiteralPath $r.f -Raw | ConvertFrom-Json; $spellBySeat[(key $r.f).Split('\')[0]] = @($j.cwd, $j.originCwd) }
+$seatOk = { param($s, $want) $spellBySeat[$s] -and @($spellBySeat[$s] | Where-Object { -not [string]::Equals($_, $want, [StringComparison]::Ordinal) }).Count -eq 0 }
+check 'new records take the destination seat''s own spelling of the workspace' ($rc -eq 0 -and (& $seatOk 'A' $spellA) -and (& $seatOk 'B' $spellB) -and (& $seatOk 'C' $spellA))
+
+# A record for 'café' (one character) is a different directory from 'cafe' + combining accent: no match.
+$accentRec = $spellRoot + "accent-caf$([char]0xE9)"; $accentCwd = $spellRoot + "accent-cafe$([char]0x301)"
+$accentProj = "$sb\home\.claude\projects\$($accentCwd -creplace '[^A-Za-z0-9]', '-')"
+$accentDir = Join-Path (Join-Path $ccs 'A') 'accent-fixture'
+New-Item -ItemType Directory $accentProj, $accentDir -Force | Out-Null
+$id = "local_$([guid]::NewGuid())"
+@{ sessionId = $id; cliSessionId = [guid]::NewGuid().ToString(); cwd = $accentRec; originCwd = $accentRec; title = 'Synthetic session' } |
+  ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $accentDir "$id.json") -NoNewline
+Set-Content -LiteralPath (Join-Path $accentProj "$([guid]::NewGuid()).jsonl") (@('{"type":"user","message":{"role":"user","content":"test a combining accent"}}') + $asst)
+$beforeAccent = recHash
+run @{ Cwd = $accentCwd; DryRun = $true }
+check 'a record spelled with a precomposed accent does not match a combining-accent workspace' ($rc -eq 0 -and ($out -match '^no app record on any seat has workspace') -and ($out -match '^WOULD: added 0,') -and (recHash) -eq $beforeAccent)
+
 "$fail failure(s)"
 if ($fail -eq 0) { Remove-Item -LiteralPath $sb -Recurse -Force } else { "sandbox kept: $sb" }
 exit [int]($fail -gt 0)
