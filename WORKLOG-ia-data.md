@@ -27,3 +27,6 @@ usage-sim.js, README-claude-rotator.md. Parallel branch ia-settings owns dashboa
   1.3 s CIM probe; the exe version gives the same answer) -> ponytail-skipped.
   NB: files are CRLF; Edit-tool/py edits flip them, so I run C:\Dev\Temp\crlf-fix.py on the three CRLF files before each commit.
   Existing sample() tests stub `read_gemini`; I added a `read_gemini_api=NOAPI_` stub next to them so they never touch the real login (test-only change).
+- [A3 BEFORE numbers, serial refresh at ac89511+A1, this machine, POST /api/refresh from a spare-port server (8797, temp state dir)]
+  4 runs: 13.1 s, 8.8 s, 23.1 s, 11.4 s (median ~12.3 s). Component times alone: claude probe 7.8 s, codex usage cmd 3.1 s, grok 0.7 s, muse 1.0 s, gemini 1.0 s
+  (sum ~13.6 s; concurrent ceiling = the slowest, claude, ~7.8 s).
