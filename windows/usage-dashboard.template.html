@@ -331,7 +331,7 @@ function accounts(p) {
   const anyNote = p.limits.length && p.accounts.some(a => a.note), anyBank = quotaBankedTotal(p) != null || p.accounts.some(a => (a.resets || []).length || a.resetPending || a.bankedNote), anySw = D.app && p.accounts.some(a => (a.switch || []).length);
   const rows = p.accounts.map(a => {
     const lvT = lv => lv ? ` title="${{ ok: 'Allowed', warn: 'Close to the limit', bad: 'Capped' }[lv]}"` : '';
-    const body = (w, lv) => { const pct = w.used == null ? null : Math.round(w.used * 100); return `${pct == null ? '–' : `<span class="pv">${pct}%${lv === 'bad' ? ' · capped' : ''}</span><span class="bar" aria-hidden="true"><i style="width:${Math.min(pct, 100)}%"></i></span>`}${w.assumed ? '<small>assumed after reset</small>' : ''}${winAge(w)}${w.reset ? `<small>resets ${esc(fmtRS(w.reset))}</small>` : ''}`; };
+    const body = (w, lv) => { const pct = w.used == null ? null : Math.round(w.used * 100); return `${pct == null ? '–' : `<span class="pv">${pct}% used${lv === 'bad' ? ' · capped' : ''}</span><span class="bar" aria-hidden="true"><i style="width:${Math.min(pct, 100)}%"></i></span>`}${w.assumed ? '<small>assumed after reset</small>' : ''}${winAge(w)}${w.reset ? `<small>resets ${esc(fmtRS(w.reset))}</small>` : ''}`; };
     const cells = cols.map(c => {
       const ws = c.ids.map(id => a.windows.find(x => x.id === id));
       if (!grouped) { const w = ws[0]; if (!w) return '<td>–</td>'; const lv = quotaLevel(p.id, w); return `<td class="lv-${lv || 'na'}"${lvT(lv)}>${body(w, lv)}</td>`; }
