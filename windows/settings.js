@@ -147,7 +147,7 @@
     const h = s.health || {};
     return `<div class="seat"><div class="nm"><b>${L}</b>${badges}</div>` +
       `<div>${s.plan ? `<span class="muted">${esc(s.plan)}</span>` : ''}</div>` +
-      `<div class="meta"><span>${emailsOn() ? esc(s.email || 'no address') : 'address hidden'}</span><span>${pct(s.headroom)}</span>` +
+      `<div class="meta">${emailsOn() && s.email ? `<span>${esc(s.email)}</span>` : ''}<span>${pct(s.headroom)}</span>` +
       `<label>Counts as <input type="number" min="0" max="100" step="0.5" value="${esc(s.weight)}" data-w="${L}" aria-label="Weight of seat ${L}"${dis()}> seat(s)</label>` +
       (h.ok === false || h.note ? `<span class="${h.ok === false ? 'bad' : ''}">${esc(h.note || 'problem reading this seat')}</span>` : '') + `</div>` +
       `<div class="acts">${sw.join('')}` +
