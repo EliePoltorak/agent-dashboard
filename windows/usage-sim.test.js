@@ -226,11 +226,19 @@ assert.strictEqual(quotaShare(600, 600), 100);
   assert.strictEqual(quotaNoPool({ accounts: [] }), '');
   const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
   const src = tpl.slice(tpl.indexOf('function panel(p, W) {'), tpl.indexOf('\nfunction render('));
-  const deps = { ui: { lim: {} }, D: { app: true }, esc: s => String(s), sh: x => x, quotaBankedTotal: () => null, quotaInUse: () => '', quotaBestBtn: () => '',
+  const nsrc = tpl.slice(tpl.indexOf('const nacc = '), tpl.indexOf('\n', tpl.indexOf('const nacc = ')));
+  const nacc = new Function(nsrc + '\nreturn nacc;')();
+  const deps = { nacc, ui: { lim: {} }, D: { app: true }, esc: s => String(s), sh: x => x, quotaBankedTotal: () => null, quotaInUse: () => '', quotaBestBtn: () => '',
     swBusy: () => false, rateFor: () => ({}), seatsTxt: () => '', fr: x => x, chart: () => '', nm: a => a.label, accounts: () => '<ACCOUNTS>', quotaNoPool };
   const panel = new Function(...Object.keys(deps), src + '\nreturn panel;')(...Object.values(deps));
   const zero = panel({ id: 'claude', name: 'Claude', total: 2, limits: [], accounts: [{ label: 'A', w: 0, note: '' }, { label: 'B', w: 0, note: '' }] }, 600);
   assert.ok(zero.includes('<ACCOUNTS>') && zero.includes('No seats counted in the pool (all weights are 0).') && !zero.includes('No usage data yet.'), zero);
+  // a signed-out program (Kimi, Muse) is 0 accounts, not its placeholder row; a blob without `signed` falls back to total
+  assert.strictEqual(nacc({ total: 1, signed: 0 }), 0);
+  assert.strictEqual(nacc({ total: 3, signed: 2 }), 2);
+  assert.strictEqual(nacc({ total: 3 }), 3);
+  assert.ok(panel({ id: 'kimi', name: 'Kimi', total: 1, signed: 0, limits: [], accounts: [{ label: 'kimi', note: 'x' }] }, 600).includes('0 accounts'));
+  assert.ok(panel({ id: 'grok', name: 'xAI', total: 1, signed: 1, limits: [], accounts: [{ label: 'grok', note: '' }] }, 600).includes('1 account<'));
   const none = panel({ id: 'grok', name: 'xAI', total: 1, limits: [], accounts: [{ label: 'grok', note: '' }] }, 600);
   assert.ok(none.includes('<ACCOUNTS>') && none.includes('No usage data yet.'), none);
 }
