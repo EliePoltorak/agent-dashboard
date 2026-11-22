@@ -86,3 +86,13 @@ Claude app-seat keepalive (Ready), Claude app-seat heartbeat (Ready), Claude rot
 
 ## Progress
 - [x] Research + inventory (this file)
+- [x] Live-only Codex scripts brought into the repo (a138ede); auto-resume marker in claude-cli-account.ps1, verified by dot-sourcing against a temp USERPROFILE.
+- [x] dashboard_settings.py + test-dashboard-settings.py (39 tests) + hooks in usage-history.py (import + 2 delegations) and the template (one script tag) (53eb1fd).
+- [x] settings.js drawer; walked through in the Browser pane against a sandboxed harness (fake home, fake credential API, fake schtasks, stub rotators; port 8798, stopped by PID):
+      remove/restore, a job with running/done states, Gemini and Automation tabs, phone width light theme. Fixes found there: invisible primary button text, drawer width on phones, results shown inside the drawer.
+- [x] Real checks, read-only: process detection (Claude app = True now), schtasks state matches Get-ScheduledTask, listing matches this PC (Claude A-F, Codex A-D, Gemini/Grok login found, Kimi absent, Muse unsupported).
+      WinCred ctypes layer round-tripped on one throwaway credential of its own (deleted).
+- [x] usage-history.py --selftest still ok.
+- Deviation: label regex is `^[A-Za-z0-9][A-Za-z0-9_-]{0,31}$` (no leading - or _): a leading `-` is read as an option by the rotators' own parsers (`--import -x file` skips the label), and they ignore `_`-prefixed folders.
+- Deviation: no static gear button in the template; settings.js adds it into `.top` (the page rebuilds #app wholesale).
+- Not verified: a real switch through the real rotators from the panel (they change the real login and the HKCU CLAUDE_CODE_OAUTH_TOKEN, so the panel was only run against stub rotators); a real Kimi login; a real Antigravity/Grok seat swap.
