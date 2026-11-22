@@ -367,14 +367,14 @@ function render() {
   if (ui.tab !== 'all' && !ps.some(p => p.id === ui.tab)) ui.tab = 'all';
   const tot = ps.reduce((a, p) => a + nacc(p), 0), ld = ps.reduce((a, p) => a + p.loaded, 0);
   const app = $('app'), narrow = innerWidth < 600;
-  const W = Math.max(280, Math.min(1100, app.clientWidth || 1068) - 32 - (narrow ? 28 : 40));
+  let W = Math.max(280, Math.min(1100, app.clientWidth || 1068) - 32 - (narrow ? 28 : 40));
   const d0 = new Date((D.now - 7 * 86400 + off) * 1000); d0.setHours(0, 0, 0, 0);
   const d1 = new Date(d0); d1.setDate(d1.getDate() + 14);
   const themeIco = { system: 'auto', light: 'sun', dark: 'moon' }[ui.theme];
   const nextTheme = { system: 'light', light: 'dark', dark: 'system' }[ui.theme];
   const seg = (a, items, cur, dis) => items.map(([v, l]) => `<button data-a="${a}" data-v="${v}" aria-pressed="${v === cur}"${v === dis ? ' disabled title="Typical is a projection input; it has no line over time"' : ''}>${l}</button>`).join('');
   const show = ps.filter(p => ui.tab === 'all' || p.id === ui.tab);
-  app.innerHTML =
+  const draw = () => { app.innerHTML =
     `<div class="top"><button data-a="theme" aria-label="Theme: ${ui.theme}, switch to ${nextTheme}" title="Theme: ${ui.theme}">${ico(themeIco)}</button></div>` +
     `<div class="row t"><h1>Agent Dashboard</h1><span class="sub">${tot} credential${tot === 1 ? '' : 's'} · ${ld} loaded</span><div class="btns grow">` +
     `<button data-a="emails">${ico('eye')}${ui.emails ? 'Hide emails' : 'Show emails'}</button>` +
@@ -388,7 +388,12 @@ function render() {
     `<div class="seg" role="group" aria-label="Rate over"><span class="lbl" style="padding:6px 10px">Rate over</span>${seg('win', [['typ', 'Typical'], ['1', '1h'], ['3', '3h'], ['6', '6h'], ['24', '24h']], winKey(), ui.view === 'drain' ? 'typ' : '')}</div>` +
     `<label class="lbl">Future usage <select data-a="mult">${MULTS.map(([v, l]) => `<option value="${v}"${v === ui.mult ? ' selected' : ''}>${l}</option>`).join('')}</select></label>` +
     `<div class="range grow"><span class="muted">${esc(fmtD(d0 / 1000))} to ${esc(fmtD(d1 / 1000 - 43200))}</span><button class="i" data-a="shift" data-v="-7" aria-label="Earlier">${ico('left')}</button><button data-a="today">Today</button><button class="i" data-a="shift" data-v="7" aria-label="Later">${ico('right')}</button></div></div>` +
-    (show.length ? show.map(p => panel(p, W)).join('') : '<section class="panel"><p class="muted">No credentials found.</p></section>');
+    (show.length ? show.map(p => panel(p, W)).join('') : '<section class="panel"><p class="muted">No credentials found.</p></section>'); };
+  draw();
+  // The chart is drawn at 1:1 so its text keeps one size: W is only an estimate of the panel's width (a scrollbar appearing, a media query), so measure the real
+  // chart box and, when it differs, draw once more at that width. A viewBox wider or narrower than the box would scale every label with it.
+  const box = app.querySelector('.chart');
+  if (box && Math.abs(box.clientWidth - W) > 1) { W = Math.max(200, box.clientWidth); charts = {}; draw(); }
   pcacheShow(document.getElementById('pcerr'), D.pcacheError);
   for (const el of app.querySelectorAll('.chart')) hover(el);
 }
@@ -625,8 +630,9 @@ $('swdlg').addEventListener('close', e => { if (sw && !sw.busy && !e.currentTarg
 $('swdlg').addEventListener('click', e => { if (e.target === e.currentTarget && sw && !sw.busy) e.currentTarget.close(); });
 document.addEventListener('change', e => { if (e.target.dataset && e.target.dataset.a === 'mult') act('mult', e.target.value, e.target); });
 document.addEventListener('toggle', e => { const d = e.target; if (d.tagName === 'DETAILS' && d.dataset.p) closed[d.dataset.p] = !d.open; }, true);
-let rt, lastW = innerWidth;
-addEventListener('resize', () => { if (innerWidth === lastW) return; lastW = innerWidth; clearTimeout(rt); rt = setTimeout(render, 120); });
+let rt, lastW = $('app').clientWidth;
+// Watch the page's own width rather than the window's: the emulated and the docked panes change it without a window resize event, and a chart drawn for another width scales its text.
+new ResizeObserver(() => { const w = $('app').clientWidth; if (w === lastW) return; lastW = w; clearTimeout(rt); rt = setTimeout(render, 120); }).observe($('app'));
 
 if (D.app) setInterval(() => { if (!busy && !updating) loadData(true); }, 60000);      // quietly: no spinner, no message, no redraw when nothing changed
 else setInterval(() => location.reload(), 300000);                                      // opened from its file there is no server to ask: read the file again
