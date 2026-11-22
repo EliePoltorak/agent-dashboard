@@ -1048,6 +1048,16 @@ def update_decision(names, auto, busy, tried, now):
     return "apply"
 
 
+def in_checkout(here=None):
+    """This script sits in a git checkout (its own folder or the one above holds a .git: a clone, or a worktree of one) -> True. Such a copy is updated with git, never with
+    rotator-sync: rotator-sync only refuses its own clone, so a developer's other worktree would have its working files replaced with GitHub's."""
+    here = here or HERE
+    return any(os.path.exists(os.path.join(d, ".git")) for d in (here, os.path.dirname(os.path.abspath(here))))
+
+
+UPDATE_CHECKOUT = "This copy of the dashboard is a git checkout: update it with git pull there."
+
+
 def update_outcome(rc, out):
     """rotator-sync --pull's exit code and output -> (ok, text for the page, the server's own file was replaced, so the server has to restart). Its output lists
     "replaced <file>" / "added <file>" per file; its last line is its error when it failed."""
@@ -3078,6 +3088,8 @@ class Store:
         "text", "restart"}. The exclusive lock is kept while a restart is on its way; the restart gives it back only when it could not happen."""
         now = time.time() if now is None else now
         script = os.path.join(HERE, "rotator-sync.py")
+        if in_checkout():
+            return {"outcome": "error", "text": UPDATE_CHECKOUT, "restart": False}
         if not os.path.isfile(script):
             return {"outcome": "error", "text": "rotator-sync.py is missing next to the dashboard.", "restart": False}
         if not self.refreshing.acquire(blocking=False):
@@ -3130,6 +3142,8 @@ class Store:
     def auto_update(self, now, cfg=None):
         """The sampler's share: install what GitHub has once the drift check has found something, unless autoUpdate is off, anything else is running, or the same files
         failed less than UPDATE_RETRY ago. -> what update_decision said."""
+        if in_checkout():
+            return "checkout"
         names = [str(x) for x in read_drift().get("differing") or []]
         act = update_decision(names, autoupdate_enabled(cfg), self.refreshing.locked() or self.refresh_running(), load_pcache().get("update_try"), now)
         if act == "apply":
@@ -4427,7 +4441,8 @@ def selftest():
         cn_ = build([dict(rec_, codex={"C": got_["C"]})], N + 9, {}, False, {})["providers"][0]["accounts"]
         assert cn_[0]["ok"] and cn_[0]["note"] == "" and cn_[0]["windows"], cn_       # the reading shows on the page
         # the desktop app's page does not carry the meta refresh (removing the tag in script does not cancel the reload the browser already scheduled)
-        assert '<meta http-equiv="refresh"' not in page_html({"app": True}) and '<meta http-equiv="refresh" content="300">' in page_html({"app": False}) and '<meta http-equiv="refresh"' in page_html({})
+        assert '<meta http-equiv="refresh"' not in page_html({"app": True}) and '<meta http-equiv="refresh"' not in page_html({"app": False}) and '<meta http-equiv="refresh"' not in page_html({})
+        assert "setInterval(() => location.reload(), 300000)" in page_html({"app": False}) and "loadData(true)" in page_html({"app": True})       # the app polls /api/data; a page opened from its file reloads itself
         calls_, keep_ = [], (sample, load, save)                                        # the one-shot run (no --serve): sample first, then load, then reconcile
         try:
             globals()["sample"] = lambda now, force=False: calls_.append("sample") or {"t": N + 9, "codex": {"A": {"ts": N - 100, "w": 0.1}}}
@@ -4950,6 +4965,13 @@ def selftest():
             open(os.path.join(ut_, "usage-sim.js"), "w").write("c")
             assert build_id(ut_) != id1_ and build_id(os.path.join(ut_, "none")) not in (id1_, build_id(ut_))
             assert SERVER_SIG.startswith(b'"""usage-history') and build([], 5, {}, False, {"build": "abc", "update": {"auto": True}})["build"] == "abc" and "build" not in build([], 5, {}, False, {})
+            # a git checkout (a clone, or a worktree of one) is never updated by the dashboard: that is git's job, and rotator-sync would replace its working files
+            gd_ = os.path.join(ut_, "co", "windows")
+            os.makedirs(gd_)
+            assert not in_checkout(gd_)
+            open(os.path.join(ut_, "co", ".git"), "w").write("gitdir: x")             # a worktree's .git is a file
+            assert in_checkout(gd_) and in_checkout(os.path.join(ut_, "co"))
+            assert not in_checkout(ut_) and in_checkout(os.path.join(os.path.dirname(HERE), "windows")) == any(os.path.exists(os.path.join(d, ".git")) for d in (HERE, os.path.dirname(HERE)))
             # Store.update: rotator-sync --pull (injected here), then a restart only when the server's own file was replaced
             sd_ = os.path.join(ut_, "state")
             os.makedirs(sd_)
@@ -5028,6 +5050,15 @@ def selftest():
                 # no rotator-sync next to the dashboard
                 os.remove(os.path.join(ut_, "rotator-sync.py"))
                 assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "error" and not runs_
+                # run from a git checkout: neither the button nor the automatic update touches it
+                open(os.path.join(ut_, "rotator-sync.py"), "w").write("")
+                os.makedirs(os.path.join(ut_, "gitcopy"))
+                open(os.path.join(ut_, ".git"), "w").write("gitdir: x")
+                assert us.update(run=fake_run(0, "replaced usage-history.py"), delay=0) == {"outcome": "error", "text": UPDATE_CHECKOUT, "restart": False} and not runs_ and not us.refreshing.locked()
+                open(os.path.join(sd_, ".rotator-drift.json"), "w").write(json.dumps({"differing": ["usage-history.py"]}))
+                assert us.auto_update(1, os.path.join(ut_, "rotator.local.json")) == "checkout"
+                os.remove(os.path.join(ut_, ".git"))
+                os.remove(os.path.join(ut_, "rotator-sync.py"))
                 # POST /api/update
                 ups_ = Store.__new__(Store)
                 ups_.lock, ups_.refreshing, ups_.blob = threading.RLock(), threading.Lock(), {}

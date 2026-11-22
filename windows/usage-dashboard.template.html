@@ -3,15 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="refresh" content="300">
 <title>Agent Dashboard</title>
 <link rel="manifest" href="/manifest.webmanifest">
 <link rel="icon" href="/icon.svg" type="image/svg+xml">
 <meta name="theme-color" content="#0c0a09">
 <style>
-:root{color-scheme:dark;--ok:#4ade80;--caution:#facc15;--bad:#f87171;--bg:#0b0b0c;--panel:#141415;--ink:#f4f4f5;--ink2:#d4d4d8;--muted:#8b8b94;--grid:#26262a;--btn:#1c1c1f;--btnon:#f4f4f5;--btnonink:#0b0b0c;--warn:#fbbf24;--c-claude:#f4906b;--c-codex:#6ea8ff;--c-grok:#a1a1aa;--c-gemini:#a78bfa;--c-muse:#34d399;--bdg-cli:#60a5fa;--bdg-cli-ink:#0b1220;--bdg-app:#a78bfa;--bdg-app-ink:#120a26}
-@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;--ok:#15803d;--caution:#a16207;--bad:#b91c1c;--bg:#f7f7f5;--panel:#fff;--ink:#18181b;--ink2:#3f3f46;--muted:#71717a;--grid:#e4e4e7;--btn:#efeff0;--btnon:#18181b;--btnonink:#fff;--warn:#b45309;--c-claude:#c2410c;--c-codex:#2563eb;--c-grok:#52525b;--c-gemini:#7c3aed;--c-muse:#047857;--bdg-cli:#1d4ed8;--bdg-cli-ink:#fff;--bdg-app:#6d28d9;--bdg-app-ink:#fff}}
-:root[data-theme="light"]{color-scheme:light;--ok:#15803d;--caution:#a16207;--bad:#b91c1c;--bg:#f7f7f5;--panel:#fff;--ink:#18181b;--ink2:#3f3f46;--muted:#71717a;--grid:#e4e4e7;--btn:#efeff0;--btnon:#18181b;--btnonink:#fff;--warn:#b45309;--c-claude:#c2410c;--c-codex:#2563eb;--c-grok:#52525b;--c-gemini:#7c3aed;--c-muse:#047857;--bdg-cli:#1d4ed8;--bdg-cli-ink:#fff;--bdg-app:#6d28d9;--bdg-app-ink:#fff}
+:root{color-scheme:dark;--ok:#4ade80;--caution:#facc15;--bad:#f87171;--bg:#0b0b0c;--panel:#141415;--ink:#f4f4f5;--ink2:#d4d4d8;--muted:#8b8b94;--grid:#26262a;--btn:#1c1c1f;--btnon:#f4f4f5;--btnonink:#0b0b0c;--warn:#fbbf24;--c-claude:#f4906b;--c-codex:#6ea8ff;--c-grok:#a1a1aa;--c-gemini:#a78bfa;--c-muse:#34d399;--c-kimi:#f472b6;--bdg-cli:#60a5fa;--bdg-cli-ink:#0b1220;--bdg-app:#a78bfa;--bdg-app-ink:#120a26}
+@media (prefers-color-scheme:light){:root:not([data-theme="dark"]){color-scheme:light;--ok:#15803d;--caution:#a16207;--bad:#b91c1c;--bg:#f7f7f5;--panel:#fff;--ink:#18181b;--ink2:#3f3f46;--muted:#71717a;--grid:#e4e4e7;--btn:#efeff0;--btnon:#18181b;--btnonink:#fff;--warn:#b45309;--c-claude:#c2410c;--c-codex:#2563eb;--c-grok:#52525b;--c-gemini:#7c3aed;--c-muse:#047857;--c-kimi:#be185d;--bdg-cli:#1d4ed8;--bdg-cli-ink:#fff;--bdg-app:#6d28d9;--bdg-app-ink:#fff}}
+:root[data-theme="light"]{color-scheme:light;--ok:#15803d;--caution:#a16207;--bad:#b91c1c;--bg:#f7f7f5;--panel:#fff;--ink:#18181b;--ink2:#3f3f46;--muted:#71717a;--grid:#e4e4e7;--btn:#efeff0;--btnon:#18181b;--btnonink:#fff;--warn:#b45309;--c-claude:#c2410c;--c-codex:#2563eb;--c-grok:#52525b;--c-gemini:#7c3aed;--c-muse:#047857;--c-kimi:#be185d;--bdg-cli:#1d4ed8;--bdg-cli-ink:#fff;--bdg-app:#6d28d9;--bdg-app-ink:#fff}
 *{box-sizing:border-box}
 body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1100px;margin:0 auto;padding:16px}
@@ -42,6 +41,13 @@ select{background:var(--panel);color:var(--ink);padding:9px 12px}
 .range{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
 .range button{background:var(--panel);padding:8px 14px}
 .range button.i{padding:8px 10px;background:none}
+.tabw{display:inline-flex;align-items:center}
+.tabs .ri{background:none;padding:0;width:28px;height:28px;justify-content:center;border-radius:8px;color:var(--muted)}
+.tabs .ri svg{width:15px;height:15px}
+.tabs .ri:hover:not(:disabled){color:var(--ink)}
+.ri.spin svg{animation:spin 1s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){.ri.spin svg{animation:none}}
 .dot{width:10px;height:10px;border-radius:50%;background:var(--acc);display:inline-block;flex:none}
 #pcerr{box-sizing:border-box;max-width:1068px;margin:16px auto 0}@media(max-width:1100px){#pcerr{margin:16px 16px 0}}
 .pcerr{margin-top:12px;background:var(--panel);border-radius:12px;border-left:4px solid var(--warn);padding:10px 14px;font-size:14px;color:var(--ink2)}
@@ -52,6 +58,10 @@ select{background:var(--panel);color:var(--ink);padding:9px 12px}
 .drift .dl{margin-left:auto;display:inline-flex;gap:10px;align-items:center;color:var(--muted)}
 .drift .dl b{font-weight:500;color:var(--ink2);text-decoration:underline;text-underline-offset:3px}
 .drift .dd{padding:2px 0 10px;color:var(--ink2)}
+.drift.upd{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:center;color:var(--ink2);padding:8px 14px}
+.drift.upd svg{width:18px;height:18px;fill:none;stroke:var(--warn);stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.drift .ub{margin-left:auto;padding:4px 12px;font-size:13px;color:var(--ink)}
+.drift summary .ub{margin-left:0}
 .drift .dd p{margin:8px 0}
 .drift ul{list-style:none;margin:8px 0;padding:0;display:flex;flex-wrap:wrap;gap:6px}
 .drift li{background:var(--btn);border-radius:6px;padding:2px 8px;font-size:13px}
@@ -82,7 +92,10 @@ summary{cursor:pointer;color:var(--muted);padding:4px 0}
 table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
 th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--grid);white-space:nowrap}
 th{color:var(--muted);font-weight:500}
-td.lv-ok{--lvc:var(--ok)}td.lv-warn{--lvc:var(--caution)}td.lv-bad{--lvc:var(--bad)}
+td.lv-ok,.gw.lv-ok{--lvc:var(--ok)}td.lv-warn,.gw.lv-warn{--lvc:var(--caution)}td.lv-bad,.gw.lv-bad{--lvc:var(--bad)}
+tr.gr td{vertical-align:top}
+.gw+.gw{margin-top:8px;padding-top:8px;border-top:1px solid var(--grid)}
+.gw .gl{display:block;color:var(--muted);font-size:12px}
 .pv{color:var(--lvc,var(--ink))}
 .lv-bad .pv{font-weight:600}
 .bar{display:block;height:4px;min-width:72px;margin-top:4px;border-radius:2px;background:var(--grid);overflow:hidden}
@@ -147,6 +160,9 @@ const ui = {
   lim: (() => { try { return JSON.parse(store.get('lim', '{}')) || {}; } catch (e) { return {}; } })()
 };
 let off = 0, busy = false, msg = '', charts = {};
+const BUILD = D.build;       // the server build this page came from: a different one in the data means the dashboard was updated, and the page reloads itself
+const prb = {};              // provider id -> a refresh of just that provider is running
+let updating = false, lastText = '';
 let sw = null;   // the switch in progress or awaiting confirmation: {pid, role, seat, busy}
 const swBusy = () => busy || !!(sw && sw.busy);
 const closed = {}; // provider id -> accounts <details> was collapsed by the viewer
@@ -191,12 +207,21 @@ function pcacheShow(el, m) {
   if (!el || el.dataset.m === m) return;
   el.dataset.m = m; el.textContent = m; el.hidden = !m;                              // textContent: the message is never parsed as markup
 }
-function driftRow(d) {
-  return `<details class="drift" data-p="drift"${closed.drift === false ? ' open' : ''}><summary>${ico('warn')}<span>Update available from GitHub (${d.n} file${d.n === 1 ? '' : 's'} differ${d.n === 1 ? 's' : ''})</span>` +
-    `<span class="dl">${d.checked ? `<span>Checked ${esc(ago(d.checked))}</span>` : ''}<b>Details</b></span></summary><div class="dd">` +
-    `<p>The rotator files on this PC differ from the latest version on GitHub:</p>` +
-    `<ul>${d.names.map(n => `<li>${esc(n)}</li>`).join('')}</ul>` +
-    `<p>To update, open a terminal in the rotator folder and run <code>rotator-sync --pull</code>. It downloads the new versions and keeps a backup of every file it replaces (<code>&lt;name&gt;.bak-sync-&lt;date&gt;</code>). Your own settings (<code>rotator.local.json</code>) are never touched.</p></div></details>`;
+function driftRow(d, up, ctx) {
+  up = up || {}; ctx = ctx || {};
+  const act = (a, t) => ctx.app ? `<button class="ub" data-a="${a}"${ctx.updating ? ' disabled' : ''}>${t}</button>` : '';
+  if (ctx.updating || up.state === 'running') return `<div class="drift upd" role="status">${ico('reload')}<span>Updating… the dashboard restarts and reloads by itself.</span></div>`;
+  if (d || up.state === 'failed') {
+    const n = d ? d.n : 0, sum = up.state === 'failed' ? `The last update did not install: ${esc(up.text)}`
+      : `Update available from GitHub (${n} file${n === 1 ? '' : 's'} differ${n === 1 ? 's' : ''})`;
+    return `<details class="drift" data-p="drift"${closed.drift === false ? ' open' : ''}><summary>${ico('warn')}<span>${sum}</span>` +
+      `<span class="dl">${d && d.checked ? `<span>Checked ${esc(ago(d.checked))}</span>` : ''}${act('update', 'Update now')}<b>Details</b></span></summary><div class="dd">` +
+      (d ? `<p>The rotator files on this PC differ from the latest version on GitHub:</p><ul>${d.names.map(x => `<li>${esc(x)}</li>`).join('')}</ul>` : '') +
+      `<p>${up.auto === false ? 'Automatic updates are off. ' : 'It installs by itself when nothing else is running. '}An update keeps a backup of every file it replaces (<code>&lt;name&gt;.bak-sync-&lt;date&gt;</code>) and never touches your own settings (<code>rotator.local.json</code>).</p></div></details>`;
+  }
+  const dn = up.done;
+  if (dn && ctx.now - dn.at < 600 && ctx.dismissed !== String(dn.at)) return `<div class="drift upd" role="status">${ico('reload')}<span>Updated${dn.sha ? ' to ' + esc(dn.sha) : ''}.</span>${act('updone', 'Dismiss')}</div>`;
+  return '';
 }
 
 function applyTheme() {
@@ -297,18 +322,25 @@ const resetBtn = (p, a) => !D.app || !p.canReset || D.pcacheError ? '' : p.id ==
 function accounts(p) {
   const wl = {}, ids = [];
   for (const a of p.accounts) for (const w of a.windows) if (!wl[w.id]) { wl[w.id] = w.label; ids.push(w.id); }
-  ids.sort((a, b) => 'swfm'.indexOf(a) - 'swfm'.indexOf(b));
+  ids.sort((a, b) => 'swfmc'.indexOf(a) - 'swfmc'.indexOf(b));
+  const grouped = ids.some(id => wl[id].includes(' · ')), cols = [];
+  for (const id of ids) {
+    const k = grouped ? wl[id].indexOf(' · ') : -1, head = k > 0 ? wl[id].slice(0, k) : wl[id], c = grouped && cols.find(x => x.head === head);
+    if (c) { c.ids.push(id); c.subs.push(wl[id].slice(k + 3)); } else cols.push({ head, ids: [id], subs: [k > 0 ? wl[id].slice(k + 3) : ''] });
+  }
   const anyNote = p.limits.length && p.accounts.some(a => a.note), anyBank = quotaBankedTotal(p) != null || p.accounts.some(a => (a.resets || []).length || a.resetPending || a.bankedNote), anySw = D.app && p.accounts.some(a => (a.switch || []).length);
   const rows = p.accounts.map(a => {
-    const cells = ids.map(id => {
-      const w = a.windows.find(x => x.id === id);
-      if (!w) return '<td>–</td>';
-      const lv = quotaLevel(p.id, w), pct = w.used == null ? null : Math.round(w.used * 100);
-      return `<td class="lv-${lv || 'na'}"${lv ? ` title="${{ ok: 'Allowed', warn: 'Close to the limit', bad: 'Capped' }[lv]}"` : ''}>${pct == null ? '–' : `<span class="pv">${pct}%${lv === 'bad' ? ' · capped' : ''}</span><span class="bar" aria-hidden="true"><i style="width:${Math.min(pct, 100)}%"></i></span>`}${w.assumed ? '<small>assumed after reset</small>' : ''}${winAge(w)}${w.reset ? `<small>resets ${esc(fmtRS(w.reset))}</small>` : ''}</td>`;
+    const lvT = lv => lv ? ` title="${{ ok: 'Allowed', warn: 'Close to the limit', bad: 'Capped' }[lv]}"` : '';
+    const body = (w, lv) => { const pct = w.used == null ? null : Math.round(w.used * 100); return `${pct == null ? '–' : `<span class="pv">${pct}%${lv === 'bad' ? ' · capped' : ''}</span><span class="bar" aria-hidden="true"><i style="width:${Math.min(pct, 100)}%"></i></span>`}${w.assumed ? '<small>assumed after reset</small>' : ''}${winAge(w)}${w.reset ? `<small>resets ${esc(fmtRS(w.reset))}</small>` : ''}`; };
+    const cells = cols.map(c => {
+      const ws = c.ids.map(id => a.windows.find(x => x.id === id));
+      if (!grouped) { const w = ws[0]; if (!w) return '<td>–</td>'; const lv = quotaLevel(p.id, w); return `<td class="lv-${lv || 'na'}"${lvT(lv)}>${body(w, lv)}</td>`; }
+      const parts = ws.map((w, i) => { if (!w) return ''; const lv = quotaLevel(p.id, w); return `<div class="gw lv-${lv || 'na'}"${lvT(lv)}><span class="gl">${esc(c.subs[i])}</span>${body(w, lv)}</div>`; }).join('');
+      return `<td>${parts || '–'}</td>`;
     }).join('');
-    return `<tr><td>${nm(a)}</td>${cells}${anyBank ? `<td class="bk"${bkTitle(a)}>${quotaBankedCell(a, D.now, fmtDT, esc)}${resetBtn(p, a)}</td>` : ''}<td${readAge(a)}>${a.readAt ? 'Read ' + esc(ago(a.readAt)) : '–'}</td>${anySw ? `<td>${quotaSwitchBtns(p, a, swBusy(), esc)}</td>` : ''}${anyNote ? `<td class="nt">${esc(a.note)}</td>` : ''}</tr>`;
+    return `<tr${grouped ? ' class="gr"' : ''}><td>${nm(a)}</td>${cells}${anyBank ? `<td class="bk"${bkTitle(a)}>${quotaBankedCell(a, D.now, fmtDT, esc)}${resetBtn(p, a)}</td>` : ''}<td${readAge(a)}>${a.readAt ? 'Read ' + esc(ago(a.readAt)) : '–'}</td>${anySw ? `<td>${quotaSwitchBtns(p, a, swBusy(), esc)}</td>` : ''}${anyNote ? `<td class="nt">${esc(a.note)}</td>` : ''}</tr>`;
   }).join('');
-  return `<details data-p="${esc(p.id)}"${closed[p.id] ? '' : ' open'}><summary>Accounts</summary><div class="wrap"><table><thead><tr><th>Account</th>${ids.map(id => `<th>${esc(wl[id])}</th>`).join('')}${anyBank ? '<th>Banked resets</th>' : ''}<th>Read</th>${anySw ? '<th>Switch</th>' : ''}${anyNote ? '<th>Note</th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
+  return `<details data-p="${esc(p.id)}"${closed[p.id] ? '' : ' open'}><summary>Accounts</summary><div class="wrap"><table><thead><tr><th>Account</th>${cols.map(c => `<th>${esc(c.head)}</th>`).join('')}${anyBank ? '<th>Banked resets</th>' : ''}<th>Read</th>${anySw ? '<th>Switch</th>' : ''}${anyNote ? '<th>Note</th>' : ''}</tr></thead><tbody>${rows}</tbody></table></div></details>`;
 }
 
 function panel(p, W) {
@@ -342,15 +374,15 @@ function render() {
   const seg = (a, items, cur, dis) => items.map(([v, l]) => `<button data-a="${a}" data-v="${v}" aria-pressed="${v === cur}"${v === dis ? ' disabled title="Typical is a projection input; it has no line over time"' : ''}>${l}</button>`).join('');
   const show = ps.filter(p => ui.tab === 'all' || p.id === ui.tab);
   app.innerHTML =
-    `<div class="top"><button data-a="reload" aria-label="Reload data" title="Reload data (updated ${esc(fmtDT(D.now))})">${ico('reload')}</button>` +
-    `<button data-a="theme" aria-label="Theme: ${ui.theme}, switch to ${nextTheme}" title="Theme: ${ui.theme}">${ico(themeIco)}</button></div>` +
+    `<div class="top"><button data-a="theme" aria-label="Theme: ${ui.theme}, switch to ${nextTheme}" title="Theme: ${ui.theme}">${ico(themeIco)}</button></div>` +
     `<div class="row t"><h1>Agent Dashboard</h1><span class="sub">${tot} credential${tot === 1 ? '' : 's'} · ${ld} loaded</span><div class="btns grow">` +
     `<button data-a="emails">${ico('eye')}${ui.emails ? 'Hide emails' : 'Show emails'}</button>` +
     (D.app ? `<button class="primary" data-a="refresh"${busy ? ' disabled' : ''}>${ico('reload')}${busy ? 'Refreshing…' : 'Refresh'}</button>` : '') +
-    `</div></div>` + (D.drift ? driftRow(D.drift) : '') +
+    `</div></div>` + driftRow(D.drift, D.update, { app: D.app, now: D.now, updating, dismissed: store.get('updone', '') }) +
     `<div class="msg" role="status">${esc(msg)}</div>` +
     `<div class="row tabs" role="group" aria-label="Provider"><button data-a="tab" data-v="all" aria-pressed="${ui.tab === 'all'}">${ico('grid')}All <span class="n">${tot}</span></button>` +
-    ps.map(p => `<button data-a="tab" data-v="${esc(p.id)}" aria-pressed="${ui.tab === p.id}" style="--acc:var(--c-${esc(p.id)})"><span class="dot"></span>${esc(p.name)} <span class="n">${p.total}</span></button>`).join('') + `</div>` +
+    ps.map(p => `<span class="tabw"><button data-a="tab" data-v="${esc(p.id)}" aria-pressed="${ui.tab === p.id}" style="--acc:var(--c-${esc(p.id)})"><span class="dot"></span>${esc(p.name)} <span class="n">${p.total}</span></button>` +
+      (D.app ? `<button class="ri${prb[p.id] ? ' spin' : ''}" data-a="prefresh" data-v="${esc(p.id)}" aria-label="Refresh ${esc(p.name)}" title="${prb[p.id] ? 'Refreshing ' + esc(p.name) + '…' : 'Refresh ' + esc(p.name) + ' only'}"${busy || prb[p.id] ? ' disabled' : ''}>${ico('reload')}</button>` : '') + `</span>`).join('') + `</div>` +
     `<div class="row"><div class="seg" role="group" aria-label="View">${seg('view', [['rem', 'Remaining'], ['drain', 'Usage rate']], ui.view)}</div>` +
     `<div class="seg" role="group" aria-label="Rate over"><span class="lbl" style="padding:6px 10px">Rate over</span>${seg('win', [['typ', 'Typical'], ['1', '1h'], ['3', '3h'], ['6', '6h'], ['24', '24h']], winKey(), ui.view === 'drain' ? 'typ' : '')}</div>` +
     `<label class="lbl">Future usage <select data-a="mult">${MULTS.map(([v, l]) => `<option value="${v}"${v === ui.mult ? ' selected' : ''}>${l}</option>`).join('')}</select></label>` +
@@ -382,14 +414,50 @@ function hover(el) {
   hit.addEventListener('pointerleave', e => { if (e.pointerType === 'mouse') hide(); });
 }
 
-async function loadData() {
+async function loadData(silent) {
   if (!D.app) { location.reload(); return; }
   try {
     const r = await fetch('/api/data', { cache: 'no-store' });
     if (!r.ok) throw new Error(r.status);
-    D = await r.json(); msg = '';
-  } catch (e) { msg = 'Could not reload data.'; }
+    const text = await r.text(), nd = JSON.parse(text);
+    if (BUILD && nd.build && nd.build !== BUILD) { location.reload(); return; }
+    if (silent && text === lastText) return;               // the poll: nothing new, nothing redrawn
+    lastText = text; D = nd; if (!silent) msg = '';
+  } catch (e) { if (silent) return; msg = 'Could not reload data.'; }
   render();
+}
+
+async function refreshOne(pid) {
+  if (prb[pid] || busy) return;
+  prb[pid] = true; msg = ''; render();
+  try {
+    const r = await fetch('/api/refresh', { method: 'POST', headers: { 'X-Quota-App': '1', 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: pid }) });
+    if (r.status === 409) msg = 'That one is already refreshing.';
+    else if (!r.ok) msg = 'Refresh failed (' + r.status + ').';
+    else { D = await r.json(); if (D.refreshNote) msg = D.refreshNote; }
+  } catch (e) { msg = 'Refresh failed: could not reach the app.'; }
+  delete prb[pid]; render();
+}
+
+// Update now: the server installs the update and, when its own code changed, restarts. Ask again until the new build answers, then reload the page.
+async function updateNow() {
+  if (updating) return;
+  updating = true; msg = ''; render();
+  try {
+    const r = await fetch('/api/update', { method: 'POST', headers: { 'X-Quota-App': '1' } });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || j.outcome !== 'ok') msg = j.text || 'Update failed (' + r.status + ').';
+    else if (!j.restart) toast(j.text, 'ok');
+    else {
+      for (let i = 0; i < 40; i++) {
+        await new Promise(s => setTimeout(s, 1500));
+        try { const d = await (await fetch('/api/data', { cache: 'no-store' })).json(); if (d.build && d.build !== BUILD) { location.reload(); return; } } catch (e) {}
+      }
+      msg = 'The update installed, but the dashboard has not come back. Reload this page, or restart it from Task Scheduler.';
+    }
+  } catch (e) { msg = 'Update failed: could not reach the app.'; }
+  updating = false;
+  await loadData();
 }
 
 async function refreshAll() {
@@ -529,7 +597,9 @@ function act(a, v, el) {
   if (a === 'rsclear') return openClear(v, el.dataset.p, el.dataset.k);
   if (a === 'rscancel') return $('rsdlg').close();
   if (a === 'rsgo') return doReset();
-  if (a === 'reload') return loadData();
+  if (a === 'prefresh') return refreshOne(v);
+  if (a === 'update') return updateNow();
+  if (a === 'updone') { store.set('updone', String(D.update && D.update.done ? D.update.done.at : '')); return render(); }
   if (a === 'copyw') return copyText(v);
   if (a === 'refresh') return refreshAll();
   if (a === 'theme') { ui.theme = { system: 'light', light: 'dark', dark: 'system' }[ui.theme]; store.set('theme', ui.theme); }
@@ -557,10 +627,8 @@ document.addEventListener('toggle', e => { const d = e.target; if (d.tagName ===
 let rt, lastW = innerWidth;
 addEventListener('resize', () => { if (innerWidth === lastW) return; lastW = innerWidth; clearTimeout(rt); rt = setTimeout(render, 120); });
 
-if (D.app) {
-  const m = document.querySelector('meta[http-equiv="refresh"]'); if (m) m.remove();
-  setInterval(() => { if (!busy) loadData(); }, 60000);
-}
+if (D.app) setInterval(() => { if (!busy && !updating) loadData(true); }, 60000);      // quietly: no spinner, no message, no redraw when nothing changed
+else setInterval(() => location.reload(), 300000);                                      // opened from its file there is no server to ask: read the file again
 render();
 </script>
 </body>
