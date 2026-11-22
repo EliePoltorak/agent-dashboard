@@ -6,7 +6,7 @@
   const HDR = { 'X-Quota-App': '1', 'Content-Type': 'application/json' };
   const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const emailsOn = () => { try { return localStorage.getItem('q2emails') === '1'; } catch (e) { return false; } };   // the page's own "Show emails" switch
-  const S = { data: null, auto: null, tab: 'claude', job: null, note: null, form: { label: '', token: '', replace: false }, open: false };
+  const S = { data: null, auto: null, upd: null, wait: false, fk: '', tab: 'claude', job: null, note: null, form: { label: '', token: '', replace: false }, open: false };
 
   const css = document.createElement('style');
   css.textContent = `
@@ -91,11 +91,33 @@
     document.getElementById('qs-em').focus();
   }
 
+  // Update now: the same call the page's banner button makes. When the dashboard's own code changed it restarts: wait for the new build, then reload.
+  async function updateNow() {
+    if (busy()) return;
+    S.wait = 'update'; S.note = null; render();
+    const b0 = ((await api('/api/data')) || {}).build;
+    const r = await api('/api/update', {});
+    S.wait = false;
+    if (r.outcome !== 'ok') S.note = { text: r.text || 'The update did not run.', ok: false };
+    else if (!r.restart) { S.note = { text: r.text, ok: true }; toast(r.text, 'ok'); }
+    else {
+      S.wait = 'update'; S.note = null; render();
+      for (let i = 0; i < 40; i++) {
+        await new Promise(ok => setTimeout(ok, 1500));
+        const d = await api('/api/data');
+        if (d.build && b0 && d.build !== b0) { location.reload(); return; }
+      }
+      S.wait = false; S.note = { text: 'The update installed, but the dashboard has not come back. Reload this page, or restart it from Task Scheduler.', ok: false };
+    }
+    S.upd = null; await load();
+  }
+
   // ---- running an action: quick ones answer at once, long ones are a job the page polls
   async function act(body, after) {
-    if (S.job) return;
-    S.note = null;
+    if (S.job || S.wait) return;
+    S.note = null; S.wait = body.action === 'update.check' ? 'check' : true; render();           // every button is held while a request is out: no second click, and the page says so
     const r = await api('/api/settings/action', body);
+    S.wait = false;
     if (r.job) { S.job = { id: r.job, title: r.text.replace(/ started\.$/, ''), state: 'running', tail: [] }; render(); poll(after); return; }
     toast(r.text || 'Done', r.outcome === 'ok' ? 'ok' : 'error');
     S.note = { text: r.text || 'Done', ok: r.outcome === 'ok' };
@@ -121,16 +143,18 @@
   }
 
   async function load() {
-    const [s, a] = await Promise.all([api('/api/settings/seats'), S.tab === 'auto' ? api('/api/settings/automation') : Promise.resolve(S.auto)]);
+    const [s, a, u] = await Promise.all([api('/api/settings/seats'), S.tab === 'auto' ? api('/api/settings/automation') : Promise.resolve(S.auto),
+      S.tab === 'upd' ? api('/api/settings/update') : Promise.resolve(S.upd)]);
     if (s.providers) S.data = s; else S.note = { text: s.text, ok: false };
     if (a && !a.outcome) S.auto = a;
+    if (u && !u.outcome) S.upd = u;
     render();
   }
 
   // ---- views
   const pct = h => h == null ? '<span class="muted">no reading</span>' : `<span class="${h < .1 ? 'bad' : ''}">${Math.round(h * 100)}% left</span>`;
   const when = ts => { const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)/.exec(ts); return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ts; };
-  const busy = () => !!S.job;
+  const busy = () => !!(S.job || S.wait);
   const dis = () => busy() ? ' disabled' : '';
 
   function seatCard(p, s) {
@@ -202,19 +226,42 @@
       log(a.keepaliveLog, 'Claude app-seat keepalive, last lines') + log(a.codexKeepaliveLog, 'Codex keepalive, last lines');
   }
 
+  function updView() {
+    const u = S.upd && S.upd.update;
+    if (!S.upd) return '<div class="qs" role="status">Loading…</div>';
+    if (!u) return '<div class="qs">The update state is not available on this copy of the dashboard.</div>';
+    const n = (u.differing || []).length, d = dis();
+    const when = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never';
+    const status = u.checkout ? 'This copy is a git checkout: update it with git pull there.'
+      : u.state === 'running' ? 'An update is installing now.'
+      : u.state === 'failed' ? 'The last update did not install: ' + u.text
+      : n ? n + ' file' + (n === 1 ? '' : 's') + ' differ from GitHub: ' + u.differing.join(', ') + '.'
+      : u.checked ? 'Up to date with GitHub.' : 'Not checked yet.';
+    return `<h3>Updates</h3>` +
+      `<div class="task"><div>Install updates automatically<small>${u.auto ? 'On: it installs by itself when nothing else is running' : 'Off: the dashboard only offers Update now'}</small></div>` +
+      `<label><input type="checkbox" data-up-auto="1"${u.auto ? ' checked' : ''}${d}> on</label></div>` +
+      `<div class="task"><div>Installed commit<small>${u.installed ? `<code>${esc(u.installed)}</code>${u.checkout ? ' (git checkout)' : n ? '' : ' (matches GitHub)'}` : 'not known yet'}</small></div>` +
+      `<div class="muted" style="text-align:right">Last check<small>${esc(when(u.checked))}</small></div></div>` +
+      `<div class="qs ${u.state === 'failed' ? 'err' : n ? 'run' : 'ok'}">${esc(status)}</div>` +
+      `<div class="row"><button data-a="upd-check"${d}>${S.wait === 'check' ? 'Checking…' : 'Check now'}</button>` +
+      `<button class="primary" data-a="upd-now"${d}${u.checkout ? ' disabled title="A git checkout is updated with git pull"' : ''}>${S.wait === 'update' ? 'Updating…' : 'Update now'}</button></div>` +
+      `<div class="hint">An update keeps a backup of every file it replaces and never touches your own settings (rotator.local.json). If the dashboard itself changed, it restarts and this page reloads.</div>`;
+  }
+
   function render() {
     if (!S.open) return;
     const ps = S.data ? S.data.providers : [];
     const tabs = ps.map(p => `<button data-tab="${esc(p.id)}" aria-pressed="${S.tab === p.id}">${esc(p.name)}</button>`).join('') +
-      `<button data-tab="auto" aria-pressed="${S.tab === 'auto'}">Automation</button>`;
+      `<button data-tab="auto" aria-pressed="${S.tab === 'auto'}">Automation</button><button data-tab="upd" aria-pressed="${S.tab === 'upd'}">Updates</button>`;
     let st = '';
     if (S.job) st = `<div class="qs run" role="status">Running: ${esc(S.job.title)}… This can take a minute. Don't start anything else yet.</div>`;
+    else if (S.wait) st = `<div class="qs run" role="status">Working…</div>`;
     else if (S.note) st = `<div class="qs ${S.note.ok ? 'ok' : 'err'}" role="${S.note.ok ? 'status' : 'alert'}">${S.note.ok ? '' : '<b>'}${esc(S.note.text)}${S.note.ok ? '' : '</b>'}${(S.note.tail || []).length ? `<pre>${esc(S.note.tail.join('\n'))}</pre>` : ''}</div>`;
     const p = ps.find(x => x.id === S.tab);
     const keep = document.activeElement && document.activeElement.id;
     drawer.innerHTML = `<div class="qh"><h2 id="qs-title">Settings</h2><button data-a="close" aria-label="Close settings">Close</button></div>` +
       `<div class="qb"><div class="qt" role="group" aria-label="Section">${tabs}</div><div aria-live="polite">${st}</div>` +
-      (S.tab === 'auto' ? autoView() : p ? providerView(p) : '<div class="qs">Loading…</div>') + `</div>`;
+      (S.tab === 'auto' ? autoView() : S.tab === 'upd' ? updView() : p ? providerView(p) : '<div class="qs">Loading…</div>') + `</div>`;
     if (keep) { const el = document.getElementById(keep); if (el) el.focus(); }
   }
 
@@ -232,10 +279,11 @@
     }
     if (t.dataset.t) return act({ action: 'task.set', task: t.dataset.t, enabled: t.checked }, () => { S.auto = null; });
     if (t.dataset.resume) return act({ action: 'auto.resume', enabled: t.checked }, () => { S.auto = null; });
+    if (t.dataset.upAuto) return act({ action: 'update.auto', enabled: t.checked });
   });
   drawer.addEventListener('click', async e => {
     const tb = e.target.closest('[data-tab]');
-    if (tb) { S.tab = tb.dataset.tab; S.note = null; if (S.tab === 'auto') S.auto = null; render(); return load(); }
+    if (tb) { S.tab = tb.dataset.tab; S.note = null; if (S.tab === 'auto') S.auto = null; if (S.tab === 'upd') S.upd = null; render(); return load(); }
     const b = e.target.closest('[data-a]');
     if (!b || b.disabled) return;
     const a = b.dataset.a, l = b.dataset.l, p = S.tab, f = S.form;
@@ -264,6 +312,8 @@
     if (a === 'cred-signin') return act({ action: 'cred.signin', provider: p });
     if (a === 'recheck') { S.note = null; return load(); }
     if (a === 'cred-capture') { if (!need()) return; return act({ action: 'cred.capture', provider: p, label: f.label, replace: f.replace }); }
+    if (a === 'upd-check') return act({ action: 'update.check' }, () => { S.upd = null; });
+    if (a === 'upd-now') return updateNow();
     if (a === 'proxy-restart') return act({ action: 'proxy.restart' }, () => { S.auto = null; });
     if (a === 'sync-history') return act({ action: 'sync.history' });
     if (a === 'keepalive-status') return act({ action: 'keepalive.status' });

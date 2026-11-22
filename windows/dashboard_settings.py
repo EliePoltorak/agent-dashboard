@@ -5,6 +5,7 @@ Routes (all on the dashboard's own loopback server; usage-history.py only delega
   GET  /settings.js               the drawer's script (settings.js next to this file)
   GET  /api/settings/seats        every provider's seats, removed seats, what each provider can do
   GET  /api/settings/automation   scheduled tasks, rotate proxy, keepalive, auto-resume
+  GET  /api/settings/update       autoUpdate, installed commit, last check, what differs
   GET  /api/settings/job?id=      a background job: state and the last lines of its output
   POST /api/settings/action       {"action": ..., ...}; needs the X-Quota-App header like every other POST
 
@@ -579,9 +580,18 @@ class Settings:
 
     def automation(self):
         tasks = [{"id": k, "name": v[1], "state": self.task_state(v[0])} for k, v in TASKS.items()]
-        return {"tasks": tasks, "autoResume": not os.path.exists(os.path.join(self.root, ".auto-resume-off")), "proxy": self.proxy_health(),
+        return {"tasks": tasks, "autoResume": not os.path.exists(os.path.join(self.root, ".auto-resume-off")), "proxy": self.proxy_health(), "update": self.update_info(),
                 "keepaliveLog": self.tail(os.path.join(self.app_seats, ".keepalive-log.txt")),
                 "codexKeepaliveLog": self.tail(os.path.join(self.codex, "rotator-state", "keepalive.log"))}
+
+    def update_info(self):
+        """The dashboard's update state for the Updates section (the store knows the drift file and the installer); None when the store has none (a bare Settings)."""
+        f = getattr(self.store, "update_info", None)
+        try:
+            info = f() if callable(f) else None
+        except Exception:    # shortcut: the section then says "not available" instead of the whole Automation view failing
+            return None
+        return info if isinstance(info, dict) else None
 
     # ------------------------------------------------------------ jobs and locks
     def enter(self):
@@ -961,6 +971,34 @@ class Settings:
         rc, out = self.sync(lambda: self.quick(["schtasks", "/Change", "/TN", t[0], "/ENABLE" if en else "/DISABLE"]))
         return {"outcome": "ok" if rc == 0 else "error", "text": ("%s is now %s." % (t[1], "on" if en else "off")) if rc == 0 else "Windows refused (exit %s): %s" % (rc, out.strip()[:160])}
 
+    def do_update_auto(self, b):
+        en = b.get("enabled")
+        if not isinstance(en, bool):
+            raise Bad("Say on or off.")
+
+        def go():
+            cfg = self.local_cfg_data()
+            cfg["autoUpdate"] = en                                     # every other key stays as it is
+            write_atomic(self.local_cfg, json.dumps(cfg, indent=2) + "\n")
+            return {"outcome": "ok", "text": "Automatic updates are %s." % ("on" if en else "off. The dashboard will offer Update now instead")}
+        return self.sync(go)
+
+    def do_update_check(self, b):
+        check = getattr(self.store, "drift_check", None)
+        if not callable(check):
+            raise Bad("The update check is not available here.", 404)
+        before = (self.update_info() or {}).get("checked")
+
+        def go():
+            check(self.now(), force=True)
+            self.rebuild()
+            i = self.update_info() or {}
+            if not i.get("checked") or i.get("checked") == before:
+                return {"outcome": "error", "text": "The check did not finish (GitHub could not be reached, or the check is missing). Try again in a minute."}
+            n = len(i.get("differing") or [])
+            return {"outcome": "ok", "text": ("%d file%s differ from GitHub. Press Update now to install %s." % (n, "" if n == 1 else "s", "it" if n == 1 else "them")) if n else "Up to date with GitHub."}
+        return self.sync(go)
+
     def do_proxy_restart(self, b):
         def go():
             self.quick(["schtasks", "/End", "/TN", TASKS["proxy"][0]])
@@ -993,6 +1031,8 @@ class Settings:
                 return 200, self.state()
             if method == "GET" and path == "/api/settings/automation":
                 return 200, self.automation()
+            if method == "GET" and path == "/api/settings/update":
+                return 200, {"update": self.update_info()}
             if method == "GET" and path == "/api/settings/job":
                 return 200, self.get_job(query.get("id", ""))
             if method == "POST" and path == "/api/settings/action":

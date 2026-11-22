@@ -648,6 +648,72 @@ class TestKimiTab(Base):
         self.assertEqual(self.do(action="cred.signin", provider="nope")[0], 404)
 
 
+class FakeUpdateStore:
+    """The slice of the dashboard's Store that the Updates section talks to."""
+    def __init__(self, checked=100):
+        self.blob, self.checked, self.differing, self.forced, self.rebuilds = {"providers": []}, checked, [], [], 0
+        self.lock = threading.RLock()
+
+    def update_info(self):
+        return {"auto": True, "state": "idle", "text": "", "checkout": False, "installed": "abc1234", "differing": list(self.differing), "checked": self.checked, "done": None}
+
+    def drift_check(self, now, force=False):
+        self.forced.append(force)
+        self.checked = int(now)
+
+    def rebuild(self, now):
+        self.rebuilds += 1
+
+
+class TestUpdates(Base):
+    def setUp(self):
+        Base.setUp(self)
+        self.us = FakeUpdateStore()
+        self.s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: self.clock[0], store=self.us, which=lambda n: None)
+
+    def test_auto_update_writes_one_key_and_keeps_the_others(self):
+        put(self.s.local_cfg, json.dumps({"seatWeights": {"codex": {"B": 5}}, "hostId": "x"}))
+        self.assertEqual(self.do(action="update.auto", enabled=False)[0], 200)
+        cfg = json.load(open(self.s.local_cfg))
+        self.assertEqual(cfg, {"seatWeights": {"codex": {"B": 5}}, "hostId": "x", "autoUpdate": False})
+        self.do(action="update.auto", enabled=True)
+        self.assertIs(json.load(open(self.s.local_cfg))["autoUpdate"], True)
+        self.assertEqual(self.do(action="update.auto", enabled="yes")[0], 400)           # only a real on/off
+        self.assertEqual(self.do(action="update.auto")[0], 400)
+
+    def test_auto_update_with_no_config_file_yet(self):
+        self.assertFalse(os.path.exists(self.s.local_cfg))
+        self.do(action="update.auto", enabled=False)
+        self.assertEqual(json.load(open(self.s.local_cfg)), {"autoUpdate": False})
+
+    def test_check_now_runs_the_drift_check_forced_and_says_the_result(self):
+        self.clock[0] = 1_800_000_500
+        code, r = self.do(action="update.check")
+        self.assertEqual((code, r["outcome"], r["text"]), (200, "ok", "Up to date with GitHub."))
+        self.assertEqual(self.us.forced, [True])
+        self.assertEqual(self.us.rebuilds, 1)                                              # the page's banner is refreshed at once
+        self.us.differing = ["a.py", "b.py"]
+        self.clock[0] += 5
+        self.assertIn("2 files differ from GitHub", self.do(action="update.check")[1]["text"])
+
+    def test_a_check_that_did_not_finish_is_an_error(self):
+        self.us.drift_check = lambda now, force=False: None                                   # offline: nothing is recorded
+        code, r = self.do(action="update.check")
+        self.assertEqual((code, r["outcome"]), (200, "error"))
+        self.assertIn("did not finish", r["text"])
+
+    def test_no_store_means_not_available_not_a_crash(self):
+        s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: 0, store=None, which=lambda n: None)
+        self.assertEqual(s.handle("POST", "/api/settings/action", {}, {"action": "update.check"})[0], 404)
+        self.assertEqual(s.handle("GET", "/api/settings/update", {}, None), (200, {"update": None}))
+
+    def test_the_section_data_is_served(self):
+        code, j = self.s.handle("GET", "/api/settings/update", {}, None)
+        self.assertEqual((code, j["update"]["installed"], j["update"]["auto"]), (200, "abc1234", True))
+        self.pop.reply = lambda argv: (1, b"")
+        self.assertEqual(self.s.automation()["update"]["checked"], 100)
+
+
 class TestHelpers(unittest.TestCase):
     def test_scrub(self):
         t = ds.scrub("tok %s bearer abc.def me@x.example \x1b[31mred\x1b[0m %s" % (SECRET, "A" * 50))

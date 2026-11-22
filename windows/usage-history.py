@@ -3072,11 +3072,11 @@ class Store:
                 append_lines(new)
                 self.hist = _read_hist()[0] if stale else sorted(self.hist + new, key=lambda h: h["t"])
 
-    def drift_check(self, now, here=None, py=None):
+    def drift_check(self, now, here=None, py=None, force=False):
         """rotator-sync.py --check --quiet at most every DRIFT_EVERY, when the script sits next to this one. It writes .rotator-drift.json under STATE (--state, so QUOTA_STATE_DIR redirects it with everything else; the update journal belongs to the live folder, not to STATE); its exit code and output are ignored."""
         script = os.path.join(here or HERE, "rotator-sync.py")
         with self.lock, pcache_txn() as cache:
-            if not os.path.isfile(script) or now - (cache.get("drift_run") or 0) < DRIFT_EVERY:
+            if not os.path.isfile(script) or (not force and now - (cache.get("drift_run") or 0) < DRIFT_EVERY):
                 return False
             cache["drift_run"] = int(now)           # first, so a hang or crash is not retried every sample
         try:
@@ -3084,6 +3084,28 @@ class Store:
         except (OSError, subprocess.SubprocessError):
             pass
         return True
+
+    def update_info(self):
+        """What the Settings page's Updates section shows: autoUpdate, the installer's state, when GitHub was last compared, what differs, and the installed commit
+        (a git checkout's HEAD; otherwise the commit the files match, else the last one an update installed)."""
+        d, c = read_drift(), load_pcache()
+        names = [str(x) for x in d.get("differing") or []]
+        done = c.get("updated") if isinstance(c.get("updated"), dict) else None
+        ref = str(d.get("ref") or "")
+        checkout = in_checkout()
+        sha = ""
+        if checkout:
+            try:
+                r = run_bounded(["git", "-C", HERE, "rev-parse", "--short", "HEAD"], 5, text=True, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+                sha = (r.stdout or "").strip() if r.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                pass
+        elif not names and ref:
+            sha = ref.split(" ")[-1]
+        elif done and done.get("sha"):
+            sha = str(done["sha"])
+        return {"auto": autoupdate_enabled(), "state": UPDATE["state"], "text": UPDATE["text"], "checkout": checkout, "installed": sha, "differing": names,
+                "checked": int(_f(d.get("checked")) or 0) or None, "done": done}
 
     restart = None      # serve() sets it: a callable that swaps this server for a new one; the selftest's fakes have none
 
@@ -4737,6 +4759,26 @@ def selftest():
             assert st.drift_check(1000 * DRIFT_EVERY, td, [sys.executable]) and open(mark).read() == "--check --quiet --state " + os.path.join(STATE, ".rotator-drift.json") + chr(10)
             assert not st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY - 1, td, [sys.executable]) and open(mark).read().count("--check") == 1
             assert st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY, td, [sys.executable]) and open(mark).read().count("--check") == 2
+            assert not st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY + 5, td, [sys.executable]) and st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY + 5, td, [sys.executable], force=True)     # Settings' Check now ignores the interval
+            assert open(mark).read().count("--check") == 3
+            # update_info: what the Settings page's Updates section shows
+            keep_st_, keep_chk_ = globals()["STATE"], globals()["in_checkout"]
+            globals()["STATE"], globals()["in_checkout"] = td, lambda here=None: False
+            try:
+                dp_ = os.path.join(td, ".rotator-drift.json")
+                open(dp_, "w").write(json.dumps({"checked": 1234, "ref": "origin/main abc1234", "differing": []}))
+                ui_ = st.update_info()
+                assert ui_["installed"] == "abc1234" and ui_["differing"] == [] and ui_["checked"] == 1234 and ui_["checkout"] is False and ui_["auto"] is autoupdate_enabled()
+                open(dp_, "w").write(json.dumps({"checked": 5, "ref": "origin/main def5678", "differing": ["a.py", "b.ps1"]}))
+                ui_ = st.update_info()
+                assert ui_["installed"] == "" and ui_["differing"] == ["a.py", "b.ps1"]            # files differ: the matching commit is not known
+                with pcache_txn() as c_:
+                    c_["updated"] = {"at": 9, "sha": "0011223", "restart": False}
+                assert st.update_info()["installed"] == "0011223" and st.update_info()["done"]["at"] == 9
+                os.remove(dp_)
+                assert st.update_info()["checked"] is None
+            finally:
+                globals()["STATE"], globals()["in_checkout"] = keep_st_, keep_chk_
             # both child runs go through run_bounded (a grandchild holding the pipe must not hold the sampler): a recorder in its place sees each call and its deadline
             real_rb_, seen_rb_ = globals()["run_bounded"], []
 
@@ -4745,7 +4787,7 @@ def selftest():
                 raise subprocess.TimeoutExpired(argv, timeout)           # a hung child: both callers must absorb it
             globals()["run_bounded"] = rb_rec_
             try:
-                assert st.drift_check(1000 * DRIFT_EVERY + 2 * DRIFT_EVERY, td, [sys.executable]) and seen_rb_[-1][1] == 120 and seen_rb_[-1][0][-4:] == ["--check", "--quiet", "--state", os.path.join(STATE, ".rotator-drift.json")]
+                assert st.drift_check(1000 * DRIFT_EVERY + 3 * DRIFT_EVERY, td, [sys.executable]) and seen_rb_[-1][1] == 120 and seen_rb_[-1][0][-4:] == ["--check", "--quiet", "--state", os.path.join(STATE, ".rotator-drift.json")]
                 if os.name == "nt":
                     assert ls_probe() == [] and seen_rb_[-1][1] == 30 and seen_rb_[-1][0][0] == "powershell"
             finally:
