@@ -105,9 +105,9 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
 {
   const esc = s => String(s).replace(/</g, '&lt;');
   assert.strictEqual(quotaMeasure({ label: 'A' }, esc), '');
-  assert.strictEqual(quotaMeasure({ label: 'A', ratio: { n: 3 } }, esc), '<small class="ms" title="Needs 5 token measurements from the last 21 days; 3 so far">measured: not enough data</small>');
+  assert.strictEqual(quotaMeasure({ label: 'A', ratio: { n: 3 } }, esc), `<small class="ms" title="Needs 5 token measurements on this seat's current plan; 3 so far">Measured: not enough data</small>`);
   const line = a => quotaMeasure(a, esc);
-  assert.ok(line({ w: 5, ratio: { x: 4.6, n: 12 } }).includes('>measured ≈ ×4.6 (12 samples)</small>'));
+  assert.ok(line({ w: 5, ratio: { x: 4.6, n: 12 } }).includes('>Measured ≈ ×4.6 (12 samples)</small>'));
   assert.ok(!line({ w: 5, ratio: { x: 4.6, n: 12 } }).includes('warn'));                   // 5 / 4.6 = 1.09
   assert.ok(!line({ ratio: { x: 1.29, n: 6 } }).includes('warn'));                          // weight 1: 1.29 is within 30 %
   assert.ok(line({ ratio: { x: 1.31, n: 6 } }).includes('class="ms warn"'));
@@ -117,6 +117,11 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   assert.ok(off.includes('class="ms warn"') && off.includes('differs from the configured weight (×5) by more than 30 %') && off.includes('×2.9 (14 samples)'));
   assert.ok(!line({ w: 0, ratio: { x: 3, n: 9 } }).includes('warn'));                       // weight 0: nothing to compare
   assert.ok(line({ ratio: { x: 1, n: 8 } }).includes('×1 (8 samples)'));
+  // too quiet for 21 days: the samples' age shows (same month: "Nov 1–3"; across months: "Oct 30 – Nov 2"; one day: "Nov 1"), and the tip says all samples were used
+  const at = (y, m, d) => new Date(y, m - 1, d, 12).getTime() / 1000, wide = (f, t) => line({ ratio: { x: 2.9, n: 8, wide: true, from: f, to: t } });
+  assert.ok(wide(at(2026, 11, 1), at(2026, 11, 3)).includes('>Measured ≈ ×2.9 (8 samples, Nov 1–3)</small>') && wide(at(2026, 11, 1), at(2026, 11, 3)).includes('over all this seat'));
+  assert.ok(wide(at(2026, 10, 30), at(2026, 11, 2)).includes('(8 samples, Oct 30 – Nov 2)') && wide(at(2026, 11, 1), at(2026, 11, 1)).includes('(8 samples, Nov 1)'));
+  assert.ok(!line({ ratio: { x: 2.9, n: 8 } }).includes('Nov') && line({ ratio: { x: 2.9, n: 8 } }).includes('over the last 21 days'));
   // under the seat name: email, then plan (underscores read as spaces), then the measured line
   assert.strictEqual(quotaSeat({ label: 'B', email: 'b@x.org', plan: 'self_serve_business_prolite', ratio: { n: 0 } }, true, esc),
     'B<small>b@x.org</small><small class="pl">Plan: self serve business prolite</small>' + quotaMeasure({ ratio: { n: 0 } }, esc));
@@ -133,7 +138,7 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   // under the seat: after the measured line, which stays as it is (amber included)
   const seat = { label: 'B', w: 1, ratio: { x: 3.1, n: 24 }, suggest: { w: 3, n: 24 } };
   assert.strictEqual(quotaSeat(seat, false, esc), 'B' + quotaMeasure(seat, esc) + quotaSuggest(seat, esc));
-  assert.ok(quotaSeat(seat, false, esc).includes('class="ms warn"') && quotaSeat(seat, false, esc).indexOf('measured') < quotaSeat(seat, false, esc).indexOf('Suggested'));
+  assert.ok(quotaSeat(seat, false, esc).includes('class="ms warn"') && quotaSeat(seat, false, esc).indexOf('Measured') < quotaSeat(seat, false, esc).indexOf('Suggested'));
 }
 // seat name: the letter always, the email under it only when shown and known
 {

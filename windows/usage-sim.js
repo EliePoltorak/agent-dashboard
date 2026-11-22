@@ -47,14 +47,19 @@ function quotaWeight(a, esc) {
   return '<span class="bdg wt" role="img" title="' + esc(tip) + '" aria-label="' + esc(tip) + '">×' + esc(quotaNum(a.w)) + '</span>';
 }
 // Codex only: the measured capacity ratio (tokens per 1 % of weekly use against the weight-1 seats) as a muted line; amber when it is more than 30 % away from the weight.
+// A seat that was too quiet for the last 21 days is measured on all its samples on its current plan (r.wide, with r.from / r.to, epoch s): the line then says how old they are.
+function quotaSpan(from, to) {
+  const f = new Date(from * 1000), t = new Date(to * 1000), md = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return f.toDateString() === t.toDateString() ? md(f) : f.getMonth() === t.getMonth() && f.getFullYear() === t.getFullYear() ? md(f) + '–' + t.getDate() : md(f) + ' – ' + md(t);
+}
 function quotaMeasure(a, esc) {
   const r = a.ratio;
   if (!r) return '';
-  if (r.x == null) return '<small class="ms" title="' + esc('Needs 5 token measurements from the last 21 days; ' + r.n + ' so far') + '">measured: not enough data</small>';
+  if (r.x == null) return '<small class="ms" title="' + esc("Needs 5 token measurements on this seat's current plan; " + r.n + ' so far') + '">Measured: not enough data</small>';
   const w = a.w == null ? 1 : a.w, off = w > 0 && Math.max(r.x / w, w / r.x) > 1.3;
-  const tip = 'Tokens per 1 % of weekly use over the last 21 days (input minus cached plus output), relative to the regular seats' +
-    (off ? '. It differs from the configured weight (×' + quotaNum(w) + ') by more than 30 %: check the weight.' : '');
-  return '<small class="ms' + (off ? ' warn' : '') + '" title="' + esc(tip) + '">measured ≈ ×' + String(+r.x.toFixed(1)) + ' (' + r.n + ' samples)</small>';
+  const tip = 'Tokens per 1 % of weekly use ' + (r.wide ? "over all this seat's measurements on its current plan (too few in the last 21 days)" : 'over the last 21 days') +
+    ' (input minus cached plus output), relative to the regular seats' + (off ? '. It differs from the configured weight (×' + quotaNum(w) + ') by more than 30 %: check the weight.' : '');
+  return '<small class="ms' + (off ? ' warn' : '') + '" title="' + esc(tip) + '">Measured ≈ ×' + String(+r.x.toFixed(1)) + ' (' + r.n + ' samples' + (r.wide ? ', ' + quotaSpan(r.from, r.to) : '') + ')</small>';
 }
 // Codex only: the weight the measurements suggest (a.suggest, set by the builder when the ratio is steady and far from the weight) and a button that copies the
 // settings fragment for it. Nothing applies it.

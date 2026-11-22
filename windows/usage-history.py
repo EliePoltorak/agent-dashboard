@@ -1936,8 +1936,8 @@ def build_provider(hist, pid, emails, now, extra):
         meas = measured_ratios((extra.get("codex") or {}).get("pairs") or {}, now)
         sug = weight_suggestions((extra.get("codex") or {}).get("pairs") or {}, now)
         for a in accounts:
-            x, n = meas.get(a["label"], (None, 0))
-            a["ratio"] = dict({"n": n}, **({"x": round(x, 2)} if x is not None else {}))
+            x, n, wide = meas.get(a["label"], (None, 0, {}))
+            a["ratio"] = dict({"n": n}, **({"x": round(x, 2)} if x is not None else {}), **wide)
             if a["label"] in sug:
                 a["suggest"] = {"w": sug[a["label"]][0], "n": sug[a["label"]][1]}
     dflt = {w: p for w, _, p in wins}
@@ -2506,16 +2506,53 @@ def token_pairs(events):
     return out
 
 
+def merged_events(chunks):
+    """[(t, None, weekly used %, weekly reset, tokens so far)] for ONE seat from all its chunks (each a list of one log's, or one active-login run's, events).
+    A weekly % is one meter per seat, but a seat often runs several Codex sessions at once, each with its own cumulative token counter: measured per log, a log's
+    tokens between two ticks are only its share of what moved the meter. So each event contributes the tokens its own log added since that log's previous event (0 for a
+    log's first event and when its counter goes back), the events of every chunk are put in time order, and the tokens are summed across them. Weekly used is the running
+    maximum within a window (a log that lags behind another reads lower), and an event of a window older than the newest seen is dropped. token_pairs then runs on that."""
+    ev = []
+    for c in chunks:
+        prev = None
+        for t, _, used, reset, tok in c:
+            if tok is None:
+                continue
+            ev.append((t, used, reset, 0 if prev is None or tok < prev else tok - prev))
+            prev = tok
+    out, cum, win, top = [], 0, None, 0
+    for t, used, reset, d in sorted(ev, key=lambda e: e[0]):
+        cum += d
+        if used is None or reset is None:
+            continue
+        if win is None or reset > win + SLOP:
+            win, top = reset, 0
+        elif reset < win - SLOP:
+            continue
+        top = max(top, used)
+        out.append((t, None, top, win, cum))
+    return out
+
+
 def measured_ratios(pairs, now, days=21, minn=5):
-    """{seat: (ratio or None, samples)} from codex_measure's pairs: a seat's median tokens per 1 % over the last `days` days (at least `minn` pairs, else no ratio),
-    divided by the median of that figure over the weight-1 seats that have one. A sanity check on the configured weights, not an input to them."""
-    recent, med, base = _measured(pairs, now, days, minn)
-    return {s: (med[s] / base if s in med and base else None, len(v)) for s, v in recent.items()}
+    """{seat: (ratio or None, samples, info)} from codex_measure's pairs: a seat's median tokens per 1 % over the last `days` days, divided by the median of that figure
+    over the weight-1 seats that have one. With fewer than `minn` pairs in the window (a rarely used seat) it falls back to ALL the seat's current-plan pairs, and info says
+    so ({"wide": True, "from": oldest t, "to": newest t}) so the page can show how old they are; fewer than `minn` pairs altogether: no ratio.
+    A sanity check on the configured weights, not an input to them."""
+    recent, med, base = _measured(pairs, now, days, minn, True)
+    out = {}
+    for s, v in recent.items():
+        wide = bool(v) and sum(t >= now - days * DAY for t, _ in pairs[s]) < minn
+        out[s] = (med[s] / base if s in med and base else None, len(v), {"wide": True, "from": min(t for t, _ in v), "to": max(t for t, _ in v)} if wide and s in med and base else {})
+    return out
 
 
-def _measured(pairs, now, days, minn):
-    """(recent {seat: [(t, tokens per 1 %)]}, median {seat: tokens per 1 %} of the seats with `minn`, reference: the median over the weight-1 seats among them or None)."""
+def _measured(pairs, now, days, minn, wide=False):
+    """(recent {seat: [(t, tokens per 1 %)]}, median {seat: tokens per 1 %} of the seats with `minn`, reference: the median over the weight-1 seats among them or None).
+    `wide`: a seat with fewer than `minn` pairs in the last `days` days is measured on all of its pairs instead."""
     recent = {s: [(t, v) for t, v in p if t >= now - days * DAY] for s, p in pairs.items()}
+    if wide:
+        recent = {s: r if len(r) >= minn else list(pairs[s]) for s, r in recent.items()}
     med = {s: statistics.median(v for _, v in r) for s, r in recent.items() if len(r) >= minn}
     ref = [m for s, m in med.items() if wt("codex", s)[0] == 1]
     return recent, med, statistics.median(ref) if ref else None
@@ -2581,13 +2618,14 @@ def codex_measure(cdir=None, now=None):
     for f, seat in files:
         if not seat:
             chunks += seat_runs(rollout_cached(f), known)
-    plans, newest, pairs = {}, {}, {}
+    plans, newest, by = {}, {}, {}
     for seat, ev in chunks:
         for t, plan, *_ in ev:
             if plan and t >= newest.get(seat, 0):
                 plans[seat], newest[seat] = plan, t
-        pairs.setdefault(seat, []).extend(token_pairs(ev))
-    return plans, pairs
+    for seat, ev in chunks:             # only the seat's current plan is measured: an older plan's tokens per 1 % are another figure
+        by.setdefault(seat, []).append([e for e in ev if e[1] == plans.get(seat)])
+    return plans, {seat: token_pairs(merged_events(cs)) for seat, cs in by.items()}
 
 
 # ---------------------------------------------------------------- backfill from .rotate-log.txt
@@ -5747,11 +5785,17 @@ def selftest():
         assert sorted(round(v) for t, v in pairs["B"]) == [5000] * 8 and sorted(round(v) for t, v in pairs["C"]) == [1000] * 3, pairs["B"]
         set_weights({"seat": {"codex": {"B": 5.0}}})
         m = measured_ratios(pairs, N)
-        assert m["A"] == (1.0, 8) and m["B"] == (5.0, 8) and m["C"] == (None, 3), m      # 5 pairs needed; A's 40-day-old pairs left out; B over the weight-1 seat A
+        assert m == {"A": (1.0, 8, {}), "B": (5.0, 8, {}), "C": (None, 3, {})}, m      # 5 pairs needed; A's 40-day-old pairs left out; B over the weight-1 seat A
         set_weights(None)
         m = measured_ratios(pairs, N)           # every seat weight 1: the reference is the median of A and B (3000)
         assert abs(m["B"][0] - 5000 / 3000) < 1e-9 and abs(m["A"][0] - 1000 / 3000) < 1e-9
-        assert measured_ratios({"A": [(N, 1000.0)] * 4}, N) == {"A": (None, 4)} and measured_ratios({}, N) == {}
+        assert measured_ratios({"A": [(N, 1000.0)] * 4}, N) == {"A": (None, 4, {})} and measured_ratios({}, N) == {}
+        # a seat with fewer than 5 pairs in 21 days falls back to all its pairs and says how old they are; fewer than 5 altogether: still no ratio
+        old = lambda n, v, d: [(N - d * DAY + i, float(v)) for i in range(n)]
+        mw = measured_ratios({"A": old(8, 1000, 1), "B": old(6, 3000, 30) + old(2, 9000, 2), "C": old(4, 3000, 30), "D": old(3, 3000, 2) + old(2, 3000, 30)}, N)
+        assert mw["A"] == (1 / 3, 8, {}) and mw["B"] == (1.0, 8, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 1}), mw      # B: 2 in the window, so all 8 (median 3000); reference = median(A, B, D) = 3000
+        assert mw["C"] == (None, 4, {}) and mw["D"] == (1.0, 5, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 2}), mw
+        assert weight_suggestions({"A": old(8, 1000, 1), "B": old(24, 3000, 30)}, N) == {}      # the suggestion stays strict: only the last 21 days
         # a token counter that goes back (a new session) and a window change start a fresh anchor; a tick with no tokens in it is skipped
         e = lambda t, u, r, k: (t, None, u, r, k)
         assert token_pairs([e(1, 10, 99, 100), e(2, 11, 99, 50), e(3, 12, 99, 250), e(4, 13, 99, 250), e(5, 14, 99 + 5000, 900), e(6, 15, 99 + 5000, 1900)]) == [(3, 200.0), (6, 1000.0)]
@@ -5779,6 +5823,29 @@ def selftest():
                      {"weights": {"seat": {"codex": {"B": 5.0}}}, "codex": {"pairs": pairs}})["providers"][0]["accounts"]
         assert [a["ratio"] for a in blob] == [{"n": 8, "x": 1.0}, {"n": 8, "x": 5.0}, {"n": 3}, {"n": 0}], [a["ratio"] for a in blob]
         assert "ratio" not in build([{"t": N, "s": {"A": {"w": .2, "wr": N + 9999}}}], N, {}, False, {})["providers"][0]["accounts"][0]       # Codex only
+        wb = build([{"t": N, "codex": {s: {"w": .2, "wr": N + 9999, "wp": WEEK, "ts": N} for s in "AB"}}], N, {}, False, {"codex": {"pairs": {"A": old(8, 1000, 1), "B": old(6, 3000, 30)}}})["providers"][0]["accounts"]
+        assert wb[1]["ratio"] == {"n": 6, "x": 1.5, "wide": True, "from": N - 30 * DAY, "to": N - 30 * DAY + 5}, wb[1]["ratio"]      # the fallback reaches the page
+        # J0: one weekly meter per seat, but several Codex logs of that seat running at once: each log sees only its own share of the tokens between two ticks, so the
+        # tokens per 1 % are the COMBINED tokens of all the seat's logs, not each log's share. Every percent here costs 500 tokens in log 1 and 500 in log 2.
+        with tempfile.TemporaryDirectory() as td3:
+            os.makedirs(os.path.join(td3, "homes", "A"))
+            l1, l2 = [], []
+            for i in range(7):
+                l1.append(tk(N - 90_000 + 1000 * i, 10 + max(i - 1, 0), WA, 500 * i, 0, 0))       # log 1 reads the meter before log 2's tokens of this step have ticked it
+                l2.append(tk(N - 90_000 + 1000 * i + 500, 10 + i, WA, 500 * i, 0, 0))
+            roll(os.path.join(td3, "homes", "A", "sessions", "rollout-1.jsonl"), l1, N - 100)
+            roll(os.path.join(td3, "homes", "A", "sessions", "rollout-2.jsonl"), l2, N - 100)
+            pc = codex_measure(td3, N)[1]["A"]
+            assert [round(v) for _, v in pc] == [1000] * 6, pc          # 1000 = 500 + 500; per log alone it would read 500 (or 1000 for the log that happens to tick, with the other's share missing)
+            # an event of a window older than the newest is a lagging log, not a new window; the meter reading is the running maximum
+            lag = merged_events([[(1, None, 10, WA, 0), (3, None, 11, WA, 500)], [(2, None, 12, WA + 30, 0), (4, None, 11, WA, 100), (5, None, 3, WA - 400_000, 50)]])
+            assert [(t, u, k) for t, _, u, _, k in lag] == [(1, 10, 0), (2, 12, 0), (3, 12, 500), (4, 12, 600)], lag      # (5: a window from the past, dropped)
+            # J0b: the seat moved from plan "team" to "pro": only the pro samples count, whatever the team ones were
+            os.makedirs(os.path.join(td3, "homes", "B"))
+            eb = [tk(N - 90_000 + 1000 * i, 10 + i, WB, 100_000 * i, 0, 0, "team") for i in range(7)] + [tk(N - 80_000 + 1000 * i, 20 + i, WB, 700_000 + 1000 * i, 0, 0, "pro") for i in range(7)]
+            roll(os.path.join(td3, "homes", "B", "sessions", "rollout-b.jsonl"), eb, N - 100)
+            plans3, pairs3 = codex_measure(td3, N)
+            assert plans3["B"] == "pro" and [round(v) for _, v in pairs3["B"]] == [1000] * 6, pairs3["B"]      # not 100000 from the team samples
         set_weights(None)
     # I: a suggested weight for a Codex seat, from the same pairs: at least 20 samples, steady older and newer halves, more than 30 % off the weight, rounded
     def at(*vals):
