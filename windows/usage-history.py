@@ -1869,6 +1869,12 @@ def build_limit(hist, latest, pid, wid, label, now, dflt):
     return lim
 
 
+def cap_note(s):
+    """A note as a sentence: its first word capitalised when it is a plain lowercase word ("sign-in needed" -> "Sign-in needed"). The stored notes keep their wording
+    (some are compared with each other, and an older cache holds the lowercase ones), so the page's text is capitalised here. A file name or a code word is left alone."""
+    return s[:1].upper() + s[1:] if isinstance(s, str) and re.match(r"[a-z][a-z-]*(?=[\s:;,]|$)", s) else s
+
+
 def build_provider(hist, pid, emails, now, extra):
     latest = latest_of(hist, pid)
     seats = seats_of(latest, pid)
@@ -1881,7 +1887,7 @@ def build_provider(hist, pid, emails, now, extra):
     for label in sorted(seats):
         s = seats[label]
         a = {"label": label, "email": (emails.get(pid) or {}).get(label), "ok": s.get("ok") is not False,
-             "note": s.get("note") or ((extra.get("notes") or {}).get(pid) or {}).get(label) or "", "readAt": int(s["ts"]) if s.get("ts") else None, "windows": []}
+             "note": cap_note(s.get("note") or ((extra.get("notes") or {}).get(pid) or {}).get(label) or ""), "readAt": int(s["ts"]) if s.get("ts") else None, "windows": []}
         for wid, wlabel, dp in wins:
             u = util_at(s, wid, now)
             if u is None:
@@ -1915,7 +1921,7 @@ def build_provider(hist, pid, emails, now, extra):
                 a["banked"] = sum(g["left"] for g in gs)
                 a["bankedList"] = [dict({"title": CREDIT_KINDS.get(g["kind"], "Reset"), "expiresAt": g["endsAt"]}, **({"n": g["left"]} if g["left"] > 1 else {})) for g in gs]
         if cr.get("note"):
-            a["bankedNote"] = cr["note"]
+            a["bankedNote"] = cap_note(cr["note"])
         acts = [r for r in sw if r != "best" and label in sw[r] and use.get("app" if r == "both" else r) != label]
         if pid == "codex" and label in (extra.get("codexPending") or ()):
             a["resetPending"] = True        # its last reset is unconfirmed: no Apply reset until a reading settles it
@@ -6207,7 +6213,13 @@ def selftest():
         assert ba_[0]["banked"] == 7 and ba_[0]["bankedAt"] == JN and [(x["title"], x.get("n")) for x in ba_[0]["bankedList"]] == [
             ("Fable reset", 2), ("Full reset", None), ("5-hour reset", None), ("5-hour reset", None), ("Full reset", None), ("Reset", None)], ba_[0]
         assert ba_[0]["bankedList"][0]["expiresAt"] == JN + 3 * DAY and ba_[0]["bankedList"][-1]["expiresAt"] is None                 # no expiry sorts last
-        assert "banked" not in ba_[1] and ba_[1]["bankedAt"] == JN and "bankedAt" not in ba_[2] and ba_[2]["bankedNote"] == "sign-in needed" and "banked" not in ba_[3]
+        assert "banked" not in ba_[1] and ba_[1]["bankedAt"] == JN and "bankedAt" not in ba_[2] and ba_[2]["bankedNote"] == "Sign-in needed" and "banked" not in ba_[3]
+        # notes read as sentences on the page: a plain lowercase first word is capitalised (the stored text is not touched), a file name, code word or capital is left alone
+        assert [cap_note(x) for x in ("no usable reading", "sign-in expired: run grok to sign in again", "rate limited", "Kimi isn't signed in", "muse_usage_for_dashboard.py is missing", "`muse` was not found", "", "5-hour limit")] == [
+            "No usable reading", "Sign-in expired: run grok to sign in again", "Rate limited", "Kimi isn't signed in", "muse_usage_for_dashboard.py is missing", "`muse` was not found", "", "5-hour limit"]
+        nc_ = build([{"t": 5, "s": {"A": {"ok": False, "note": "no usable reading"}}}], 9, {}, False, {})["providers"][0]["accounts"][0]
+        assert nc_["note"] == "No usable reading", nc_
+
         gone = build([{"t": JN, "s": {"A": {"w": 0.1, "wr": JN + 9, "ts": JN}}}], JN + 4 * DAY, {}, False, ex)["providers"][0]["accounts"][0]       # the Fable grant (3 d) has expired by now
         assert gone["banked"] == 5 and gone["bankedList"][0]["title"] == "Full reset"
         assert "banked" not in build([{"t": JN, "s": {"A": {"w": 0.1, "wr": JN + 9, "ts": JN}}}], JN, {}, False, {})["providers"][0]["accounts"][0]

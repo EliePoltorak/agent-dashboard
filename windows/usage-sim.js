@@ -120,9 +120,9 @@ const QUOTA_RESET_KINDS = {
 // holds); the header button only when the provider's rotator is there (p.best). Codex's header button runs the rotator's --rotate, which takes the NEXT
 // saved seat, so it is not called "Best". `busy` disables every one while an action runs.
 const QUOTA_SWITCH = {
-  claude: { cli: ['Use for CLI', 'Switch the Claude CLI to this seat'], app: ['Use for App', 'Switch the Claude desktop app to this seat'],
+  claude: { cli: ['Use for CLI', 'Switch the Claude CLI to this seat'], app: ['Use for app', 'Switch the Claude desktop app to this seat'],
     best: ['Best seat', 'Switch the Claude CLI to the seat with the most headroom'] },
-  codex: { both: ['Use for CLI + App', 'Switch Codex (CLI and app, one shared login) to this seat'],
+  codex: { both: ['Use for CLI + app', 'Switch Codex (CLI and app, one shared login) to this seat'],
     best: ['Next seat', 'Switch Codex to the next saved seat in order (it does not rank seats by headroom)'] },
 };
 // Which actions ask first: the ones that close an app. The Claude CLI switch and its Best seat run on one click.

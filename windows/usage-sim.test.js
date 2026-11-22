@@ -224,10 +224,10 @@ assert.strictEqual(quotaShare(600, 600), 100);
   const cl = { id: 'claude', best: true }, cx = { id: 'codex' };
   assert.strictEqual(quotaSwitchBtns(cl, { label: 'B', switch: ['cli', 'app'] }, false, e),
     '<button class="sw" data-a="sw" data-p="claude" data-r="cli" data-v="B" title="Switch the Claude CLI to this seat">Use for CLI</button>' +
-    '<button class="sw" data-a="sw" data-p="claude" data-r="app" data-v="B" title="Switch the Claude desktop app to this seat">Use for App</button>');
+    '<button class="sw" data-a="sw" data-p="claude" data-r="app" data-v="B" title="Switch the Claude desktop app to this seat">Use for app</button>');
   assert.strictEqual(quotaSwitchBtns(cl, { label: 'B' }, false, e), '');
   assert.strictEqual(quotaSwitchBtns(cx, { label: 'A', switch: ['both', 'cli'] }, true, e),
-    '<button class="sw" data-a="sw" data-p="codex" data-r="both" data-v="A" title="Another action is running" disabled>Use for CLI + App</button>');   // an unknown role draws nothing
+    '<button class="sw" data-a="sw" data-p="codex" data-r="both" data-v="A" title="Another action is running" disabled>Use for CLI + app</button>');   // an unknown role draws nothing
   assert.strictEqual(quotaBestBtn(cl, false, e), '<button class="sw" data-a="sw" data-p="claude" data-r="best" title="Switch the Claude CLI to the seat with the most headroom">Best seat</button>');
   assert.strictEqual(quotaBestBtn(cx, false, e), '');
   assert.ok(quotaBestBtn({ id: 'codex', best: true }, false, e).includes('>Next seat<'));

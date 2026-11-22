@@ -291,7 +291,7 @@ function chart(p, lim, W) {
     emptyTxt = 'Empty ' + fmtWT(pr.empty);
     s.push(`<circle cx="${ex}" cy="${Y(0)}" r="5" fill="var(--panel)" stroke="var(--ink)" stroke-width="2"/><text x="${tx}" y="${Y(0) - 12}" text-anchor="middle" fill="var(--ink)" stroke="var(--panel)" stroke-width="4" paint-order="stroke">${emptyTxt}</text>`);
   }
-  if (drain && !dr.length) s.push(`<text x="${L + pw / 2}" y="${(T + H - B) / 2}" text-anchor="middle" fill="var(--muted)">not enough history in this range</text>`);
+  if (drain && !dr.length) s.push(`<text x="${L + pw / 2}" y="${(T + H - B) / 2}" text-anchor="middle" fill="var(--muted)">Not enough history in this range</text>`);
   s.push(`<line class="cx" y1="${T}" y2="${H - B}" stroke="var(--ink2)" visibility="hidden"/><circle class="cd" r="5" fill="var(--acc)" stroke="var(--panel)" stroke-width="2" visibility="hidden"/><rect class="hit" x="${L}" y="0" width="${pw}" height="${H}" fill="transparent"/>`);
   const cand = drain ? dr.map(q => [q[0], q[1], 'd']) : hist.map(q => [q[0], q[1], q[2] ? 'b' : 'r']).concat(pr ? pr.pts.map(q => [q[0], q[1], 'p']) : []);
   charts[p.id] = { W, H, L, R, x0, x1, X, Y, cand };
@@ -332,7 +332,7 @@ function accounts(p) {
   const anyNote = p.limits.length && p.accounts.some(a => a.note), anyBank = quotaBankedTotal(p) != null || p.accounts.some(a => (a.resets || []).length || a.resetPending || a.bankedNote), anySw = D.app && p.accounts.some(a => (a.switch || []).length);
   const rows = p.accounts.map(a => {
     const lvT = lv => lv ? ` title="${{ ok: 'Allowed', warn: 'Close to the limit', bad: 'Capped' }[lv]}"` : '';
-    const body = (w, lv) => { const pct = w.used == null ? null : Math.round(w.used * 100); return `${pct == null ? '–' : `<span class="pv">${pct}% used${lv === 'bad' ? ' · capped' : ''}</span><span class="bar" aria-hidden="true"><i style="width:${Math.min(pct, 100)}%"></i></span>`}${w.assumed ? '<small>assumed after reset</small>' : ''}${winAge(w)}${w.reset ? `<small>resets ${esc(fmtRS(w.reset))}</small>` : ''}`; };
+    const body = (w, lv) => { const pct = w.used == null ? null : Math.round(w.used * 100); return `${pct == null ? '–' : `<span class="pv">${pct}% used${lv === 'bad' ? ' · capped' : ''}</span><span class="bar" aria-hidden="true"><i style="width:${Math.min(pct, 100)}%"></i></span>`}${w.assumed ? '<small>Assumed after reset</small>' : ''}${winAge(w)}${w.reset ? `<small>Resets ${esc(fmtRS(w.reset))}</small>` : ''}`; };
     const cells = cols.map(c => {
       const ws = c.ids.map(id => a.windows.find(x => x.id === id));
       if (!grouped) { const w = ws[0]; if (!w) return '<td>–</td>'; const lv = quotaLevel(p.id, w); return `<td class="lv-${lv || 'na'}"${lvT(lv)}>${body(w, lv)}</td>`; }
@@ -351,7 +351,7 @@ function panel(p, W) {
   if (p.note) h += `<p class="note">${esc(p.note)}</p>`;
   if (lim) {
     const rf = rateFor(lim);
-    h += `<div class="hd"><div><span class="big">${Math.round(sh(lim.now, lim))}%</span><span class="of">left across ${seatsTxt(lim)}</span></div><div class="stat"><span class="muted">Usage rate</span><b>${rf.avg == null ? 'not enough history yet' : fr(sh(rf.avg, lim)) + '%/h'}</b><span class="muted why">${esc(rf.why)}</span></div></div>`;
+    h += `<div class="hd"><div><span class="big">${Math.round(sh(lim.now, lim))}%</span><span class="of">left across ${seatsTxt(lim)}</span></div><div class="stat"><span class="muted">Usage rate</span><b>${rf.avg == null ? 'Not enough history yet' : fr(sh(rf.avg, lim)) + '%/h'}</b><span class="muted why">${esc(rf.why)}</span></div></div>`;
     h += chart(p, lim, W);
   } else {        // no pooled chart; the accounts table below still carries the readings and the reset/switch buttons
     const ps = (quotaNoPool(p) ? [`<p>${esc(quotaNoPool(p))}</p>`] : []).concat(p.accounts.filter(a => a.note).map(a => `<p>${p.accounts.length > 1 ? nm(a) + ': ' : ''}${esc(a.note)}</p>`));

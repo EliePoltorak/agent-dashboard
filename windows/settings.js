@@ -153,7 +153,7 @@
   }
 
   // ---- views
-  const pct = (h, capped) => capped ? '<span class="bad">a limit is reached</span>' : h == null ? '<span class="muted">no reading</span>' : `<span class="${h < .1 ? 'bad' : ''}">${Math.round(h * 100)}% left</span>`;
+  const pct = (h, capped) => capped ? '<span class="bad">A limit is reached</span>' : h == null ? '<span class="muted">No reading</span>' : `<span class="${h < .1 ? 'bad' : ''}">${Math.round(h * 100)}% left</span>`;
   const when = ts => { const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)/.exec(ts); return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ts; };
   const busy = () => !!(S.job || S.wait);
   const dis = () => busy() ? ' disabled' : '';
@@ -161,20 +161,20 @@
   function seatCard(p, s) {
     const act = s.active || {};
     const badges = (act.cli ? '<span class="bdg">CLI</span>' : '') + (act.app ? '<span class="bdg app">App</span>' : '') + (act.login ? '<span class="bdg">In use</span>' : '') +
-      (s.roles && !s.roles.cli ? '<span class="muted">app only</span>' : '') + (s.roles && !s.roles.app ? '<span class="muted">CLI only</span>' : '');
+      (s.roles && !s.roles.cli ? '<span class="muted">App only</span>' : '') + (s.roles && !s.roles.app ? '<span class="muted">CLI only</span>' : '');
     const inUse = Object.values(act).some(Boolean);
     const sw = [];
     const L = esc(s.label);
     if (p.can.includes('cli.switch') && s.roles && s.roles.cli && !act.cli) sw.push(`<button data-a="sw-cli" data-l="${L}"${dis()}>Use for CLI</button>`);
-    if (p.can.includes('app.switch') && s.roles && s.roles.app && !act.app) sw.push(`<button data-a="sw-app" data-l="${L}"${dis()}>Use for App</button>`);
-    if (p.kind === 'codex' && p.can.includes('switch') && !act.app) sw.push(`<button data-a="sw-codex" data-l="${L}"${dis()}>Use for CLI + App</button>`);
+    if (p.can.includes('app.switch') && s.roles && s.roles.app && !act.app) sw.push(`<button data-a="sw-app" data-l="${L}"${dis()}>Use for app</button>`);
+    if (p.kind === 'codex' && p.can.includes('switch') && !act.app) sw.push(`<button data-a="sw-codex" data-l="${L}"${dis()}>Use for CLI + app</button>`);
     if (p.kind === 'cred' && !act.login) sw.push(`<button data-a="sw-cred" data-l="${L}"${dis()}>Switch to this</button>`);
     const h = s.health || {};
     return `<div class="seat"><div class="nm"><b>${L}</b>${badges}</div>` +
       `<div>${s.plan ? `<span class="muted">${esc(s.plan)}</span>` : ''}</div>` +
       `<div class="meta">${emailsOn() && s.email ? `<span>${esc(s.email)}</span>` : ''}<span>${pct(s.headroom, s.capped)}</span>` +
       `<label>Counts as <input type="number" min="0" max="100" step="0.5" value="${esc(s.weight)}" data-w="${L}" aria-label="Weight of seat ${L}"${dis()}> seat(s)</label>` +
-      (h.ok === false || h.note ? `<span class="${h.ok === false ? 'bad' : ''}">${esc(h.note || 'problem reading this seat')}</span>` : '') + `</div>` +
+      (h.ok === false || h.note ? `<span class="${h.ok === false ? 'bad' : ''}">${esc(h.note || 'Problem reading this seat')}</span>` : '') + `</div>` +
       `<div class="acts">${sw.join('')}` +
       (p.can.includes('email') ? `<button data-a="email" data-l="${L}"${dis()}>Set address</button>` : '') +
       `<button data-a="remove" data-l="${L}"${dis()}${inUse ? ' disabled title="In use: switch to another seat first"' : ''}>Remove</button></div></div>`;
@@ -186,7 +186,7 @@
       return `<h3>Add a seat</h3><div class="hint">CLI seat: sign in to the account in the window that opens, copy the token it prints, paste it here.</div>` +
         `<div class="row">${nameIn}<button data-a="cli-add"${dis()}>1. Open the sign-in window</button></div>` +
         `<div class="row"><input type="password" id="qs-token" value="${esc(f.token)}" placeholder="Paste the token here" aria-label="Claude token" autocomplete="off" spellcheck="false" style="flex:1;min-width:12em">` +
-        `<label><input type="checkbox" id="qs-replace"${f.replace ? ' checked' : ''}> replace an existing seat</label><button class="primary" data-a="cli-import"${dis()}>2. Save token</button></div>` +
+        `<label><input type="checkbox" id="qs-replace"${f.replace ? ' checked' : ''}> Replace an existing seat</label><button class="primary" data-a="cli-import"${dis()}>2. Save token</button></div>` +
         `<div class="hint">App seat: sign in to the account in the Claude app, quit the app completely, then save it under the seat name above.</div>` +
         `<div class="row"><button data-a="app-capture"${dis()}>Save the app's current login</button></div>`;
     }
@@ -200,7 +200,7 @@
         `<div class="row"><button class="primary" data-a="cred-signin"${dis()}>Open ${esc(p.name)} to sign in</button><button data-a="recheck"${dis()}>Check again</button></div></div>` : '';
     return signin + `<h3>Add a seat</h3>` +
       `<div class="hint">Current login: ${cur.present ? (cur.saved ? 'already saved as a seat' : (emailsOn() && cur.email ? esc(cur.email) : 'not saved yet')) : 'none found'}.</div>` +
-      `<div class="row">${nameIn}<label><input type="checkbox" id="qs-replace"${f.replace ? ' checked' : ''}> replace an existing seat</label>` +
+      `<div class="row">${nameIn}<label><input type="checkbox" id="qs-replace"${f.replace ? ' checked' : ''}> Replace an existing seat</label>` +
       `<button class="primary" data-a="cred-capture"${dis()}${cur.present ? '' : ' disabled title="Sign in first: there is no login to save yet"'}>Save the current login</button></div>`;
   }
 
@@ -209,7 +209,7 @@
       (p.id === 'muse' && p.signin ? `<div class="row"><button class="primary" data-a="muse-login"${dis()}>Open Muse to sign in</button></div>` : '');
     const bestBtn = p.can.includes('best') && p.seats.length > 1 ? `<button data-a="best"${dis()}>Switch to the seat with most headroom</button>` : '';
     const removed = p.removed.length ? `<h3>Removed seats</h3><div class="hint">Moved aside, not deleted. Restore puts one back as it was.</div>` +
-      p.removed.map(r => `<div class="task"><div>${esc(r.label)}<small>removed ${esc(when(r.ts))}</small></div><button data-a="restore" data-id="${esc(r.id)}"${dis()}>Restore</button></div>`).join('') : '';
+      p.removed.map(r => `<div class="task"><div>${esc(r.label)}<small>Removed ${esc(when(r.ts))}</small></div><button data-a="restore" data-id="${esc(r.id)}"${dis()}>Restore</button></div>`).join('') : '';
     return `<div class="hint">${esc(p.how)}</div><div class="row">${bestBtn}</div>` +
       (p.seats.length ? p.seats.map(s => seatCard(p, s)).join('') : '<div class="qs">No seats saved yet.</div>') + addForm(p) + removed;
   }
@@ -219,10 +219,10 @@
     if (!a) return '<div class="qs">Loading…</div>';
     const st = { ready: 'On', running: 'On, running now', disabled: 'Off', missing: 'Not set up on this PC' };
     const tasks = a.tasks.map(t => `<div class="task"><div>${esc(t.name)}<small>${esc(st[t.state] || t.state)}</small></div>` +
-      (t.state === 'missing' ? '' : `<label><input type="checkbox" data-t="${esc(t.id)}"${t.state === 'disabled' ? '' : ' checked'}${dis()}> on</label>`) + `</div>`).join('');
+      (t.state === 'missing' ? '' : `<label><input type="checkbox" data-t="${esc(t.id)}"${t.state === 'disabled' ? '' : ' checked'}${dis()}> On</label>`) + `</div>`).join('');
     const log = (l, name) => l.length ? `<div class="hint">${esc(name)}</div><div class="log">${l.map(esc).join('\n')}</div>` : '';
     return `<h3>Scheduled jobs</h3>${tasks}` +
-      `<div class="task"><div>Wake up running Claude sessions after a limit rotation<small>${a.autoResume ? 'On' : 'Off'}</small></div><label><input type="checkbox" data-resume="1"${a.autoResume ? ' checked' : ''}${dis()}> on</label></div>` +
+      `<div class="task"><div>Wake up running Claude sessions after a limit rotation<small>${a.autoResume ? 'On' : 'Off'}</small></div><label><input type="checkbox" data-resume="1"${a.autoResume ? ' checked' : ''}${dis()}> On</label></div>` +
       `<h3>Rotate proxy</h3><div class="task"><div>${a.proxy.up ? (a.proxy.ok ? 'Running and healthy' : 'Running, but not healthy (a seat is refused)') : 'Not running'}</div><button data-a="proxy-restart"${dis()}>Restart</button></div>` +
       `<h3>Actions</h3><div class="row"><button data-a="sync-history"${dis()}>Sync the Claude app's history now</button><button data-a="keepalive-status"${dis()}>Check the app-seat keepalive</button></div>` +
       log(a.keepaliveLog, 'Claude app-seat keepalive, last lines') + log(a.codexKeepaliveLog, 'Codex keepalive, last lines');
@@ -233,7 +233,7 @@
     if (!S.upd) return '<div class="qs" role="status">Loading…</div>';
     if (!u) return '<div class="qs">The update state is not available on this copy of the dashboard.</div>';
     const n = (u.differing || []).length, d = dis();
-    const when = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'never';
+    const when = ts => ts ? new Date(ts * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Never';
     const status = u.checkout ? 'This copy is a git checkout: update it with git pull there.'
       : u.state === 'running' ? 'An update is installing now.'
       : u.state === 'failed' ? 'The last update did not install: ' + u.text
@@ -241,8 +241,8 @@
       : u.checked ? 'Up to date with GitHub.' : 'Not checked yet.';
     return `<h3>Updates</h3>` +
       `<div class="task"><div>Install updates automatically<small>${u.auto ? 'On: it installs by itself when nothing else is running' : 'Off: the dashboard only offers Update now'}</small></div>` +
-      `<label><input type="checkbox" data-up-auto="1"${u.auto ? ' checked' : ''}${d}> on</label></div>` +
-      `<div class="task"><div>Installed commit<small>${u.installed ? `<code>${esc(u.installed)}</code>${u.checkout ? ' (git checkout)' : n ? '' : ' (matches GitHub)'}` : 'not known yet'}</small></div>` +
+      `<label><input type="checkbox" data-up-auto="1"${u.auto ? ' checked' : ''}${d}> On</label></div>` +
+      `<div class="task"><div>Installed commit<small>${u.installed ? `<code>${esc(u.installed)}</code>${u.checkout ? ' (git checkout)' : n ? '' : ' (matches GitHub)'}` : 'Not known yet'}</small></div>` +
       `<div class="muted" style="text-align:right">Last check<small>${esc(when(u.checked))}</small></div></div>` +
       `<div class="qs ${u.state === 'failed' ? 'err' : n ? 'run' : 'ok'}">${esc(status)}</div>` +
       `<div class="row"><button data-a="upd-check"${d}>${S.wait === 'check' ? 'Checking…' : 'Check now'}</button>` +

@@ -427,7 +427,7 @@ class Settings:
             raise Bad("This login is already saved as seat %s. A second copy of the same login can end up signing the first one out." % other)
         old = seats.get(label)
         if old and not replace and email and (old.get("email") or "").lower() != email.lower():
-            raise Bad("Seat %s holds a different account. Tick 'replace' to overwrite it (the old one is kept in a backup)." % label)
+            raise Bad("Seat %s holds a different account. Tick 'Replace an existing seat' to overwrite it (the old one is kept in a backup)." % label)
         extra = {k: v for k, v in (old or {}).items() if k == "display"}
         self.cred_write_seat(pid, label, live, email, extra)
         self.note_readings(pid)

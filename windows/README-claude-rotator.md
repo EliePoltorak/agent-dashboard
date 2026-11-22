@@ -888,9 +888,9 @@ refused (409) until it exits, when its outcome is logged and the data rebuilt:
 | Button | Runs | Asks first |
 |---|---|---|
 | Claude `Use for CLI` | `pwsh -NoProfile -File claude-cli-account.ps1 --switch <L> --no-usage` | no |
-| Claude `Use for App` | `claude-app-rotator.ps1 --switch <L> --relaunch` | yes: "Quitting the Claude app ends the sessions running in it." |
+| Claude `Use for app` | `claude-app-rotator.ps1 --switch <L> --relaunch` | yes: "Quitting the Claude app ends the sessions running in it." |
 | Claude header `Best seat` | `claude-cli-account.ps1 --switch best --no-usage` (`--best` only prints the ranking) | no |
-| Codex `Use for CLI + App` | `codex-app-rotator.ps1 --switch <L>` | yes |
+| Codex `Use for CLI + app` | `codex-app-rotator.ps1 --switch <L>` | yes |
 | Codex header `Next seat` | `codex-app-rotator.ps1 --rotate` (the next saved seat in order, not a headroom pick) | yes |
 
 A button is left off the seat that already holds that role (its CLI/App badge) and off seats the rotator cannot use (Claude CLI: no `token.txt`; Claude
