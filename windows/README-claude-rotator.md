@@ -838,10 +838,12 @@ counts seats, not weights. The **current** weights are applied to the whole reco
 
 **Measured check (Codex only).** The weight is your statement, so the Codex table also shows a measured one, as a sanity check: from the rollout logs, the
 tokens a seat spends per 1 % of its weekly allowance (input minus cached input plus output, the same for every seat), the median over the last 21 days, divided by
-the same figure for the seats of weight 1. It reads `measured ≈ ×4.6 (12 samples)` under the seat, needs at least 5 samples (`not enough data` otherwise), and turns
-amber when it is more than 30 % away from the configured weight (a ratio of the two, either way). It never feeds the pooled numbers. A sample is the tokens
-between two consecutive whole-percent ticks of one log, so a seat used by several sessions at once reads cheaper per percent than it is, and a seat nobody ran
-in the last 21 days has no samples. A log of the active login is credited to the seat whose known weekly reset matches. Claude, xAI and Gemini show nothing:
+the same figure for the smallest seat of weight 1 (the unit the weights count in). It reads `Measured ≈ ×4.6 (12 samples)` under the seat, needs at least 5 samples
+(`Measured: not enough data` otherwise), and turns amber when it is more than 30 % away from the configured weight (a ratio of the two, either way). It never feeds
+the pooled numbers. A sample is the tokens between two whole-percent ticks of the seat's weekly meter, counted over ALL of that seat's logs merged into one timeline,
+so several sessions running at once on one seat are added together (each log alone would see only its share of what moved the meter). Only samples from the seat's
+current plan count. A seat with fewer than 5 samples in the last 21 days is measured on all its current-plan samples instead, and the line says how many and from when
+(`Measured ≈ ×2.9 (8 samples, Nov 1–3)`). A log of the active login is credited to the seat whose known weekly reset matches. Claude, xAI and Gemini show nothing:
 the rotator never sees their tokens.
 
 **Suggested weight (Codex only).** When the measurement is both steady and far from the weight, the table adds `Suggested weight ×3 (24 samples)` under the

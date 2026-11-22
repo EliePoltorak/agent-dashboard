@@ -2541,8 +2541,8 @@ def merged_events(chunks):
 
 
 def measured_ratios(pairs, now, days=21, minn=5):
-    """{seat: (ratio or None, samples, info)} from codex_measure's pairs: a seat's median tokens per 1 % over the last `days` days, divided by the median of that figure
-    over the weight-1 seats that have one. With fewer than `minn` pairs in the window (a rarely used seat) it falls back to ALL the seat's current-plan pairs, and info says
+    """{seat: (ratio or None, samples, info)} from codex_measure's pairs: a seat's median tokens per 1 % over the last `days` days, divided by that figure for
+    the smallest weight-1 seat that has one (the unit the weights count in). With fewer than `minn` pairs in the window (a rarely used seat) it falls back to ALL the seat's current-plan pairs, and info says
     so ({"wide": True, "from": oldest t, "to": newest t}) so the page can show how old they are; fewer than `minn` pairs altogether: no ratio.
     A sanity check on the configured weights, not an input to them."""
     recent, med, base = _measured(pairs, now, days, minn, True)
@@ -2554,14 +2554,14 @@ def measured_ratios(pairs, now, days=21, minn=5):
 
 
 def _measured(pairs, now, days, minn, wide=False):
-    """(recent {seat: [(t, tokens per 1 %)]}, median {seat: tokens per 1 %} of the seats with `minn`, reference: the median over the weight-1 seats among them or None).
+    """(recent {seat: [(t, tokens per 1 %)]}, median {seat: tokens per 1 %} of the seats with `minn`, reference: the tokens per 1 % of the smallest weight-1 seat among them, or None).
     `wide`: a seat with fewer than `minn` pairs in the last `days` days is measured on all of its pairs instead."""
     recent = {s: [(t, v) for t, v in p if t >= now - days * DAY] for s, p in pairs.items()}
     if wide:
         recent = {s: r if len(r) >= minn else list(pairs[s]) for s, r in recent.items()}
     med = {s: statistics.median(v for _, v in r) for s, r in recent.items() if len(r) >= minn}
     ref = [m for s, m in med.items() if wt("codex", s)[0] == 1]
-    return recent, med, statistics.median(ref) if ref else None
+    return recent, med, min(ref) if ref else None     # the smallest weight-1 seat is the unit the weights count in; a median would let a bigger seat left at 1 by mistake drag it up
 
 
 def nice_weight(x):
@@ -5793,14 +5793,14 @@ def selftest():
         m = measured_ratios(pairs, N)
         assert m == {"A": (1.0, 8, {}), "B": (5.0, 8, {}), "C": (None, 3, {})}, m      # 5 pairs needed; A's 40-day-old pairs left out; B over the weight-1 seat A
         set_weights(None)
-        m = measured_ratios(pairs, N)           # every seat weight 1: the reference is the median of A and B (3000)
-        assert abs(m["B"][0] - 5000 / 3000) < 1e-9 and abs(m["A"][0] - 1000 / 3000) < 1e-9
+        m = measured_ratios(pairs, N)           # every seat weight 1: the reference is the smallest of them (A, 1000)
+        assert m["B"][0] == 5.0 and m["A"][0] == 1.0, m
         assert measured_ratios({"A": [(N, 1000.0)] * 4}, N) == {"A": (None, 4, {})} and measured_ratios({}, N) == {}
         # a seat with fewer than 5 pairs in 21 days falls back to all its pairs and says how old they are; fewer than 5 altogether: still no ratio
         old = lambda n, v, d: [(N - d * DAY + i, float(v)) for i in range(n)]
         mw = measured_ratios({"A": old(8, 1000, 1), "B": old(6, 3000, 30) + old(2, 9000, 2), "C": old(4, 3000, 30), "D": old(3, 3000, 2) + old(2, 3000, 30)}, N)
-        assert mw["A"] == (1 / 3, 8, {}) and mw["B"] == (1.0, 8, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 1}), mw      # B: 2 in the window, so all 8 (median 3000); reference = median(A, B, D) = 3000
-        assert mw["C"] == (None, 4, {}) and mw["D"] == (1.0, 5, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 2}), mw
+        assert mw["A"] == (1.0, 8, {}) and mw["B"] == (3.0, 8, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 1}), mw      # B: 2 in the window, so all 8 (median 3000); reference = A, the smallest (1000)
+        assert mw["C"] == (None, 4, {}) and mw["D"] == (3.0, 5, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 2}), mw
         assert weight_suggestions({"A": old(8, 1000, 1), "B": old(24, 3000, 30)}, N) == {}      # the suggestion stays strict: only the last 21 days
         # a token counter that goes back (a new session) and a window change start a fresh anchor; a tick with no tokens in it is skipped
         e = lambda t, u, r, k: (t, None, u, r, k)
@@ -5830,7 +5830,7 @@ def selftest():
         assert [a["ratio"] for a in blob] == [{"n": 8, "x": 1.0}, {"n": 8, "x": 5.0}, {"n": 3}, {"n": 0}], [a["ratio"] for a in blob]
         assert "ratio" not in build([{"t": N, "s": {"A": {"w": .2, "wr": N + 9999}}}], N, {}, False, {})["providers"][0]["accounts"][0]       # Codex only
         wb = build([{"t": N, "codex": {s: {"w": .2, "wr": N + 9999, "wp": WEEK, "ts": N} for s in "AB"}}], N, {}, False, {"codex": {"pairs": {"A": old(8, 1000, 1), "B": old(6, 3000, 30)}}})["providers"][0]["accounts"]
-        assert wb[1]["ratio"] == {"n": 6, "x": 1.5, "wide": True, "from": N - 30 * DAY, "to": N - 30 * DAY + 5}, wb[1]["ratio"]      # the fallback reaches the page
+        assert wb[1]["ratio"] == {"n": 6, "x": 3.0, "wide": True, "from": N - 30 * DAY, "to": N - 30 * DAY + 5}, wb[1]["ratio"]      # the fallback reaches the page
         # J0: one weekly meter per seat, but several Codex logs of that seat running at once: each log sees only its own share of the tokens between two ticks, so the
         # tokens per 1 % are the COMBINED tokens of all the seat's logs, not each log's share. Every percent here costs 500 tokens in log 1 and 500 in log 2.
         with tempfile.TemporaryDirectory() as td3:
