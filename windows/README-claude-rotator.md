@@ -45,7 +45,8 @@ the Codex CLI, the Grok CLI, the Antigravity app (Gemini).
 | Claude | accounts added with `claude-rotator` (step 4); readings appear once the rotator has probed a seat (`--status`, or the watcher) | Banked reset credits need a full Claude login for that account, which the desktop app keeps: sign in to the account in the app and capture it with `claude-account --capture <label>` (a setup-token cannot read them). Switch buttons need the desktop app for the App role. |
 | Codex | the Codex CLI; one saved login per seat in `%USERPROFILE%\.codex\homes\<label>\`; readings come from each seat's usage cache there and from the Codex session logs | `codexUsageScript` lets Refresh update Codex; `codexRedeemScript` adds Apply reset; a `codex-app-rotator.ps1` next to the dashboard adds switch buttons. All are off until set. |
 | xAI | the Grok CLI, signed in (`grok`) | none |
-| Gemini | the Antigravity app running (not as administrator) | none |
+| Gemini | the Antigravity app running (not as administrator) | none |
+| Muse (Meta) | Muse Code, the `muse` terminal CLI (not the muse.ai agent), on PATH and logged in; `muse_usage_for_dashboard.py` next to the dashboard runs plain `muse usage` and parses its text (no network call, no credentials read). Without `muse` on PATH the tab does not appear | none |
 
 > Supersedes the old seat-based design. There are **no** separate `CLAUDE_CONFIG_DIR`
 > seat directories anymore (`~/.claude-seat2`, `~/.claude-seat3`). An empty/missing seat
