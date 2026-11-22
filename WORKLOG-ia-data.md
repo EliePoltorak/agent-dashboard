@@ -43,3 +43,16 @@ usage-sim.js, README-claude-rotator.md. Parallel branch ia-settings owns dashboa
   Existing test adapted: the "/api/refresh with a Codex command still running" check now asserts the Codex lock (not `refreshing`) is the one kept.
   AFTER numbers (same machine, same method, POST /api/refresh, spare port): 3.6 s, 3.5 s, 3.9 s, 6.9 s (median ~3.7 s) vs BEFORE 13.1 / 8.8 / 23.1 / 11.4 s (median ~12.3 s).
   Single-provider: grok 1.5 s, gemini 2.0 s.
+- [A4 server done + restart PROVEN here] POST /api/update -> rotator-sync --pull (reused unchanged, subprocess, its journal/backups intact) -> when usage-history.py was
+  replaced: restart. Mechanism chosen: the running server starts its replacement FIRST (same interpreter, same args + --wait-port 40, DETACH_FLAGS = CHILD_FLAGS|DETACHED|
+  NEW_PROCESS_GROUP), waits up to 6 s to see it stay alive (a release that does not even load keeps the old server up), then closes its socket and os._exit(0)s. Not "exit
+  with a code the scheduled task restarts": the task's RestartCount is 3 / 1 min, too slow and limited. Experiment first: a detached child of a scheduled task survives the task
+  ending (task state Ready, child kept running). Then end-to-end under a THROWAWAY scheduled task (ia-data-e2e-dashboard, port 8798, own state dir, own bare remote + clone,
+  all in C:\Dev\Temp\ia-e2e; the live install and its task were never touched; the temp task is unregistered, every pid stopped by pid):
+    manual: drift detected (1 file) -> POST /api/update -> 200 {"Updated 1 file.", restart:true} -> listener pid 52796 -> 23852, build id 6f957cd524 -> 3263620737, drift gone,
+            update.done.sha recorded, new process runs at Idle priority, task state Ready.
+    auto  : server started with a stale usage-history.py and autoUpdate absent (= on): first sampler loop's drift check found it, auto_update pulled it ("update (automatic):
+            Updated 1 file."), server restarted itself (pid 29624 -> 58772), build id back to 3263620737.
+  Windows quirk seen: ThreadingHTTPServer's SO_REUSEADDR lets the new server bind while the old one still listens (a few seconds of two listeners; both answer correctly);
+  --wait-port is still the fallback for a platform that refuses. Known limit (shortcut comment): the replacement is not a child of the task, so Task Scheduler's own Stop
+  does not stop it. DETACH_FLAGS added next to CHILD_FLAGS; the existing "every child starts with CHILD_FLAGS" test now allows DETACH_FLAGS (which includes CHILD_FLAGS).
