@@ -30,3 +30,8 @@ usage-sim.js, README-claude-rotator.md. Parallel branch ia-settings owns dashboa
 - [A3 BEFORE numbers, serial refresh at ac89511+A1, this machine, POST /api/refresh from a spare-port server (8797, temp state dir)]
   4 runs: 13.1 s, 8.8 s, 23.1 s, 11.4 s (median ~12.3 s). Component times alone: claude probe 7.8 s, codex usage cmd 3.1 s, grok 0.7 s, muse 1.0 s, gemini 1.0 s
   (sum ~13.6 s; concurrent ceiling = the slowest, claude, ~7.8 s).
+- [A2 done] Kimi provider (pid "kimi", labels 5-hour / Weekly / Monthly / Monthly (coding), colour token --c-kimi added in A6). Token store confirmed from kimi.exe's
+  embedded JS: <KIMI_CODE_HOME|~/.kimi-code>/credentials/*.json with access_token/refresh_token/expires_at (epoch s); base from the `region` file (global -> api.kimi.ai,
+  else api.kimi.com) or KIMI_CODE_BASE_URL. Hidden when kimi is not installed; installed + no login -> "Kimi isn't signed in — open Kimi and log in" (verified live here:
+  installed, signed out). An expired access token is NOT refreshed (Kimi rotates the refresh token; we must not rewrite the CLI's credential) -> note + ponytail-skipped.
+  boosterWallet not shown -> ponytail-skipped. Fixture-tested only (no account).

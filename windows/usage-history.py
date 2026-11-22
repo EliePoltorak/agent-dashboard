@@ -155,6 +155,9 @@ def lower_priority():
 BUCKET5 = 300               # imported history keeps one point per 5 minutes
 GROK_EVERY, SAMPLE_EVERY = 900, 300
 
+# the usage payload's quotas -> (window id, label, default period s); used_ratio is read as a 0-1 fraction, as Kimi Code's own /usage does
+KIMI_WINDOWS = (("limit_5h", "s", "5-hour", 18000), ("limit_7d", "w", "Weekly", WEEK), ("limit_month_total", "m", "Monthly", 30 * DAY), ("limit_month_code", "c", "Monthly (coding)", 30 * DAY))
+
 # provider id -> (name, [(window id, window label, default period s)], [(limit window id, limit label)])
 PROVIDERS = {
     "claude": ("Claude", [("s", "5-hour", 18000), ("w", "Weekly", WEEK), ("f", "Fable weekly", WEEK)],
@@ -163,6 +166,7 @@ PROVIDERS = {
     "grok": ("xAI", [("w", "Weekly", WEEK)], [("w", "Weekly credits")]),
     "gemini": ("Gemini", None, None),      # its windows are whatever the language server reports
     "muse": ("Muse (Meta)", [("s", "5-hour", 18000), ("w", "Weekly", WEEK)], [("s", "5-hour"), ("w", "Weekly")]),     # Muse Code, the muse terminal CLI (not the muse.ai agent)
+    "kimi": ("Kimi", [(w, lbl, per) for _, w, lbl, per in KIMI_WINDOWS], [(w, lbl) for _, w, lbl, _ in KIMI_WINDOWS]),     # Kimi Code (the kimi terminal CLI): 5-hour and weekly, plus the monthly caps when the plan has them
 }
 BADGE = {"cli": "CLI", "app": "App"}     # which seat is in use: the key under a provider's "inUse" -> the pill on the seat
 PROVIDER_NOTE = {"grok": "Cursor's Grok usage counts against this same xAI quota."}
@@ -472,6 +476,98 @@ def fetch_muse(now):
     except (OSError, ValueError, subprocess.SubprocessError):
         return {"ok": False, "note": "Muse usage unavailable (could not run the script)"}, None
     return muse_seat(j, now), None
+
+
+KIMI_EVERY = 300
+KIMI_SIGNED_OUT = "Kimi isn't signed in — open Kimi and log in"
+KIMI_EXPIRED = "Kimi sign-in has expired — open Kimi to refresh it"
+KIMI_BASES = {"mainland-cn": "https://api.kimi.com/coding/v1", "global": "https://api.kimi.ai/coding/v1"}      # what Kimi Code itself uses per region (its `region` file)
+
+
+def kimi_home():
+    return os.environ.get("KIMI_CODE_HOME") or os.path.join(HOME, ".kimi-code")
+
+
+def kimi_installed(home=None, which=None):
+    """Kimi Code is installed: `kimi` on PATH, or its own bin folder in the Kimi home (the installer does not always touch PATH)."""
+    return bool((which or shutil.which)("kimi")) or os.path.isfile(os.path.join(home or kimi_home(), "bin", "kimi.exe" if os.name == "nt" else "kimi"))
+
+
+def kimi_token(now, home=None):
+    """-> ("ok", access token) | ("expired", None) | ("none", None): the newest saved login under <home>/credentials/*.json (Kimi Code's file token store: access_token,
+    refresh_token, expires_at in epoch seconds). An empty access token is a revoked login. Never logged.
+    shortcut: an expired token is NOT refreshed here. Kimi's refresh replaces the refresh token, so refreshing without writing the file back would sign the CLI out and
+    writing the CLI's credential is not this dashboard's job; Kimi Code refreshes it itself the next time it runs. Upgrade only if a stale login turns out common."""
+    rows = []
+    for f in glob.glob(os.path.join(home or kimi_home(), "credentials", "*.json")):
+        try:
+            with open(f, encoding="utf-8-sig") as fh:
+                t = json.load(fh)
+            rows.append((os.path.getmtime(f), t))
+        except (OSError, ValueError):
+            continue
+    expired = False
+    for _, t in sorted(rows, key=lambda r: r[0], reverse=True):
+        a, exp = (t.get("access_token") if isinstance(t, dict) else None), _f(t.get("expires_at")) if isinstance(t, dict) else None
+        if not isinstance(a, str) or not a:
+            continue
+        if exp is None or exp > now + 30:
+            return "ok", a
+        expired = True
+    return ("expired", None) if expired else ("none", None)
+
+
+def kimi_base(home=None):
+    """Kimi Code's API base: KIMI_CODE_BASE_URL, else by the region file (global -> api.kimi.ai, anything else -> api.kimi.com).
+    shortcut: a login made against a custom host (a scoped token) is treated like the default one."""
+    env = os.environ.get("KIMI_CODE_BASE_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        with open(os.path.join(home or kimi_home(), "region"), encoding="utf-8") as fh:
+            return KIMI_BASES.get(fh.read().strip(), KIMI_BASES["mainland-cn"])
+    except OSError:
+        return KIMI_BASES["mainland-cn"]
+
+
+def kimi_seat(j, now):
+    """GET {base}/usages -> seat dict with one window per quota that has a usable used_ratio, or None when the shape is not the expected one.
+    A reset_time that is not an ISO timestamp is left out (the window has no reset shown), never guessed."""
+    try:
+        q = j["usages"]
+        seat = {"ts": int(now)}
+        for key, wid, _, period in KIMI_WINDOWS:
+            e = q.get(key)
+            u = _f(e.get("used_ratio")) if isinstance(e, dict) else None
+            if u is None:
+                continue
+            seat[wid], seat[wid + "p"] = round(min(max(u, 0.0), 1.0), 4), period
+            if isinstance(e.get("reset_time"), str):
+                try:
+                    seat[wid + "r"] = int(_fromiso(e["reset_time"]).timestamp())
+                except ValueError:
+                    pass
+    except (AttributeError, KeyError, TypeError):
+        return None
+    return seat if any(wid in seat for _, wid, _, _ in KIMI_WINDOWS) else None
+
+
+def fetch_kimi(now, home=None, post=http_json):
+    """-> (seat, None) like fetch_muse: no seat at all (so no tab) when Kimi Code is not installed; installed but with no usable login, a note that says to log in."""
+    if not kimi_installed(home):
+        return None, None
+    state, tok = kimi_token(now, home)
+    if state == "none":
+        return {"ok": False, "note": KIMI_SIGNED_OUT}, None
+    if state == "expired":
+        return {"ok": False, "note": KIMI_EXPIRED}, None
+    code, j = post(urllib.request.Request(kimi_base(home) + "/usages", headers={"Authorization": "Bearer " + tok, "Accept": "application/json"}), 10)
+    if code in (401, 403):
+        return {"ok": False, "note": KIMI_EXPIRED}, None
+    seat = kimi_seat(j, now) if code == 200 else None
+    if not seat:
+        return {"ok": False, "note": "Kimi usage unavailable (%s)" % (_bad(code, j) if code != 200 else "unexpected response")}, None
+    return seat, None
 
 
 LS_PATH = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
@@ -1294,6 +1390,13 @@ def sample(now, force=False):
         rec["muse"] = {"muse": seat}
         if seat.get("plan"):
             cache.setdefault("pnote", {})["muse"] = "Plan: " + seat["plan"]
+    try:
+        seat = read_live("kimi", "kimi", fetch_kimi, KIMI_EVERY, now, force, cache)
+    except Exception as e:
+        applog("sample: kimi read failed: %s: %s" % (type(e).__name__, e))
+        seat = {"ok": False, "note": "Kimi usage unavailable (%s)" % type(e).__name__}
+    if seat:
+        rec["kimi"] = {"kimi": seat}
     try:
         seat, why = read_gemini_any(now)    # one short call to Google (the app's own login): read on every sample
     except Exception as e:
@@ -3648,6 +3751,59 @@ def selftest():
     assert read_gemini_any(1, lambda n: (None, GEMINI_EXPIRED), lambda n: ({"ts": 1}, "")) == (None, GEMINI_EXPIRED)      # a credential that does not work is not hidden by the fallback
     assert read_gemini_any(1, lambda n: ({"ts": 2}, ""), lambda n: 1 / 0) == ({"ts": 2}, "")
     assert gemini_version(os.path.join(tempfile.gettempdir(), "no-such-antigravity.exe")) == GEMINI_VER and re.fullmatch(r"\d+\.\d+\.\d+", gemini_version())
+    # Kimi Code: fixture-tested only (no account to read a real answer from)
+    KJ_ = {"usages": {"limit_5h": {"used_ratio": 0.25, "reset_time": "2026-11-22T15:00:00Z"}, "limit_7d": {"used_ratio": "0.5", "reset_time": "2026-11-29T10:00:00.5Z"},
+                      "limit_month_total": {"used_ratio": 1.7, "reset_time": "soon"}, "limit_month_code": {"reset_time": "2026-12-01T00:00:00Z"}}, "boosterWallet": {"balance": {"type": "BOOSTER"}}}
+    ks = kimi_seat(KJ_, 1000)
+    assert ks["s"] == 0.25 and ks["sp"] == 18000 and ks["w"] == 0.5 and ks["wp"] == WEEK and ks["m"] == 1.0 and "mr" not in ks and "c" not in ks and ks["sr"] > 1_700_000_000 and ks["ts"] == 1000, ks
+    assert kimi_seat({"usages": {}}, 1) is None and kimi_seat({}, 1) is None and kimi_seat(None, 1) is None and kimi_seat({"usages": {"limit_5h": {"used_ratio": "x"}}}, 1) is None
+    kb_ = build([{"t": 1000, "kimi": {"kimi": ks}}], 1100, {}, False, {})["providers"][0]
+    assert kb_["id"] == "kimi" and kb_["name"] == "Kimi" and [x["label"] for x in kb_["limits"]] == ["5-hour", "Weekly", "Monthly"] and len(kb_["accounts"][0]["windows"]) == 3, kb_["limits"]
+    with tempfile.TemporaryDirectory() as kh_:
+        cd_ = os.path.join(kh_, "credentials")
+        os.makedirs(cd_)
+        wk_ = lambda name, tok, exp, age=0: (open(os.path.join(cd_, name), "w").write(json.dumps({"access_token": tok, "refresh_token": "r", "expires_at": exp})), os.utime(os.path.join(cd_, name), (time.time() - age,) * 2))
+        assert kimi_token(100, kh_) == ("none", None) and not kimi_installed(kh_, lambda n: None)
+        wk_("kimi-code.json", "", 0)                                                                    # a revoked login (empty access token)
+        assert kimi_token(100, kh_) == ("none", None)
+        wk_("kimi-code.json", "T1", 50)
+        assert kimi_token(100, kh_) == ("expired", None) and kimi_token(10, kh_) == ("ok", "T1")        # 30 s of margin
+        wk_("other.json", "T2", 500, age=100)                                                           # an older file with a good token still counts
+        assert kimi_token(100, kh_) == ("ok", "T2")
+        open(os.path.join(cd_, "junk.json"), "w").write("not json")
+        wk_("kimi-code.json", "T3", 5000)                                                                # the newest login wins
+        assert kimi_token(100, kh_) == ("ok", "T3")
+        assert kimi_installed(kh_, lambda n: "x") and kimi_base(kh_) == KIMI_BASES["mainland-cn"]
+        open(os.path.join(kh_, "region"), "w").write("global\n")
+        assert kimi_base(kh_) == KIMI_BASES["global"]
+        os.environ["KIMI_CODE_BASE_URL"] = "https://k.example/coding/v1/"
+        try:
+            assert kimi_base(kh_) == "https://k.example/coding/v1"
+        finally:
+            del os.environ["KIMI_CODE_BASE_URL"]
+        kreq_ = []
+
+        def kpost(req, timeout=10):
+            kreq_.append((req.full_url, req.get_header("Authorization")))
+            return 200, KJ_
+        seat_, em_ = fetch_kimi(1000, kh_, kpost)
+        assert em_ is None and seat_["s"] == 0.25 and kreq_ == [("https://api.kimi.ai/coding/v1/usages", "Bearer T3")], kreq_
+        assert fetch_kimi(1000, kh_, lambda r, t=10: (401, {}))[0] == {"ok": False, "note": KIMI_EXPIRED} and fetch_kimi(1000, kh_, lambda r, t=10: (500, None))[0]["note"] == "Kimi usage unavailable (HTTP 500)"
+        assert fetch_kimi(1000, kh_, lambda r, t=10: (200, {"usages": {}}))[0]["note"] == "Kimi usage unavailable (unexpected response)"
+        assert fetch_kimi(1000, kh_, lambda r, t=10: (0, "URLError"))[0]["note"] == "Kimi usage unavailable (network error (URLError))"
+        assert fetch_kimi(10**10, kh_, kpost)[0] == {"ok": False, "note": KIMI_EXPIRED} and len(kreq_) == 1                  # an expired login is not sent
+        for f_ in glob.glob(os.path.join(cd_, "*.json")):
+            os.remove(f_)
+        assert fetch_kimi(1000, kh_, kpost) == ({"ok": False, "note": KIMI_SIGNED_OUT}, None)                             # installed, never signed in
+        nb_ = build([{"t": 5, "kimi": {"kimi": {"ok": False, "note": KIMI_SIGNED_OUT}}}], 9, {}, False, {})["providers"][0]
+        assert nb_["id"] == "kimi" and nb_["accounts"][0]["ok"] is False and nb_["accounts"][0]["note"] == KIMI_SIGNED_OUT and nb_["loaded"] == 0     # the page shows the note
+    with tempfile.TemporaryDirectory() as kh2_:
+        keep_which_ = shutil.which
+        shutil.which = lambda n, *a, **k: None
+        try:
+            assert fetch_kimi(1, kh2_, kpost) == (None, None)                                                           # not installed: no seat, so no tab
+        finally:
+            shutil.which = keep_which_
     assert PROVIDERS["grok"][0] == "xAI" and PROVIDERS["gemini"][0] == "Gemini" and manifest()["name"] == manifest()["short_name"] == "Agent Dashboard" and "same xAI quota" in PROVIDER_NOTE["grok"]
 
     # A: history lines and the provider cache lose the retired cursor key, on disk
