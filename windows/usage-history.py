@@ -1930,6 +1930,7 @@ def build_provider(hist, pid, emails, now, extra):
     ch = carry_good(hist, pid)                 # a failed read keeps the seat in the pool, as the headline (latest_of) already has it
     limits = [x for x in (build_limit(ch, latest, pid, wid, lbl, now, dflt) for wid, lbl in lims) if x]
     out = {"id": pid, "name": name, "total": len(accounts), "loaded": sum(a["ok"] for a in accounts),
+           "signed": sum(1 for a in accounts if a["ok"] or a["windows"] or a["email"]),        # what the tabs count: a placeholder row for a signed-out program (no reading, no address) is not an account
            "accounts": accounts, "limits": limits}
     if use:
         out["inUse"] = use
@@ -4166,7 +4167,9 @@ def selftest():
             os.remove(f_)
         assert fetch_kimi(1000, kh_, kpost) == ({"ok": False, "note": KIMI_SIGNED_OUT}, None)                             # installed, never signed in
         nb_ = build([{"t": 5, "kimi": {"kimi": {"ok": False, "note": KIMI_SIGNED_OUT}}}], 9, {}, False, {})["providers"][0]
-        assert nb_["id"] == "kimi" and nb_["accounts"][0]["ok"] is False and nb_["accounts"][0]["note"] == KIMI_SIGNED_OUT and nb_["loaded"] == 0     # the page shows the note
+        assert nb_["id"] == "kimi" and nb_["accounts"][0]["ok"] is False and nb_["accounts"][0]["note"] == KIMI_SIGNED_OUT and nb_["loaded"] == 0 and nb_["signed"] == 0     # the page shows the note; a signed-out Kimi has no accounts to count
+        sb_ = build([{"t": 5, "s": {"A": {"ok": False, "note": "probe failed"}, "B": {"ok": True, "w": 0.1, "wr": 9999, "ts": 5}}}], 9, {"claude": {"A": "a@x.org"}}, False, {})["providers"][0]
+        assert sb_["total"] == 2 and sb_["loaded"] == 1 and sb_["signed"] == 2, sb_     # a real seat whose read failed (its address is known) still counts
     with tempfile.TemporaryDirectory() as kh2_:
         keep_which_ = shutil.which
         shutil.which = lambda n, *a, **k: None
