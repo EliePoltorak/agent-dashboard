@@ -657,6 +657,19 @@ class TestKimiTab(Base):
         self.assertEqual(self.do(action="cred.signin", provider="grok")[0], 404)
         self.assertEqual(self.do(action="cred.signin", provider="nope")[0], 404)
 
+class MuseLogin(Base):
+    def test_muse_login_opens_a_console_only_when_muse_is_installed(self):
+        s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: 0, store=self.store, which=lambda n: None)
+        self.s = s
+        self.assertEqual(self.do(action="muse.login")[0], 404)
+        self.assertEqual(self.pop.calls, [])
+        self.s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: 0, store=self.store, which=lambda n: "C:/x/muse.cmd" if n == "muse" else None)
+        muse = [p for p in self.s.state()["providers"] if p["id"] == "muse"][0]
+        self.assertTrue(muse["signin"])
+        code, r = self.do(action="muse.login")
+        self.assertEqual((code, r["outcome"]), (200, "ok"))
+        self.assertEqual(self.pop.calls[-1][0], ["cmd.exe", "/k", "C:/x/muse.cmd", "login"])
+
 
 class FakeUpdateStore:
     """The slice of the dashboard's Store that the Updates section talks to."""

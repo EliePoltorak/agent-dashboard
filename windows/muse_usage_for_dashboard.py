@@ -178,6 +178,8 @@ def run_muse_usage(timeout=60):
         return None, "", "Could not run `muse usage`: %s" % exc
     raw = (proc.stdout or "") + (("\n" + proc.stderr) if proc.stderr else "")
     if proc.returncode != 0:
+        if "not logged in" in raw.lower():
+            return proc.returncode, raw.strip(), "Muse isn't signed in — open Settings → Muse to sign in."
         return proc.returncode, raw.strip(), "`muse usage` exited with code %d." % proc.returncode
     return 0, raw.strip(), None
 

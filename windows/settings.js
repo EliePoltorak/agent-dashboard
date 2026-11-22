@@ -205,7 +205,8 @@
   }
 
   function providerView(p) {
-    if (p.kind === 'unsupported') return `<div class="qs">${esc(p.how)}</div>`;
+    if (p.kind === 'unsupported') return `<div class="qs">${esc(p.how)}</div>` +
+      (p.id === 'muse' && p.signin ? `<div class="row"><button class="primary" data-a="muse-login"${dis()}>Open Muse to sign in</button></div>` : '');
     const bestBtn = p.can.includes('best') && p.seats.length > 1 ? `<button data-a="best"${dis()}>Switch to the seat with most headroom</button>` : '';
     const removed = p.removed.length ? `<h3>Removed seats</h3><div class="hint">Moved aside, not deleted. Restore puts one back as it was.</div>` +
       p.removed.map(r => `<div class="task"><div>${esc(r.label)}<small>removed ${esc(when(r.ts))}</small></div><button data-a="restore" data-id="${esc(r.id)}"${dis()}>Restore</button></div>`).join('') : '';
@@ -321,6 +322,7 @@
     if (a === 'codex-add') { if (!need()) return; return act({ action: 'codex.add', label: f.label }); }
     if (a === 'codex-check') { if (!need()) return; return act({ action: 'codex.check', label: f.label }); }
     if (a === 'cred-signin') return act({ action: 'cred.signin', provider: p });
+    if (a === 'muse-login') return act({ action: 'muse.login' });
     if (a === 'recheck') { S.note = null; return load(); }
     if (a === 'cred-capture') { if (!need()) return; return act({ action: 'cred.capture', provider: p, label: f.label, replace: f.replace }); }
     if (a === 'upd-check') return act({ action: 'update.check' }, () => { S.upd = null; });

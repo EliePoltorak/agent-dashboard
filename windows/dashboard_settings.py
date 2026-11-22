@@ -542,7 +542,8 @@ class Settings:
             if self.cred_has_login(pid) or self.cred_seats(pid) or ("installed" in sp and sp["installed"]()):     # an installed program that is signed out still gets its tab (to sign in from)
                 provs.append(self.cred_state(pid))
         provs.append({"id": "muse", "name": "Muse (Meta)", "kind": "unsupported", "seats": [], "removed": [], "can": [],
-                      "how": "Seats can't be switched for Muse: this PC doesn't keep its login anywhere the dashboard can find (no login file, no Windows Credential Manager entry). Switch accounts with `muse login`."})
+                      "how": "Seats can't be switched for Muse: this PC doesn't keep its login anywhere the dashboard can find (no login file, no Windows Credential Manager entry). To sign in or change account, press the button below.",
+                      "signin": self.which("muse") is not None})
         return {"providers": provs}
 
     # ------------------------------------------------------------ automation
@@ -820,6 +821,13 @@ class Settings:
             raise Bad("%s is not installed on this PC." % self.providers[pid]["name"], 404)
         self.console(["cmd.exe", "/k", exe])
         return {"outcome": "ok", "text": "A window opened running %s. Sign in there, then come back and press Check again." % self.providers[pid]["app"]}
+
+    def do_muse_login(self, b):
+        exe = self.which("muse")
+        if not exe:
+            raise Bad("Muse is not installed on this PC.", 404)
+        self.console(["cmd.exe", "/k", exe, "login"])
+        return {"outcome": "ok", "text": "A window opened running muse login. Sign in there, then press Refresh on the Muse tab."}
 
     def do_cred_switch(self, b):
         pid, l = self.cpid(b), self.label(b)
