@@ -62,10 +62,10 @@ usage-sim.js, README-claude-rotator.md. Parallel branch ia-settings owns dashboa
   update banner states: Updating... / Updated to <sha> (10 min, dismissible) / Update available + Update now / last update failed. Checked in headless Chrome screenshots
   (light + dark, desktop; Gemini groups, Kimi signed-out note). Existing tests changed because the behaviour they pinned was replaced on purpose: the "update notice" test in
   usage-sim.test.js (the notice no longer tells the user to run rotator-sync in a terminal) and the selftest line asserting the template's meta refresh.
-  PRE-EXISTING failure (not mine): `node usage-sim.test.js` stops at its "public install" file scan because windows/sync-app-history.ps1 names the owner's folder (C:\Dev\hameishiv
+  PRE-EXISTING failure (not mine): `node usage-sim.test.js` stops at its "public install" file scan because windows/sync-app-history.ps1 names the owner's folder (the owner's repo folder
   in a comment and as the -Cwd default) - it fails identically at the base commit and hides every later test in that file. I verified the rest with a temp copy of the test that
   skips that one file (_sim_check.test.js, untracked, not committed).
   INCIDENT (mine, repaired): I ran my worktree server beside a copied rotator.local.json (repoClone = the live install's clone), the new auto-update pulled GitHub's older files
-  OVER my worktree (windows/ was its live folder; rotator-sync only refuses its own clone). rotator rotator-sync's own backups held my exact pre-pull files; restored byte for byte,
+  OVER my worktree (windows/ was its live folder; rotator-sync only refuses its own clone). rotator-sync's own backups held my exact pre-pull files; restored byte for byte,
   the copied json removed. Root-cause fix: in_checkout() - the dashboard never updates (button or automatic) a copy that sits in a git checkout (.git in its folder or the one
-  above); selftest covers it. The live install (C:\Dev\Rotators, no .git above it) is unaffected; nothing in it was touched at any point.
+  above); selftest covers it. The live install (the live install folder, no .git above it) is unaffected; nothing in it was touched at any point.
