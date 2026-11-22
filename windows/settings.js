@@ -21,6 +21,7 @@
 #qs-drawer .qs{border-radius:12px;background:var(--bg);padding:10px 14px;margin:0 0 12px;color:var(--ink2)}
 #qs-drawer .qs.err{border-left:4px solid var(--bad)}#qs-drawer .qs.run{border-left:4px solid var(--c-codex)}#qs-drawer .qs.ok{border-left:4px solid var(--ok)}
 #qs-drawer .qs pre{margin:8px 0 0;font:12px ui-monospace,Consolas,monospace;white-space:pre-wrap;color:var(--ink2);max-height:180px;overflow:auto}
+#qs-drawer h2:focus{outline:none}
 #qs-drawer h3{font-size:15px;margin:18px 0 8px}
 #qs-drawer .seat{background:var(--bg);border-radius:12px;padding:10px 14px;margin:0 0 8px;display:grid;grid-template-columns:1fr auto;gap:6px 12px;align-items:center}
 #qs-drawer .seat .nm{display:flex;flex-wrap:wrap;gap:4px 8px;align-items:baseline}
@@ -258,12 +259,22 @@
     else if (S.wait) st = `<div class="qs run" role="status">Working…</div>`;
     else if (S.note) st = `<div class="qs ${S.note.ok ? 'ok' : 'err'}" role="${S.note.ok ? 'status' : 'alert'}">${S.note.ok ? '' : '<b>'}${esc(S.note.text)}${S.note.ok ? '' : '</b>'}${(S.note.tail || []).length ? `<pre>${esc(S.note.tail.join('\n'))}</pre>` : ''}</div>`;
     const p = ps.find(x => x.id === S.tab);
-    const keep = document.activeElement && document.activeElement.id;
-    drawer.innerHTML = `<div class="qh"><h2 id="qs-title">Settings</h2><button data-a="close" aria-label="Close settings">Close</button></div>` +
+    drawer.innerHTML = `<div class="qh"><h2 id="qs-title" tabindex="-1">Settings</h2><button data-a="close" aria-label="Close settings">Close</button></div>` +
       `<div class="qb"><div class="qt" role="group" aria-label="Section">${tabs}</div><div aria-live="polite">${st}</div>` +
       (S.tab === 'auto' ? autoView() : S.tab === 'upd' ? updView() : p ? providerView(p) : '<div class="qs">Loading…</div>') + `</div>`;
-    if (keep) { const el = document.getElementById(keep); if (el) el.focus(); }
+    restoreFocus();
   }
+
+  // Focus: a re-render replaces every node, so remember the focused control by what it is (id, or its data-* keys) and put focus back on its twin; if it is gone
+  // (a removed seat), focus the title so keyboard focus never falls out of the drawer onto the page behind it.
+  const fkey = el => el.id || ['a', 'l', 'id', 'tab', 'w', 't', 'resume', 'upAuto'].map(k => el.dataset[k] || '').join('|');
+  function restoreFocus() {
+    if (cfm.open) return;
+    for (const el of drawer.querySelectorAll('button,input,select')) if (S.fk && !el.disabled && fkey(el) === S.fk) { el.focus(); return; }
+    if (document.activeElement === drawer || !drawer.contains(document.activeElement)) { const t = document.getElementById('qs-title'); if (t) t.focus(); }
+  }
+  drawer.addEventListener('focusin', e => { if (e.target.matches('button,input,select')) S.fk = fkey(e.target); });
+  cfm.addEventListener('close', restoreFocus);
 
   // ---- events
   drawer.addEventListener('input', e => {
@@ -318,10 +329,12 @@
     if (a === 'sync-history') return act({ action: 'sync.history' });
     if (a === 'keepalive-status') return act({ action: 'keepalive.status' });
   });
-  drawer.addEventListener('close', () => { S.open = false; S.form.token = ''; });
+  // Escape closes the drawer (the dialog's own behaviour; a confirmation open on top closes first), and focus goes back to the gear, found again because the page rebuilds it.
+  drawer.addEventListener('close', () => { S.open = false; S.form.token = ''; S.fk = ''; const g = document.getElementById('qs-gear'); if (g) g.focus(); });
 
   function openDrawer() {
     S.open = true; S.note = null;
+    S.fk = '';
     if (!drawer.open) drawer.showModal();
     render();
     load();
