@@ -170,10 +170,13 @@
         `<div class="row">${nameIn}<button data-a="codex-add"${dis()}>1. Open the sign-in window</button><button class="primary" data-a="codex-check"${dis()}>2. Check the login</button></div>`;
     }
     const cur = p.current || {};
-    return `<h3>Add a seat</h3><div class="hint">${esc(p.how)}</div>` +
+    const signin = p.signin && !cur.present
+      ? `<div class="qs err" role="status"><b>${esc(p.name)} is installed but not signed in.</b> Press the button: ${esc(p.name)} opens in a new window and asks you to log in. When you are done, press Check again.` +
+        `<div class="row"><button class="primary" data-a="cred-signin"${dis()}>Open ${esc(p.name)} to sign in</button><button data-a="recheck"${dis()}>Check again</button></div></div>` : '';
+    return signin + `<h3>Add a seat</h3><div class="hint">${esc(p.how)}</div>` +
       `<div class="hint">Current login: ${cur.present ? (cur.saved ? 'already saved as a seat' : (emailsOn() && cur.email ? esc(cur.email) : 'not saved yet')) : 'none found'}.</div>` +
       `<div class="row">${nameIn}<label><input type="checkbox" id="qs-replace"${f.replace ? ' checked' : ''}> replace an existing seat</label>` +
-      `<button class="primary" data-a="cred-capture"${dis()}>Save the current login</button></div>`;
+      `<button class="primary" data-a="cred-capture"${dis()}${cur.present ? '' : ' disabled title="Sign in first: there is no login to save yet"'}>Save the current login</button></div>`;
   }
 
   function providerView(p) {
@@ -258,6 +261,8 @@
     if (a === 'app-capture') { if (!need()) return; return act({ action: 'claude.app.capture', label: f.label }); }
     if (a === 'codex-add') { if (!need()) return; return act({ action: 'codex.add', label: f.label }); }
     if (a === 'codex-check') { if (!need()) return; return act({ action: 'codex.check', label: f.label }); }
+    if (a === 'cred-signin') return act({ action: 'cred.signin', provider: p });
+    if (a === 'recheck') { S.note = null; return load(); }
     if (a === 'cred-capture') { if (!need()) return; return act({ action: 'cred.capture', provider: p, label: f.label, replace: f.replace }); }
     if (a === 'proxy-restart') return act({ action: 'proxy.restart' }, () => { S.auto = null; });
     if (a === 'sync-history') return act({ action: 'sync.history' });

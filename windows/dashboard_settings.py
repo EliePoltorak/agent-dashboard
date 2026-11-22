@@ -168,7 +168,7 @@ def real_procs():
 
 
 class Settings:
-    def __init__(self, home=None, here=None, popen=real_popen, procs=real_procs, cred=None, now=time.time, store=None):
+    def __init__(self, home=None, here=None, popen=real_popen, procs=real_procs, cred=None, now=time.time, store=None, which=shutil.which):
         self.home = home or os.path.expanduser("~")
         self.root = os.path.join(self.home, ".claude-cli-accounts")             # Claude CLI seats
         self.app_seats = os.path.join(self.home, ".claude-app-seats")           # Claude desktop-app seats
@@ -177,7 +177,7 @@ class Settings:
         self.cred_root = os.path.join(self.home, ".agent-dashboard-seats")      # the generic credential-seat store (Gemini, Grok, Kimi)
         self.here = here or HERE
         self.local_cfg = os.path.join(self.here, "rotator.local.json")
-        self.popen, self.procs, self.now, self.store = popen, procs, now, store
+        self.popen, self.procs, self.now, self.store, self.which = popen, procs, now, store, which
         self._cred = cred
         self.busy = threading.Lock()
         self.jobs = {}
@@ -197,8 +197,14 @@ class Settings:
                      "files": [os.path.join(h, ".grok", "auth.json")], "dirs": [],
                      "how": "Sign in with `grok` using the account, close Grok, then save it here."},
             "kimi": {"name": "Kimi", "app": "Kimi", "procs": ["kimi.exe", "kimi-code.exe"], "creds": [], "email": lambda: "", "files": [], "dirs": [kimi_dir],
+                     "installed": lambda: self.kimi_exe() is not None, "signin": True,
                      "how": "Sign in to Kimi with the account, close Kimi, then save it here. (Not tested on a real Kimi login yet.)"},
         }
+
+    def kimi_exe(self):
+        """Kimi Code's executable: `kimi` on PATH, else its own bin folder (the installer does not always touch PATH); None when it is not installed."""
+        kimi_home = os.environ.get("KIMI_CODE_HOME") or os.path.join(self.home, ".kimi-code")
+        return self.which("kimi") or next((f for f in (os.path.join(kimi_home, "bin", "kimi.exe"), os.path.join(kimi_home, "bin", "kimi")) if os.path.isfile(f)), None)
 
     @property
     def cred(self):
@@ -479,7 +485,7 @@ class Settings:
                         "weight": self.weight_of(pid, l, {}), "active": {"login": l == active}, "headroom": self.headroom(wins),
                         "health": {"ok": ba.get("ok", True) if l == active else None, "note": ba.get("note", "") if l == active else ""}})
         return {"id": pid, "name": sp["name"], "kind": "cred", "app": sp["app"], "how": sp["how"], "seats": out,
-                "current": {"email": live_email, "saved": bool(active), "present": self.cred_has_login(pid)},
+                "current": {"email": live_email, "saved": bool(active), "present": self.cred_has_login(pid)}, "signin": bool(sp.get("signin")),
                 "removed": self.removed([self.cdir(pid)]), "can": ["capture", "switch", "best", "email", "weight", "remove"]}
 
     def cred_has_login(self, pid):
@@ -527,7 +533,7 @@ class Settings:
         for pid in ("claude", "codex"):
             provs.append(self.state_for(pid))
         for pid, sp in self.providers.items():
-            if self.cred_has_login(pid) or self.cred_seats(pid):
+            if self.cred_has_login(pid) or self.cred_seats(pid) or ("installed" in sp and sp["installed"]()):     # an installed program that is signed out still gets its tab (to sign in from)
                 provs.append(self.cred_state(pid))
         provs.append({"id": "muse", "name": "Muse (Meta)", "kind": "unsupported", "seats": [], "removed": [], "can": [],
                       "how": "Seats can't be switched for Muse: this PC doesn't keep its login anywhere the dashboard can find (no login file, no Windows Credential Manager entry). Switch accounts with `muse login`."})
@@ -789,6 +795,16 @@ class Settings:
     def do_cred_capture(self, b):
         pid, l = self.cpid(b), self.label(b)
         return self.sync(lambda: self.cred_capture(pid, l, b.get("replace") is True))
+
+    def do_cred_signin(self, b):
+        pid = self.cpid(b)
+        if not self.providers[pid].get("signin"):
+            raise Bad("There is no sign-in window to open for %s." % self.providers[pid]["name"], 404)
+        exe = self.kimi_exe() if pid == "kimi" else None
+        if not exe:
+            raise Bad("%s is not installed on this PC." % self.providers[pid]["name"], 404)
+        self.console(["cmd.exe", "/k", exe])
+        return {"outcome": "ok", "text": "A window opened running %s. Sign in there, then come back and press Check again." % self.providers[pid]["app"]}
 
     def do_cred_switch(self, b):
         pid, l = self.cpid(b), self.label(b)

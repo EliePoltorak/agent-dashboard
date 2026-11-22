@@ -98,7 +98,7 @@ class Base(unittest.TestCase):
         self.clock = [1_800_000_000]
         self.store = types.SimpleNamespace(blob={"providers": []})
         self.s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: list(self.running), cred=self.cred,
-                             now=lambda: self.clock[0], store=self.store)
+                             now=lambda: self.clock[0], store=self.store, which=lambda n: None)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -575,7 +575,7 @@ class TestCredSeats(CredBase):
         kh = os.path.join(self.tmp, "kimi")
         os.environ["KIMI_CODE_HOME"] = kh
         try:
-            s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: self.clock[0], store=self.store)
+            s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: self.clock[0], store=self.store, which=lambda n: None)
             self.assertEqual(s.handle("POST", "/api/settings/action", {}, {"action": "cred.capture", "provider": "kimi", "label": "k"})[0], 400)   # not signed in
             put(os.path.join(kh, "credentials", "a.json"), '{"t": 1}')
             put(os.path.join(kh, "credentials", "sub", "b.json"), '{"t": 2}')
@@ -594,6 +594,58 @@ class TestCredSeats(CredBase):
                 os.environ.pop("KIMI_CODE_HOME", None)
             else:
                 os.environ["KIMI_CODE_HOME"] = old
+
+
+class TestKimiTab(Base):
+    def setUp(self):
+        Base.setUp(self)
+        self.old = os.environ.get("KIMI_CODE_HOME")
+        self.kh = os.path.join(self.tmp, "kimi")
+        os.environ["KIMI_CODE_HOME"] = self.kh
+        self.s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: self.clock[0], store=self.store, which=lambda n: None)   # reads the folder at start
+
+    def tearDown(self):
+        if self.old is None:
+            os.environ.pop("KIMI_CODE_HOME", None)
+        else:
+            os.environ["KIMI_CODE_HOME"] = self.old
+        Base.tearDown(self)
+
+    def ids(self):
+        return [p["id"] for p in self.s.state()["providers"]]
+
+    def test_not_installed_means_no_tab_and_no_sign_in(self):
+        self.assertNotIn("kimi", self.ids())
+        code, r = self.do(action="cred.signin", provider="kimi")
+        self.assertEqual((code, r["outcome"]), (404, "error"))
+        self.assertEqual(self.pop.calls, [])
+
+    def test_installed_but_signed_out_has_a_tab_that_can_open_kimi_to_log_in(self):
+        exe = os.path.join(self.kh, "bin", "kimi.exe")
+        put(exe)
+        p = self.provider("kimi")
+        self.assertEqual((p["signin"], p["current"]["present"], p["seats"]), (True, False, []))
+        self.assertEqual(self.do(action="cred.capture", provider="kimi", label="k")[0], 400)           # nothing to save yet
+        code, r = self.do(action="cred.signin", provider="kimi")
+        self.assertEqual((code, r["outcome"]), (200, "ok"))
+        argv, kw = self.pop.calls[-1]
+        self.assertEqual(argv, ["cmd.exe", "/k", exe])                                                 # a console running kimi, nothing from the page in the command
+        self.assertEqual(kw["creationflags"], ds.NEW_CONSOLE)
+
+    def test_kimi_on_the_path_counts_as_installed(self):
+        s = ds.Settings(home=self.home, here=self.here, popen=self.pop, procs=lambda: [], cred=self.cred, now=lambda: 0, store=self.store, which=lambda n: "C:/x/kimi.exe" if n == "kimi" else None)
+        self.assertIn("kimi", [p["id"] for p in s.state()["providers"]])
+
+    def test_once_a_login_exists_it_can_be_saved_as_a_seat(self):
+        put(os.path.join(self.kh, "bin", "kimi.exe"))
+        put(os.path.join(self.kh, "credentials", "a.json"), '{"t": 1}')
+        self.assertTrue(self.provider("kimi")["current"]["present"])
+        self.assertEqual(self.do(action="cred.capture", provider="kimi", label="k")[0], 200)
+        self.assertEqual([x["label"] for x in self.provider("kimi")["seats"]], ["k"])
+
+    def test_signin_is_only_for_providers_that_have_one(self):
+        self.assertEqual(self.do(action="cred.signin", provider="grok")[0], 404)
+        self.assertEqual(self.do(action="cred.signin", provider="nope")[0], 404)
 
 
 class TestHelpers(unittest.TestCase):
