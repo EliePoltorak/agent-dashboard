@@ -141,6 +141,11 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   assert.strictEqual(quotaSeat({ label: 'A', email: 'a@x.org' }, false, esc), 'A');
   assert.strictEqual(quotaSeat({ label: 'A', email: 'a@x.org' }, true, esc), 'A<small>a@x.org</small>');
   assert.strictEqual(quotaSeat({ label: 'B', email: null }, true, esc), 'B');
+  // a provider's own single login is named by its program, or by the address when emails are shown; a seat letter is left as it is
+  assert.strictEqual(quotaSeat({ label: 'antigravity', email: 'g@x.org' }, false, esc), 'Antigravity');
+  assert.strictEqual(quotaSeat({ label: 'antigravity', email: 'g@x.org' }, true, esc), 'g@x.org');
+  assert.strictEqual(quotaSeat({ label: 'antigravity', email: null }, true, esc), 'Antigravity');
+  assert.strictEqual(quotaSeat({ label: 'kimi' }, false, esc) + quotaSeat({ label: 'grok' }, false, esc) + quotaSeat({ label: 'muse' }, false, esc), 'KimiGrokMuse');
   assert.strictEqual(quotaSeat({ label: '<', email: '<e>' }, true, esc), '&lt;<small>&lt;e></small>');
   const cli = '<span class="bdg cli" role="img" title="Claude Code CLI is on this seat" aria-label="Claude Code CLI is on this seat">CLI</span>';
   const app = '<span class="bdg app" role="img" title="Desktop app is on this seat" aria-label="Desktop app is on this seat">App</span>';

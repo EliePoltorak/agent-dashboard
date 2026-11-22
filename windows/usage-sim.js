@@ -64,8 +64,11 @@ function quotaSuggest(a, esc) {
   if (!s) return '';
   return '<small class="sg">Suggested weight ×' + quotaNum(s.w) + ' (' + s.n + ' samples) <button class="cp" data-a="copyw" data-v="' + esc(quotaFragment(a)) + '">Copy setting</button></small>';
 }
+// A provider with one login of its own keeps its history under a program-ish label ("antigravity"): the page names it by the program, or by the address when emails are shown.
+const QUOTA_OWN = { antigravity: 'Antigravity', grok: 'Grok', muse: 'Muse', kimi: 'Kimi' };
 function quotaSeat(a, emails, esc) {
-  return esc(a.label) + quotaWeight(a, esc) + (a.badges || []).map(b => quotaBadge(b, '', esc)).join('') + (emails && a.email ? '<small>' + esc(a.email) + '</small>' : '') +
+  const own = QUOTA_OWN[a.label], showMail = emails && a.email;
+  return esc(own ? (showMail ? a.email : own) : a.label) + quotaWeight(a, esc) + (a.badges || []).map(b => quotaBadge(b, '', esc)).join('') + (showMail && !own ? '<small>' + esc(a.email) + '</small>' : '') +
     (a.plan ? '<small class="pl">Plan: ' + esc(a.plan.replace(/_/g, ' ')) + '</small>' : '') + quotaMeasure(a, esc) + quotaSuggest(a, esc);
 }
 // A provider header's badges with their seat letter ("CLI D", "App B") as HTML, or '' when no seat is known to be in use.
