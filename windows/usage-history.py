@@ -40,6 +40,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
 
@@ -606,6 +607,202 @@ def read_gemini(now, probe=ls_probe, query=query_ls):
     return None, LS_ADMIN if hidden else LS_AGY if bare else LS_OFF
 
 
+GEMINI_CRED = "gemini:antigravity"          # Antigravity's login in the Windows Credential Manager (a generic credential)
+GEMINI_API = "https://daily-cloudcode-pa.googleapis.com/v1internal"     # not cloudcode-pa: that host answered stale 100 % values
+GEMINI_VER = "2.34.0"                       # shortcut: used when the installed app's version cannot be read; nothing else depends on it, bump it with the app
+GEMINI_NO_LOGIN = "Sign in to Antigravity once"
+GEMINI_EXPIRED = "Antigravity sign-in expired — open Antigravity"
+GEMINI_PERIOD = {"weekly": WEEK, "5h": 18000}       # the quota summary's bucket windows -> seconds
+GEMINI_WLABEL = {"weekly": "Weekly", "5h": "5-hour"}
+GEMINI_TOKEN = {}                           # a refreshed access token, in memory only: the credential is never written back
+GEMINI_PAIRS = []                           # the OAuth client id/secret pairs found in the installed app, once per process
+GEMINI_PROJECT = {}                         # email -> Cloud Code companion project
+
+
+def cred_read(target):
+    """The bytes of one Windows Credential Manager generic credential, or None (not there, not Windows). Never logged."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class CRED(ctypes.Structure):
+        _fields_ = [("Flags", wintypes.DWORD), ("Type", wintypes.DWORD), ("TargetName", wintypes.LPWSTR), ("Comment", wintypes.LPWSTR),
+                    ("LastWritten", wintypes.FILETIME), ("CredentialBlobSize", wintypes.DWORD), ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                    ("Persist", wintypes.DWORD), ("AttributeCount", wintypes.DWORD), ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", wintypes.LPWSTR), ("UserName", wintypes.LPWSTR)]
+    adv = ctypes.WinDLL("advapi32")
+    adv.CredReadW.argtypes, adv.CredReadW.restype = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.POINTER(CRED))), wintypes.BOOL
+    adv.CredFree.argtypes = (ctypes.c_void_p,)
+    p = ctypes.POINTER(CRED)()
+    if not adv.CredReadW(target, 1, 0, ctypes.byref(p)):
+        return None
+    try:
+        return ctypes.string_at(p.contents.CredentialBlob, p.contents.CredentialBlobSize)
+    finally:
+        adv.CredFree(p)
+
+
+def gemini_login(blob):
+    """The credential's JSON -> {"access", "refresh", "exp" (epoch s), "email"}, or None when it is not the expected shape."""
+    try:
+        j = json.loads(blob.decode("utf-8-sig"))
+        t = j["token"]
+        access, refresh = t["access_token"], t.get("refresh_token")
+        if not isinstance(access, str) or not access:
+            return None
+        exp = int(_fromiso(t["expiry"]).timestamp()) if t.get("expiry") else 0
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    email = j.get("id_token_email")
+    return {"access": access, "refresh": refresh if isinstance(refresh, str) and refresh else None, "exp": exp, "email": email if isinstance(email, str) and email else None}
+
+
+def gemini_version(path=None):
+    """The installed Antigravity app's version (its exe's file version), else GEMINI_VER."""
+    exe = path or os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Antigravity", "Antigravity.exe")
+    if os.name != "nt" or not os.path.isfile(exe):
+        return GEMINI_VER
+    try:
+        import ctypes
+        from ctypes import wintypes
+        v = ctypes.WinDLL("version")
+        v.GetFileVersionInfoSizeW.argtypes, v.GetFileVersionInfoSizeW.restype = (wintypes.LPCWSTR, ctypes.c_void_p), wintypes.DWORD
+        v.GetFileVersionInfoW.argtypes, v.GetFileVersionInfoW.restype = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p), wintypes.BOOL
+        v.VerQueryValueW.argtypes, v.VerQueryValueW.restype = (ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)), wintypes.BOOL
+        n = v.GetFileVersionInfoSizeW(exe, None)
+        buf = ctypes.create_string_buffer(n)
+        pv, ln = ctypes.c_void_p(), wintypes.UINT()
+        if not n or not v.GetFileVersionInfoW(exe, 0, n, buf) or not v.VerQueryValueW(buf, "\\", ctypes.byref(pv), ctypes.byref(ln)):
+            return GEMINI_VER
+        ms, ls = struct.unpack("<II", ctypes.string_at(pv.value + 8, 8))       # VS_FIXEDFILEINFO.dwFileVersionMS / LS
+        return "%d.%d.%d" % (ms >> 16, ms & 0xFFFF, ls >> 16) if ms >> 16 else GEMINI_VER
+    except (OSError, ValueError, struct.error):
+        return GEMINI_VER
+
+
+def gemini_oauth_pairs(path=None):
+    """[(client id, client secret)] found inside the installed language server (every id with every secret), or [].
+    Read at run time on purpose: no client secret is kept in this repo. The file is ~200 MB, so this runs once per process, and only when a token has to be refreshed."""
+    exe = path or os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Antigravity", "resources", "bin", "language_server.exe")
+    idr, sr = re.compile(rb"\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com"), re.compile(rb"GOCSPX-[A-Za-z0-9_-]{28}")
+    ids, secs, tail = [], [], b""
+    try:
+        with open(exe, "rb") as fh:
+            while True:
+                chunk = fh.read(8 << 20)
+                if not chunk:
+                    break
+                data = tail + chunk
+                ids += [m.group().decode() for m in idr.finditer(data)]
+                secs += [m.group().decode() for m in sr.finditer(data)]
+                tail = data[-200:]              # a match cut by the chunk edge is whole in the next scan (and found twice: de-duplicated below)
+    except OSError:
+        return []
+    return [(i, s) for i in dict.fromkeys(ids) for s in dict.fromkeys(secs)]
+
+
+def gemini_refresh(refresh_token, post=http_json, pairs=None):
+    """A new access token for the saved refresh token -> (token, exp) | ("expired", 0) when Google refuses it | (None, 0) when it could not be asked.
+    Tries each client pair found in the installed app until one is accepted; the working pair goes first the next time."""
+    if pairs is None:
+        if not GEMINI_PAIRS:
+            GEMINI_PAIRS.extend(gemini_oauth_pairs())
+        pairs = GEMINI_PAIRS
+    refused = False
+    for i, (cid, sec) in enumerate(list(pairs)):
+        body = urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": cid, "client_secret": sec}).encode()
+        code, j = post(urllib.request.Request("https://oauth2.googleapis.com/token", data=body, method="POST",
+                                              headers={"Content-Type": "application/x-www-form-urlencoded"}), 15)
+        if code == 200 and isinstance(j, dict) and isinstance(j.get("access_token"), str):
+            if i:
+                pairs.insert(0, pairs.pop(i))
+            return j["access_token"], int(time.time()) + int(_f(j.get("expires_in")) or 3000)
+        if code == 0:
+            return None, 0
+        refused = refused or code in (400, 401)     # invalid_grant (a revoked login) and invalid_client (the wrong pair) look alike: expired only once every pair refused
+    return ("expired", 0) if refused else (None, 0)
+
+
+def parse_gemini_quota(j, now):
+    """retrieveUserQuotaSummary -> seat dict with one window per (group, bucket), or None when the shape is not the expected one.
+    The window id is a stable hash of the group's name and the bucket's window; the label is "<group> · Weekly" or "<group> · 5-hour". A bucket with no
+    remainingFraction is 0 left (the API leaves a zero out). A bucket whose window is neither weekly nor 5h is skipped, never guessed at."""
+    try:
+        seat = {"ts": int(now), "n": {}}
+        for g in j["groups"]:
+            name = str(g["displayName"]).strip()
+            for b in g.get("buckets") or []:
+                period = GEMINI_PERIOD.get(b.get("window"))
+                frac = _f(b.get("remainingFraction") or 0)
+                if period is None or frac is None or not name:
+                    continue
+                wid = gemini_pool_id([name, b["window"]])
+                seat["n"][wid] = "%s · %s" % (name, GEMINI_WLABEL[b["window"]])
+                seat[wid], seat[wid + "p"] = round(1 - min(max(frac, 0.0), 1.0), 4), period
+                if b.get("resetTime"):
+                    seat[wid + "r"] = int(_fromiso(b["resetTime"]).timestamp())
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    return seat if seat["n"] else None
+
+
+def read_gemini_api(now, cred=cred_read, post=http_json, version=None, refresh=gemini_refresh):
+    """(seat, note) from Antigravity's own login and Google's Cloud Code quota API, no running app needed; (None, None) when there is no credential at all
+    (the caller then tries the running language server). The access token lasts an hour: an expired one is refreshed IN MEMORY (GEMINI_TOKEN), the
+    credential is never written back. No token and no address is logged."""
+    login = gemini_login(cred(GEMINI_CRED) or b"")
+    if not login:
+        return None, None
+    tok, exp = login["access"], login["exp"]
+    if GEMINI_TOKEN.get("for") == login["refresh"] and GEMINI_TOKEN.get("exp", 0) > exp:
+        tok, exp = GEMINI_TOKEN["access"], GEMINI_TOKEN["exp"]
+    ua = "antigravity/hub/%s windows/amd64" % (version or gemini_version())      # the user agent decides which quota groups come back: this one has all three
+    for attempt in (0, 1):
+        if exp <= now + 60 or attempt:             # expired (or the API just refused the token): ask for a new one
+            if not login["refresh"]:
+                return None, GEMINI_EXPIRED
+            new, nexp = refresh(login["refresh"], post)
+            if new == "expired":
+                return None, GEMINI_EXPIRED
+            if new is None:
+                return None, "Antigravity usage unavailable (could not refresh the sign-in)"
+            GEMINI_TOKEN.update({"for": login["refresh"], "access": new, "exp": nexp})
+            tok, exp = new, nexp
+        hdr = {"Authorization": "Bearer " + tok, "Content-Type": "application/json", "User-Agent": ua}
+        proj = GEMINI_PROJECT.get(login["email"] or "")
+        if not proj:
+            code, j = post(urllib.request.Request(GEMINI_API + ":loadCodeAssist", data=b'{"metadata":{"ideType":"ANTIGRAVITY"}}', method="POST", headers=hdr), 15)
+            p = j.get("cloudaicompanionProject") if isinstance(j, dict) else None
+            proj = p if isinstance(p, str) and p else p.get("id") if isinstance(p, dict) else None
+            if code in (401, 403) and not attempt:
+                continue
+            if code != 200 or not proj:
+                return None, "Antigravity usage unavailable (%s)" % (_bad(code, j) if code != 200 else "no Cloud Code project on this account")
+            GEMINI_PROJECT[login["email"] or ""] = proj
+        code, j = post(urllib.request.Request(GEMINI_API + ":retrieveUserQuotaSummary", data=json.dumps({"project": proj}).encode(), method="POST", headers=hdr), 15)
+        if code in (401, 403) and not attempt:
+            continue
+        if code != 200:
+            return None, "Antigravity usage unavailable (%s)" % _bad(code, j)
+        seat = parse_gemini_quota(j, now)
+        if not seat:
+            return None, "Antigravity usage unavailable (unexpected response)"
+        if login["email"]:
+            seat["email"] = login["email"]      # sample() takes it out again: it is the provider cache's, never the history's
+        return seat, ""
+    return None, GEMINI_EXPIRED
+
+
+def read_gemini_any(now, api=None, ls=None):
+    """The Gemini seat: Antigravity's own login first; only a PC with no such credential falls back to the running language server (the older IDE)."""
+    seat, why = (api or read_gemini_api)(now)
+    if seat or why is not None:
+        return seat, why
+    seat, why = (ls or read_gemini)(now)
+    return (seat, "") if seat else (None, GEMINI_NO_LOGIN if why == LS_OFF else why)       # "not running" says nothing useful once we know there is no login; an admin or agy note still does
+
+
 class PcacheError(Exception):
     """The provider cache exists but cannot be read as a JSON object: a read-modify-write must not carry on from an empty one and replace it."""
 
@@ -1098,7 +1295,7 @@ def sample(now, force=False):
         if seat.get("plan"):
             cache.setdefault("pnote", {})["muse"] = "Plan: " + seat["plan"]
     try:
-        seat, why = read_gemini(now)        # local call: read on every sample
+        seat, why = read_gemini_any(now)    # one short call to Google (the app's own login): read on every sample
     except Exception as e:
         applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
         seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
@@ -3365,6 +3562,92 @@ def selftest():
     assert fetch_muse.__doc__ and (shutil.which("muse") or fetch_muse(1) == (None, None))      # no muse CLI: no seat is recorded, so the provider has no account
     mb = build([{"t": 1000, "muse": {"muse": muse_seat({"ok": True, "five_hour_used_percent": 25.0, "weekly_used_percent": 50.0}, 1000)}}], 1100)["providers"][0]
     assert mb["id"] == "muse" and mb["name"] == "Muse (Meta)" and [x["label"] for x in mb["limits"]] == ["5-hour", "Weekly"], mb
+    # Gemini through Google's Cloud Code quota API (the response shape of retrieveUserQuotaSummary, as observed 2026-11-22)
+    GQ_ = {"groups": [
+        {"displayName": "Gemini Models", "description": "d", "buckets": [
+            {"bucketId": "a", "displayName": "Weekly", "window": "weekly", "resetTime": "2026-11-29T10:00:00Z", "remainingFraction": 0.41},
+            {"bucketId": "b", "displayName": "5 hour", "window": "5h", "resetTime": "2026-11-22T15:00:00Z"}]},                    # no remainingFraction: 0 left
+        {"displayName": "Claude and GPT models", "buckets": [
+            {"window": "weekly", "resetTime": "2026-11-29T10:00:00Z", "remainingFraction": 1}, {"window": "5h", "resetTime": "2026-11-22T15:00:00Z", "remainingFraction": 1}]},
+        {"displayName": "Gemini 4 Argon", "buckets": [{"window": "weekly", "resetTime": "2026-11-29T10:00:00.1234567Z", "remainingFraction": 1}, {"window": "monthly", "remainingFraction": 0.5}]}]}
+    gq = parse_gemini_quota(GQ_, 1000)
+    gw = lambda g, w: gemini_pool_id([g, w])
+    assert [gq["n"][k] for k in gq["n"]] == ["Gemini Models · Weekly", "Gemini Models · 5-hour", "Claude and GPT models · Weekly", "Claude and GPT models · 5-hour", "Gemini 4 Argon · Weekly"], gq["n"]
+    assert gq[gw("Gemini Models", "weekly")] == 0.59 and gq[gw("Gemini Models", "weekly") + "p"] == WEEK and gq[gw("Gemini Models", "5h")] == 1.0 and gq[gw("Gemini Models", "5h") + "p"] == 18000
+    assert gq[gw("Gemini 4 Argon", "weekly")] == 0.0 and gq[gw("Gemini Models", "weekly") + "r"] > 1_700_000_000 and gq["ts"] == 1000       # the unknown "monthly" bucket is skipped
+    assert parse_gemini_quota({"groups": []}, 1) is None and parse_gemini_quota({}, 1) is None and parse_gemini_quota(None, 1) is None and parse_gemini_quota({"groups": [{"buckets": []}]}, 1) is None
+    gqb = build([{"t": 1000, "gemini": {"antigravity": gq}}], 1100, {}, False, {})["providers"][0]
+    assert gqb["id"] == "gemini" and len(gqb["accounts"][0]["windows"]) == 5 and gqb["accounts"][0]["windows"][0]["label"] == "Gemini Models · Weekly", gqb["accounts"][0]["windows"][0]
+    assert gqb["accounts"][0]["windows"][4]["used"] == 0.0 and gqb["accounts"][0]["windows"][0]["used"] == 0.59
+    cred_ = lambda exp, rt="R1": json.dumps({"token": {"access_token": "A1", "refresh_token": rt, "expiry": exp}, "id_token_email": "me@x.example"}).encode()
+    gl = gemini_login(cred_("2026-11-22T07:53:34.3845412-05:00"))
+    assert gl["access"] == "A1" and gl["refresh"] == "R1" and gl["email"] == "me@x.example" and gl["exp"] == 1_795_352_014, gl
+    assert gemini_login(b"nope") is None and gemini_login(b"{}") is None and gemini_login(b'{"token":{"access_token":""}}') is None and gemini_login(b'{"token":{"access_token":"a","expiry":"x"}}') is None
+    calls_ = []
+
+    def fake_post(req, timeout=10):
+        calls_.append((req.full_url.split(":")[-1], req.get_header("Authorization"), req.get_header("User-agent")))
+        u = req.full_url
+        if u.endswith("loadCodeAssist"):
+            return 200, {"cloudaicompanionProject": "proj-1"}
+        if u.endswith("retrieveUserQuotaSummary"):
+            assert json.loads(req.data) == {"project": "proj-1"}
+            return (401, {}) if req.get_header("Authorization") == "Bearer BAD" else (200, GQ_)
+        return 200, {"access_token": "A2", "expires_in": 3599}
+    GEMINI_TOKEN.clear(), GEMINI_PROJECT.clear()
+    far_ = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3000))
+    seat_, why_ = read_gemini_api(time.time(), lambda t: cred_(far_), fake_post, "9.9.9")
+    assert why_ == "" and seat_["email"] == "me@x.example" and len(seat_["n"]) == 5 and [c[0] for c in calls_] == ["loadCodeAssist", "retrieveUserQuotaSummary"], calls_
+    assert calls_[0][1] == "Bearer A1" and calls_[0][2] == "antigravity/hub/9.9.9 windows/amd64"        # the saved token while it lasts, the user agent that returns every group
+    calls_.clear()
+    seat_, why_ = read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, "9.9.9", refresh=lambda rt, post: ("A2", int(time.time()) + 3000))
+    assert why_ == "" and calls_[-1][1] == "Bearer A2" and [c[0] for c in calls_] == ["retrieveUserQuotaSummary"] and GEMINI_TOKEN["access"] == "A2"      # expired: refreshed, project remembered
+    calls_.clear()
+    read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, "9.9.9", refresh=lambda rt, post: 1 / 0)
+    assert calls_[-1][1] == "Bearer A2"                                                                  # the refreshed token is reused from memory, no second refresh
+    assert read_gemini_api(5, lambda t: None, fake_post) == (None, None) and read_gemini_api(5, lambda t: b"junk", fake_post) == (None, None)       # no credential
+    assert read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z", None), fake_post)[1] == GEMINI_EXPIRED            # expired and no refresh token
+    GEMINI_TOKEN.clear()
+    assert read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, refresh=lambda rt, post: ("expired", 0)) == (None, GEMINI_EXPIRED)
+    assert "could not refresh" in read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, refresh=lambda rt, post: (None, 0))[1]
+    GEMINI_TOKEN.clear()
+    far_ = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3000))
+    calls_.clear()
+    stale_ = lambda t: json.dumps({"token": {"access_token": "BAD", "refresh_token": "R1", "expiry": far_}}).encode()
+    seat_, why_ = read_gemini_api(time.time(), stale_, fake_post, "9.9.9", refresh=lambda rt, post: ("A2", int(time.time()) + 3000))
+    assert why_ == "" and [c[1] for c in calls_ if c[0] == "retrieveUserQuotaSummary"] == ["Bearer BAD", "Bearer A2"]       # the API refuses a token that looked valid: one refresh, one retry
+    assert read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (500, {}))[1] == "Antigravity usage unavailable (HTTP 500)"
+    assert read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (0, "URLError"))[1] == "Antigravity usage unavailable (network error (URLError))"
+    GEMINI_PROJECT.clear()
+    assert "unexpected response" in read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (200, {"cloudaicompanionProject": "p"}))[1]
+    GEMINI_PROJECT.clear()
+    assert "no Cloud Code project" in read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (200, {}))[1]
+    GEMINI_PROJECT.clear()
+    # the OAuth refresh: client pairs are read from the installed app at run time; the first pair Google accepts is remembered
+    with tempfile.TemporaryDirectory() as ld_:
+        fakeexe_ = os.path.join(ld_, "language_server.exe")
+        cid_ = lambda n: ("123456789012-" + "abcdefghijklmnopqrstuvwxyz012345"[:30 + n % 2] + ".apps.googleusercontent.com").encode()
+        open(fakeexe_, "wb").write(b"\0" * (9 << 20) + b"junk" + cid_(0) + b"\0" + b"GOCSPX-" + b"s" * 28 + b"\0xx" + cid_(1) + b"GOCSPX-" + b"t" * 28 + b"\0")      # past one 8 MB read
+        prs_ = gemini_oauth_pairs(fakeexe_)
+        assert len(prs_) == 4 and prs_[0][1] == "GOCSPX-" + "s" * 28 and gemini_oauth_pairs(os.path.join(ld_, "missing.exe")) == []
+    tried_ = []
+
+    def tok_post(req, timeout=10):
+        body = urllib.parse.parse_qs(req.data.decode())
+        tried_.append((body["client_id"][0][-8:], body["client_secret"][0][7:9]))
+        return (200, {"access_token": "N1", "expires_in": 100}) if body["client_secret"][0][7] == "t" else (400, {"error": "invalid_client"})
+    pl2_ = list(prs_)
+    got_ = gemini_refresh("R1", tok_post, pl2_)
+    assert got_[0] == "N1" and len(tried_) == 2 and got_[1] > time.time() and pl2_[0][1][7] == "t"           # one pair refused, the second accepted, and tried first next time
+    pl_ = list(prs_)
+    assert gemini_refresh("R1", lambda r, t=10: (400, {"error": "invalid_grant"}), pl_) == ("expired", 0) and gemini_refresh("R1", lambda r, t=10: (0, "x"), pl_) == (None, 0)
+    assert gemini_refresh("R1", lambda r, t=10: (500, None), pl_) == (None, 0) and gemini_refresh("R1", tok_post, []) == (None, 0)
+    # the fallback: no credential asks the running language server (the older IDE); neither -> sign in once
+    assert read_gemini_any(1, lambda n: (None, None), lambda n: ({"ts": 1}, "")) == ({"ts": 1}, "")
+    assert read_gemini_any(1, lambda n: (None, None), lambda n: (None, LS_OFF)) == (None, GEMINI_NO_LOGIN)
+    assert read_gemini_any(1, lambda n: (None, GEMINI_EXPIRED), lambda n: ({"ts": 1}, "")) == (None, GEMINI_EXPIRED)      # a credential that does not work is not hidden by the fallback
+    assert read_gemini_any(1, lambda n: ({"ts": 2}, ""), lambda n: 1 / 0) == ({"ts": 2}, "")
+    assert gemini_version(os.path.join(tempfile.gettempdir(), "no-such-antigravity.exe")) == GEMINI_VER and re.fullmatch(r"\d+\.\d+\.\d+", gemini_version())
     assert PROVIDERS["grok"][0] == "xAI" and PROVIDERS["gemini"][0] == "Gemini" and manifest()["name"] == manifest()["short_name"] == "Agent Dashboard" and "same xAI quota" in PROVIDER_NOTE["grok"]
 
     # A: history lines and the provider cache lose the retired cursor key, on disk
@@ -4197,10 +4480,11 @@ def selftest():
             assert cst.codex_reset_clear("A", new2)["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
             r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(b"?", 1) if "--confirm" in argv else Proc(json.dumps(dict(rd, rate_limits_before=dict(rd["rate_limits_before"], banked_reset_credits=1))).encode()))
             assert "unconfirmed" in r_["text"] and "A" in load_pcache()["codex_pending"]                              # the read showed 3 -> 1: still marked
-            stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini")}
+            stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini", "read_gemini_api")}
+            NOAPI_ = lambda now_: (None, None)      # Antigravity's own login is never read here (this PC may have one): the language-server fallback is what the stubs below replace
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({"A": {"ts": int(time.time()) + 5, "w": 0.1, "banked": 0}}, {}),
-                                 fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"))
+                                 fetch_grok=lambda now_: (None, None), read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "x"))
                 sample(time.time(), True)
             finally:
                 globals().update(stub)
@@ -4210,7 +4494,7 @@ def selftest():
                 raise RuntimeError("boom")
             try:
                 keep_gone0_ = codex_homes_gone
-                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini=boom_,
+                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini_api=NOAPI_, read_gemini=boom_,
                                  codex_homes_gone=lambda *a_: True)
                 rs_ = sample(time.time(), True)
             finally:
@@ -4233,7 +4517,7 @@ def selftest():
             keep_gone_ = codex_homes_gone
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
-                                 read_gemini=lambda now_: (None, "x"), codex_homes_gone=lambda *a_: False)
+                                 read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "x"), codex_homes_gone=lambda *a_: False)
                 assert "codex" not in sample(time.time(), True)
             finally:
                 globals().update(stub, codex_homes_gone=keep_gone_)
@@ -4245,9 +4529,9 @@ def selftest():
             # a failed Gemini read AFTER a good one is recorded too (ok False): the history shows the outage, which carry_good and the rates need
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
-                                 read_gemini=lambda now_: ({"ts": int(now_), "plan": "Pro"}, None))
+                                 read_gemini_api=NOAPI_, read_gemini=lambda now_: ({"ts": int(now_), "plan": "Pro"}, None))
                 assert sample(time.time(), True)["gemini"]["antigravity"]["ts"] > 0
-                globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
+                globals().update(read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "Antigravity isn't running"))
                 rg_ = sample(time.time(), True)
             finally:
                 globals().update(stub)
@@ -4255,14 +4539,14 @@ def selftest():
             # the address in Antigravity's own answer is cached for the page and never recorded in the history; a good read naming none removes it; a failed read keeps it
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
-                                 read_gemini=lambda now_: ({"ts": int(now_), "email": "ag@x.example"}, None))
+                                 read_gemini_api=NOAPI_, read_gemini=lambda now_: ({"ts": int(now_), "email": "ag@x.example"}, None))
                 rg_ = sample(time.time(), True)
                 assert load_pcache()["emails"]["gemini"] == {"antigravity": "ag@x.example"}, load_pcache().get("emails")
                 assert "email" not in rg_["gemini"]["antigravity"] and "ag@x" not in json.dumps(rg_), rg_
-                globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
+                globals().update(read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "Antigravity isn't running"))
                 sample(time.time(), True)
                 assert load_pcache()["emails"]["gemini"] == {"antigravity": "ag@x.example"}                           # not read: the cached address stays
-                globals().update(read_gemini=lambda now_: ({"ts": int(now_)}, None))
+                globals().update(read_gemini_api=NOAPI_, read_gemini=lambda now_: ({"ts": int(now_)}, None))
                 sample(time.time(), True)
                 assert "antigravity" not in load_pcache()["emails"].get("gemini", {}), load_pcache().get("emails")      # read, no address: unknown, not a stale one
             finally:
@@ -5368,7 +5652,8 @@ def selftest():
         assert not load_pcache().get("credits_claims")                                           # a seat that cannot send saves no claim
         # B: provider-cache writers never drop what another process saved meanwhile (a pending reset claim): a sample merges only its own
         # changes after its slow provider reads, and a transaction waits for the lock and starts from the file as it then is
-        stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini")}
+        stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini", "read_gemini_api")}
+        NOAPI_ = lambda now_: (None, None)      # Antigravity's own login is never read here (this PC may have one): the language-server fallback is what the stubs below replace
 
         def mid_sample(now_):           # the server saves a claim while this sample is still reading providers
             o_ = load_pcache()
@@ -5376,7 +5661,7 @@ def selftest():
             save_pcache(o_)
             return None, "not readable"
         try:
-            globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), read_gemini=mid_sample)
+            globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), read_gemini_api=NOAPI_, read_gemini=mid_sample)
             save_pcache({"credits": {"A": dict(ke)}})
             sample(KN, True)
             pc = load_pcache()

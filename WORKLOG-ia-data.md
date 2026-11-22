@@ -20,3 +20,10 @@ usage-sim.js, README-claude-rotator.md. Parallel branch ia-settings owns dashboa
 - Kimi token file subdir/wire names: confirm from kimi.exe strings (best effort).
 
 ## Progress log
+- [A1 done] Gemini via Cloud Code quota API. Live check on this machine (owner's account): 5 windows, (Gemini Models weekly/5h, Claude and GPT models weekly/5h,
+  Gemini 4 Argon weekly), 0.7 s with a valid token; forced-stale token path (real refresh token, in-memory refresh, client pairs scanned from language_server.exe in
+  ~4.5 s once, 9 id/secret combos tried) works: 6.8 s first time, 0.55 s after. Credential never written back; no secrets in repo.
+  Notes: Antigravity 2.34.0 exe version read via ctypes (GetFileVersionInfo); the "running LS --override_ide_version" source from the plan is not used (needs the
+  1.3 s CIM probe; the exe version gives the same answer) -> ponytail-skipped.
+  NB: files are CRLF; Edit-tool/py edits flip them, so I run C:\Dev\Temp\crlf-fix.py on the three CRLF files before each commit.
+  Existing sample() tests stub `read_gemini`; I added a `read_gemini_api=NOAPI_` stub next to them so they never touch the real login (test-only change).
