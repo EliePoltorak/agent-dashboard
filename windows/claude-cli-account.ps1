@@ -1223,6 +1223,8 @@ function Select-RotationTarget {
 # conhost sessions take WriteConsoleInput with no focus steal.
 function Ping-ActiveSessions {
   param([string]$Message)
+  # The dashboard's Settings page switches auto-resume off by creating this marker; removing it switches it back on.
+  if (Test-Path -LiteralPath (Join-Path $Root '.auto-resume-off')) { Write-RotateLog '  (auto-resume is off in Settings: running sessions not pinged)' DarkGray; return }
   $script = Join-Path (Split-Path -Parent $PSCommandPath) 'claude-resume-sessions.ps1'
   if (-not (Test-Path $script)) { Write-RotateLog "  (cannot ping sessions: $script missing)" DarkYellow; return }
   try {
