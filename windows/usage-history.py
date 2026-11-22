@@ -1361,19 +1361,10 @@ def lift_awaits(codex, seen):
     return cleared
 
 
-def sample(now, force=False):
-    rec = {"t": int(now), "s": read_claude()}
-    cache = load_pcache()
-    before = json.loads(json.dumps(cache))      # the provider reads below are slow: only what they change is merged back, under the lock
-    codex, cemails = read_codex()
-    for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
-        if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
-            codex[label] = fresh
-    lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
-    if codex or codex_homes_gone():     # recorded even when empty once the last saved home is removed: that snapshot must win in latest_of over the older seats
-        rec["codex"] = codex
-    if codex:
-        cache.setdefault("emails", {})["codex"] = cemails
+GEMINI_EVERY = 240          # s: under SAMPLE_EVERY, so the sampler always reads again, but a Refresh moments before a sample is not asked twice
+
+
+def _live_grok(rec, cache, now, force):
     try:
         seat = read_live("grok", "grok", fetch_grok, GROK_EVERY, now, force, cache)
     except Exception as e:              # one provider's surprise must not cost the whole sample: it becomes that provider's note (not cached, so the next sample retries)
@@ -1381,6 +1372,9 @@ def sample(now, force=False):
         seat = {"ok": False, "note": "Grok usage unavailable (%s)" % type(e).__name__}
     if seat:
         rec["grok"] = {"grok": seat}
+
+
+def _live_muse(rec, cache, now, force):
     try:
         seat = read_live("muse", "muse", fetch_muse, MUSE_EVERY, now, force, cache)
     except Exception as e:
@@ -1390,6 +1384,9 @@ def sample(now, force=False):
         rec["muse"] = {"muse": seat}
         if seat.get("plan"):
             cache.setdefault("pnote", {})["muse"] = "Plan: " + seat["plan"]
+
+
+def _live_kimi(rec, cache, now, force):
     try:
         seat = read_live("kimi", "kimi", fetch_kimi, KIMI_EVERY, now, force, cache)
     except Exception as e:
@@ -1397,11 +1394,20 @@ def sample(now, force=False):
         seat = {"ok": False, "note": "Kimi usage unavailable (%s)" % type(e).__name__}
     if seat:
         rec["kimi"] = {"kimi": seat}
-    try:
-        seat, why = read_gemini_any(now)    # one short call to Google (the app's own login): read on every sample
-    except Exception as e:
-        applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
-        seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
+
+
+def _live_gemini(rec, cache, now, force):
+    c = cache.get("gemini_read") or {}
+    if not force and c.get("at") and now - c["at"] < GEMINI_EVERY:
+        seat, why = c.get("seat"), c.get("why") or ""
+    else:
+        try:
+            seat, why = read_gemini_any(now)    # one short call to Google (the app's own login)
+        except Exception as e:
+            applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
+            seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
+        cache["gemini_read"] = json.loads(json.dumps({"at": int(now), "seat": seat, "why": why}))      # the address stays in the provider cache, as the cache's own emails do
+    seat = json.loads(json.dumps(seat)) if seat else seat       # a copy: the email is taken out of it below, and must stay in the cached one
     if seat:
         email = seat.pop("email", None)             # before the seat is recorded: no address lands in the usage history
         if isinstance(email, str) and email:
@@ -1415,6 +1421,51 @@ def sample(now, force=False):
     else:                               # not readable: recorded as a failed read, so the history marks the outage (carry_good, the rates and the profile need the failure
         cache.setdefault("notes", {})["gemini"] = {"antigravity": why}      # records to bridge a short one and break at a long one); the last good reading stays on show (latest_of), its age the Read column
         rec["gemini"] = {"antigravity": {"ok": False, "note": why}}
+
+
+LIVE = {"grok": _live_grok, "muse": _live_muse, "kimi": _live_kimi, "gemini": _live_gemini}      # the providers read over the network or a child process, in the order the page lists them
+
+
+def run_live(pids, rec, cache, now, force):
+    """The live providers' reads, one thread each (every one bounded by its own timeouts): the wall clock is the slowest, not the sum. Each writes its own keys of `rec`
+    and `cache` (`setdefault` on the shared parents is atomic), so no lock is needed."""
+    def one(pid):
+        try:
+            LIVE[pid](rec, cache, now, force)
+        except Exception as e:   # shortcut: each reader catches its own; this is only the last net, so one thread's surprise never loses the others' readings
+            applog("sample: %s read crashed: %s: %s" % (pid, type(e).__name__, e))
+    ts = [threading.Thread(target=one, args=(p,), daemon=True) for p in pids]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+
+def refresh_live(pid, now):
+    """One live provider read, forced, into the provider cache (the slow part of refreshing that provider); sample() then finds it fresh and does not read it again."""
+    before = load_pcache()
+    cache = json.loads(json.dumps(before))
+    LIVE[pid]({}, cache, now, True)
+    try:
+        pcache_merge(before, cache)
+    except PcacheError as e:
+        applog("refresh: provider cache not updated: %s" % e)
+
+
+def sample(now, force=False):
+    rec = {"t": int(now), "s": read_claude()}
+    cache = load_pcache()
+    before = json.loads(json.dumps(cache))      # the provider reads below are slow: only what they change is merged back, under the lock
+    codex, cemails = read_codex()
+    for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
+        if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
+            codex[label] = fresh
+    lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
+    if codex or codex_homes_gone():     # recorded even when empty once the last saved home is removed: that snapshot must win in latest_of over the older seats
+        rec["codex"] = codex
+    if codex:
+        cache.setdefault("emails", {})["codex"] = cemails
+    run_live(LIVE, rec, cache, now, force)
     try:
         pcache_merge(before, cache)
     except PcacheError as e:                    # the provider cache is unreadable and was left alone: this sample's Claude reading is still worth recording
@@ -2796,8 +2847,70 @@ class Store:
     def __init__(self):
         self.lock = threading.RLock()
         self.hist = load()
-        self.refreshing = threading.Lock()
+        self.refreshing = threading.Lock()      # the exclusive actions (a switch, a reset): one at a time, and never while a provider is refreshing (refresh_running)
+        self.plocks = {pid: threading.Lock() for pid in PROVIDERS}      # one per provider: a refresh holds only the providers it reads
         self.blob = build(self.hist, time.time(), load_emails(), True, load_extra())
+
+    def plock(self, pid):
+        """The refresh lock of one provider (a Store built without __init__, the selftest's, makes its locks here)."""
+        return self.__dict__.setdefault("plocks", {}).setdefault(pid, threading.Lock())
+
+    def refresh_running(self):
+        return any(l.locked() for l in self.__dict__.get("plocks", {}).values())
+
+    def refresh_one(self, pid, now):
+        """The live part of refreshing one provider -> (what it did, for the log; a Codex usage command still running, else None). The providers do not wait for each other."""
+        if pid == "claude":
+            try:
+                return "probe %s" % probe_claude(), None
+            except (OSError, subprocess.SubprocessError) as e:
+                return type(e).__name__, None
+        if pid == "codex":
+            cmd = codex_usage_argv()
+            err, p = run_codex_usage(cmd) if cmd else (None, None)     # first, so this refresh's sample reads its caches
+            if err:
+                applog("refresh: %s" % err)
+            return "still running" if p else err or ("updated" if cmd else "not set up"), p
+        refresh_live(pid, now)
+        return "read", None
+
+    def refresh(self, pids):
+        """Refresh the named providers AT ONCE, one thread and one lock each, then rebuild from what they wrote -> (blob, note, handed), or None when nothing could start
+        (a switch or reset is running, or every named provider is already refreshing). A provider already refreshing is left to that run. A Codex usage command that outlives its
+        wait is never killed: `handed` is then True, and its waiter keeps the Codex lock until it ends, the request included (codex_usage_wait)."""
+        if self.refreshing.locked():
+            return None
+        got = [pid for pid in pids if self.plock(pid).acquire(blocking=False)]
+        handed, mine, res = False, threading.Event(), {}
+        try:
+            if not got or self.refreshing.locked():     # the second look (the finally gives the locks back): a switch that took its lock after the first look has seen these held, or this stops
+                return None
+            now, procs = time.time(), {}
+
+            def one(pid):
+                try:
+                    res[pid], procs[pid] = self.refresh_one(pid, now)
+                except Exception as e:   # shortcut: one provider's failure is its own note in the log; the others and the rebuild still happen
+                    applog("refresh: %s failed: %s: %s" % (pid, type(e).__name__, e))
+                    res[pid], procs[pid] = "failed (%s)" % type(e).__name__, None
+            ts = [threading.Thread(target=one, args=(pid,), daemon=True) for pid in got]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            p = procs.get("codex")
+            if p is not None:               # never killed: from here its waiter owns the Codex lock, whatever happens below, until it and this request end
+                handed = True
+                threading.Thread(target=self.codex_usage_wait, args=(p, mine, self.plock("codex")), daemon=True).start()
+            blob = self.take()
+            applog("refresh: %s, %d providers" % (", ".join("%s %s" % kv for kv in res.items()), len(blob["providers"])))
+            note = res.get("codex") if "codex" in res and res["codex"] not in ("updated", "not set up", "still running") else None     # a Codex command that could not run or failed is shown, not only logged
+            return blob, note, handed
+        finally:
+            mine.set()
+            for pid in got:
+                if not (handed and pid == "codex"):
+                    self.plock(pid).release()
 
     def import_codex(self, now, cdir=None):
         """Recorded points from the rollout logs modified since the last import (the mtime watermark lives in the provider cache)."""
@@ -3085,9 +3198,10 @@ class Store:
         finally:
             self.refreshing.release()
 
-    def codex_usage_wait(self, p, handler=None):
+    def codex_usage_wait(self, p, handler=None, lock=None):
         """The waiter for a Codex usage command that outlived SWITCH_TIMEOUT: wait for it with no upper bound (and for the refresh `handler` event,
-        so the lock outlives the request's own work too), sample again so its caches are read, then `refreshing` back, whatever happens."""
+        so the lock outlives the request's own work too), sample again so its caches are read, then the lock back (the Codex refresh lock; `refreshing` by default),
+        whatever happens."""
         try:
             try:
                 p.wait()
@@ -3100,7 +3214,7 @@ class Store:
         except Exception as e:   # shortcut: same broad catch as the handlers
             applog("refresh error: %s: %s" % (type(e).__name__, e))
         finally:
-            self.refreshing.release()
+            (lock or self.refreshing).release()
 
     def switch_done(self, what, res):
         applog("switch: %s -> %s" % (what, res["text"]))
@@ -3265,6 +3379,15 @@ def make_handler(store, port):
                     pass
             self.send(404, "not found")
 
+        def grab(self):
+            """The exclusive actions' lock: refused while a provider is being refreshed too (refresh() looks at this lock after taking its own)."""
+            if not store.refreshing.acquire(blocking=False):
+                return False
+            if store.refresh_running():
+                store.refreshing.release()
+                return False
+            return True
+
         def refuse(self, code, msg):
             """Read a small request body before refusing: replying unread lets Windows abort the connection before the client sees the code."""
             try:
@@ -3293,34 +3416,25 @@ def make_handler(store, port):
                 return self.claude_reset_clear()
             if path == "/api/switch":
                 return self.switch()
-            if not store.refreshing.acquire(blocking=False):
-                return self.send(409, "a refresh is already running")
-            handed, mine = False, threading.Event()
             try:
-                cmd = codex_usage_argv()
-                err, p = run_codex_usage(cmd) if cmd else (None, None)     # first, so this refresh's sample reads its caches
-                if err:
-                    applog("refresh: %s" % err)
-                if p is not None:               # never killed: from here its waiter owns the lock, whatever happens below, until it and this request end
-                    handed = True
-                    threading.Thread(target=store.codex_usage_wait, args=(p, mine), daemon=True).start()
-                try:
-                    rc = probe_claude()
-                except (OSError, subprocess.SubprocessError) as e:
-                    rc = type(e).__name__
-                blob = store.take(force=True)
-                applog("refresh: claude probe -> %s, codex -> %s, %d providers" % (rc, "still running" if p else err or ("updated" if cmd else "not set up"),
-                                                                                  len(blob["providers"])))
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n)) if 0 < n <= 1024 else {}
+                pid = body.get("provider") if isinstance(body, dict) else None
+            except (ValueError, AttributeError):
+                return self.js(400, {"error": "bad request"})
+            if pid is not None and pid not in PROVIDERS:        # {"provider": "<id>"} refreshes that one provider; no body refreshes every one
+                return self.js(400, {"error": "unknown provider"})
+            try:
+                r = store.refresh([pid] if pid else list(PROVIDERS))
+                if r is None:
+                    return self.send(409, "a refresh is already running")
+                blob, note, handed = r
                 if handed:
                     return self.js(202, dict(blob, refreshNote=CODEX_STILL))
-                self.js(200, dict(blob, refreshNote=err) if err else blob)     # a Codex command that could not run or failed is shown, not only logged
+                self.js(200, dict(blob, refreshNote=note) if note else blob)
             except Exception as e:   # shortcut: broad catch so one bad request never kills the server thread
                 applog("refresh error: %s: %s" % (type(e).__name__, e))
                 self.js(500, {"error": type(e).__name__})
-            finally:
-                mine.set()
-                if not handed:
-                    store.refreshing.release()
 
         def codex_reset(self):
             try:
@@ -3333,7 +3447,7 @@ def make_handler(store, port):
                 return self.js(404, {"outcome": "error", "text": "The reset script was not found on this PC."})
             if not valid_seat(seat, codex_homes()):
                 return self.js(400, {"outcome": "error", "text": "Unknown Codex seat."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "A refresh is running; try again in a minute."})
             handed = False
             try:
@@ -3359,7 +3473,7 @@ def make_handler(store, port):
                 seat = rid = None
             if not valid_seat(seat, codex_homes()) or not (rid is None or isinstance(rid, str)):
                 return self.js(400, {"outcome": "error", "text": "Unknown Codex seat."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
             try:
                 self.js(200, store.codex_reset_clear(seat, rid))
@@ -3383,7 +3497,7 @@ def make_handler(store, port):
                 return self.js(404, {"outcome": "error", "text": "Claude resets are switched off on this PC (claudeResetCredits in rotator.local.json)."})
             if not valid_claude_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or (b.get("resend") is True and not isinstance(rid, str)):
                 return self.js(400, {"outcome": "error", "text": "Unknown Claude seat or reset kind."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "A refresh or another reset is running; try again in a minute."})
             try:
                 self.js(200, store.claude_reset(seat, kind, resend_rid=rid) if rid is not None else store.claude_reset(seat, kind))
@@ -3405,7 +3519,7 @@ def make_handler(store, port):
                 seat = kind = rid = None
             if not valid_claude_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or not isinstance(rid, str):
                 return self.js(400, {"outcome": "error", "text": "Unknown Claude seat or reset kind."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
             try:
                 self.js(200, store.claude_reset_clear(seat, kind, rid))
@@ -3427,7 +3541,7 @@ def make_handler(store, port):
             ok = switch_check(b, switch_targets())
             if not ok:
                 return self.js(400, {"outcome": "error", "text": "Unknown provider, role or seat."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
             handed = False
             try:
@@ -4462,7 +4576,7 @@ def selftest():
         wst.refreshing.acquire()
         wst.codex_usage_wait(p_)
         assert p_.returncode == 0 and took == [True] and not wst.refreshing.locked() and seen_[-1] is None     # waited with no limit, sampled, lock back
-        # /api/refresh with a Codex command still running: even when the request's own sample fails, the lock is held until the command ends
+        # /api/refresh with a Codex command still running: even when the request's own sample fails, the Codex lock is held until the command ends (the other providers' are not)
         gate_ = threading.Event()
 
         class Slow_:
@@ -4480,28 +4594,119 @@ def selftest():
             if len(boom_) == 1:
                 raise RuntimeError("sample failed")
         rst.take = take_
-        keep_r = {k: globals()[k] for k in ("codex_usage_argv", "run_codex_usage", "probe_claude")}
+        keep_r = {k: globals()[k] for k in ("codex_usage_argv", "run_codex_usage", "probe_claude", "refresh_live")}
         rsrv = __import__("http.server").server.ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
         rport = rsrv.server_address[1]
         rsrv.RequestHandlerClass = make_handler(rst, rport)
         threading.Thread(target=rsrv.serve_forever, daemon=True).start()
         try:
-            globals().update(codex_usage_argv=lambda cfg=None: ["codex-usage"], run_codex_usage=lambda argv, popen=None: (None, Slow_()), probe_claude=lambda: 0)
+            globals().update(codex_usage_argv=lambda cfg=None: ["codex-usage"], run_codex_usage=lambda argv, popen=None: (None, Slow_()), probe_claude=lambda: 0, refresh_live=lambda pid, now: None)
             cn_ = __import__("http.client").client.HTTPConnection("127.0.0.1", rport, timeout=10)
             cn_.request("POST", "/api/refresh", b"", {"Host": "127.0.0.1:%d" % rport, "X-Quota-App": "1"})
             st_ = cn_.getresponse().status
             cn_.close()
             time.sleep(0.3)
-            assert st_ == 500 and rst.refreshing.locked()                      # the sample failed, the Codex command still runs: the lock stays
+            assert st_ == 500 and rst.plock("codex").locked() and not rst.plock("claude").locked() and not rst.plock("grok").locked()      # the sample failed, the Codex command still runs: only its lock stays
+            assert not rst.refreshing.locked() and rst.refresh_running()
             gate_.set()
             end_ = time.time() + 5
-            while rst.refreshing.locked() and time.time() < end_:
+            while rst.plock("codex").locked() and time.time() < end_:
                 time.sleep(0.02)
-            assert not rst.refreshing.locked() and len(boom_) == 2             # the command ended: the waiter sampled again and gave the lock back
+            assert not rst.plock("codex").locked() and not rst.refresh_running() and len(boom_) == 2      # the command ended: the waiter sampled again and gave the lock back
         finally:
             globals().update(keep_r)
             rsrv.shutdown()
             rsrv.server_close()
+        # A3: providers refresh AT ONCE (the wall clock is the slowest, not the sum), each under its own lock; a body {"provider": id} refreshes one
+        import http.client as hc_
+        pst = Store.__new__(Store)
+        pst.lock, pst.refreshing, pst.blob = threading.RLock(), threading.Lock(), {"providers": []}
+        pcalls_ = []
+        pst.take = lambda force=False: pcalls_.append(("take", force)) or {"providers": [1]}
+
+        def prov_(pid, now):
+            pcalls_.append(pid)
+            time.sleep(0.4)
+        keep_p = {k: globals()[k] for k in ("probe_claude", "refresh_live", "codex_usage_argv")}
+        psrv = __import__("http.server").server.ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
+        pport = psrv.server_address[1]
+        psrv.RequestHandlerClass = make_handler(pst, pport)
+        threading.Thread(target=psrv.serve_forever, daemon=True).start()
+
+        def post_(body, host=None, path="/api/refresh"):
+            cn = hc_.HTTPConnection("127.0.0.1", pport, timeout=20)
+            cn.request("POST", path, body, {"Host": host or "127.0.0.1:%d" % pport, "X-Quota-App": "1", "Content-Type": "application/json"})
+            r = cn.getresponse()
+            out = (r.status, r.read())
+            cn.close()
+            return out
+        try:
+            globals().update(probe_claude=lambda: (time.sleep(0.4), pcalls_.append("claude"), 0)[2], refresh_live=prov_, codex_usage_argv=lambda cfg=None: None)
+            t0_ = time.time()
+            st_, body_ = post_(b"")
+            took_ = time.time() - t0_
+            assert st_ == 200 and sorted(c for c in pcalls_ if c != ("take", False)) == sorted(["claude", "grok", "muse", "kimi", "gemini"]) and pcalls_[-1] == ("take", False), pcalls_
+            assert took_ < 1.5, took_                                      # five providers of 0.4 s each: one provider's time, not five
+            assert not pst.refresh_running()
+            pcalls_.clear()
+            st_, body_ = post_(json.dumps({"provider": "grok"}).encode())                        # one provider: the others are not read
+            assert st_ == 200 and pcalls_ == ["grok", ("take", False)], pcalls_
+            pcalls_.clear()
+            assert post_(json.dumps({"provider": "nope"}).encode())[0] == 400 and post_(b"{bad")[0] == 400 and not pcalls_
+            assert post_(b"", host="evil.example")[0] == 403 and not pcalls_
+            # per-provider locks: a provider already refreshing is left to that run; the others still refresh
+            pst.plock("grok").acquire()
+            st_, body_ = post_(b"")
+            assert st_ == 200 and "grok" not in pcalls_ and "gemini" in pcalls_, pcalls_
+            pcalls_.clear()
+            assert post_(json.dumps({"provider": "grok"}).encode())[0] == 409 and not pcalls_                  # the one asked for is busy
+            pst.plock("grok").release()
+            # a switch or reset running refuses a refresh, and a refresh running refuses them
+            pst.refreshing.acquire()
+            assert post_(b"")[0] == 409 and not pcalls_
+            pst.refreshing.release()
+            pst.plock("kimi").acquire()
+            keep_tg_ = globals()["switch_targets"]
+            globals()["switch_targets"] = lambda *a, **k: {"claude": {"app": ["A"]}}
+            try:
+                assert post_(json.dumps({"provider": "claude", "role": "app", "seat": "A"}).encode(), path="/api/switch")[0] == 409 and not pst.refreshing.locked()      # a provider refreshing: refused, lock given back
+            finally:
+                globals()["switch_targets"] = keep_tg_
+            pst.plock("kimi").release()
+            # one provider failing does not stop the others or the rebuild
+            globals().update(refresh_live=lambda pid, now: 1 / 0 if pid == "muse" else pcalls_.append(pid))
+            pcalls_.clear()
+            assert post_(b"")[0] == 200 and "gemini" in pcalls_ and pcalls_[-1] == ("take", False) and "muse failed: ZeroDivisionError" in open(APPLOG).read()
+        finally:
+            globals().update(keep_p)
+            psrv.shutdown()
+            psrv.server_close()
+        # refresh_live() reads one live provider, forced, into the provider cache; a sample right after reads nothing again
+        with tempfile.TemporaryDirectory() as rl_:
+            keep_pc_, keep_f_ = PCACHE, {k: globals()[k] for k in ("fetch_grok", "read_gemini_any")}
+            globals()["PCACHE"] = os.path.join(rl_, "p.json")
+            seen_ = []
+            try:
+                globals().update(fetch_grok=lambda now_: (seen_.append(now_), ({"ts": int(now_), "w": 0.1}, "g@x.example"))[1],
+                                 read_gemini_any=lambda now_: (seen_.append("g"), ({"ts": int(now_), "email": "a@x.example", "n": {"w1": "W"}, "w1": 0.2}, ""))[1])
+                refresh_live("grok", 1000)
+                refresh_live("gemini", 1000)
+                c_ = load_pcache()
+                assert c_["grok"]["at"] == 1000 and c_["emails"]["grok"] == {"grok": "g@x.example"} and c_["gemini_read"]["at"] == 1000 and c_["emails"]["gemini"] == {"antigravity": "a@x.example"}
+                rec_, cache_ = {}, load_pcache()
+                run_live(["grok", "gemini"], rec_, cache_, 1100, False)
+                assert seen_ == [1000, "g"] and rec_["grok"]["grok"]["w"] == 0.1 and rec_["gemini"]["antigravity"]["w1"] == 0.2 and "email" not in rec_["gemini"]["antigravity"], (seen_, rec_)       # fresh: not read again
+                assert cache_["gemini_read"]["seat"]["email"] == "a@x.example"                                  # the cached read keeps the address; only the recorded copy lost it
+                run_live(["grok", "gemini"], rec_, cache_, 1000 + GEMINI_EVERY + 1, False)
+                assert seen_[2:] == ["g"], seen_                                                                # Gemini's own window is shorter than Grok's
+                run_live(["grok"], rec_, cache_, 1100, True)
+                assert seen_[-1] == 1100                                                                         # forced
+                globals().update(fetch_grok=lambda now_: 1 / 0)
+                rec_ = {}
+                run_live(["grok"], rec_, cache_, 99999, True)
+                assert rec_["grok"]["grok"] == {"ok": False, "note": "Grok usage unavailable (ZeroDivisionError)"}
+            finally:
+                globals().update(keep_f_, PCACHE=keep_pc_)
         open(cfg, "w").write(json.dumps({"codexRedeemScript": scr}))
         assert redeem_script(cfg) == scr
         open(cfg, "w").write(json.dumps({"codexRedeemScript": os.path.join(td, "missing.py")}))

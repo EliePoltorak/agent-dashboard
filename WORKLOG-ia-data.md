@@ -35,3 +35,11 @@ usage-sim.js, README-claude-rotator.md. Parallel branch ia-settings owns dashboa
   else api.kimi.com) or KIMI_CODE_BASE_URL. Hidden when kimi is not installed; installed + no login -> "Kimi isn't signed in — open Kimi and log in" (verified live here:
   installed, signed out). An expired access token is NOT refreshed (Kimi rotates the refresh token; we must not rewrite the CLI's credential) -> note + ponytail-skipped.
   boosterWallet not shown -> ponytail-skipped. Fixture-tested only (no account).
+- [A3 done] Concurrent per-provider refresh. sample()'s live providers (grok, muse, kimi, gemini) are now `_live_*` functions run one thread each (run_live);
+  Store.refresh(pids) runs claude probe / codex usage command / each live read in its own thread under per-provider locks (Store.plock), then one take();
+  `refreshing` stays as the exclusive-actions lock (switch, resets) and those refuse while any provider lock is held (and refresh refuses while `refreshing` is held).
+  Gemini now has its own 240 s read cache (cache["gemini_read"]) so a Refresh just before a sample is not asked twice. POST /api/refresh {"provider": id} (400 for an
+  unknown id / bad JSON, 409 when that provider is busy). The Codex command that outlives 120 s still hands its lock to a waiter (now the Codex lock only).
+  Existing test adapted: the "/api/refresh with a Codex command still running" check now asserts the Codex lock (not `refreshing`) is the one kept.
+  AFTER numbers (same machine, same method, POST /api/refresh, spare port): 3.6 s, 3.5 s, 3.9 s, 6.9 s (median ~3.7 s) vs BEFORE 13.1 / 8.8 / 23.1 / 11.4 s (median ~12.3 s).
+  Single-provider: grok 1.5 s, gemini 2.0 s.
