@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn } = require('./usage-sim.js');
+const { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, quotaBankedChip, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn } = require('./usage-sim.js');
 const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
 
 // two seats at 50% used, far resets, 50 %/h: 100% left, drains empty after 2 h
@@ -183,6 +183,18 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   assert.strictEqual(quotaBankedCell({ bankedNote: 'sign-in needed' }, now, fmt, id), '<small>sign-in needed</small>');     // why there is no count is shown, not only in a tooltip
   assert.strictEqual(quotaBankedTotal({ accounts: [two, { banked: 1 }, {}] }), 3);
   assert.strictEqual(quotaBankedTotal({ accounts: [{}, {}] }), null);
+  // the header chip: Claude's split by kind (a kind with none left out, a single kind short, a count above the lists as plain resets), Codex's one total, nothing when unreported
+  const cl = accounts => ({ id: 'claude', accounts });
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 5, bankedList: [{ title: 'Fable reset', n: 3 }, { title: 'Full reset', n: 2 }] }])), '2 full resets · 3 Fable resets');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 3, bankedList: [{ title: 'Fable reset', n: 3 }] }])), '3 Fable resets');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 1, bankedList: [{ title: 'Fable reset' }] }])), '1 Fable reset');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 1, bankedList: [{ title: 'Full reset' }] }, { banked: 2, bankedList: [{ title: 'Fable reset' }, { title: 'Full reset' }] }, { banked: 0, bankedList: [] }])), '2 full resets · 1 Fable reset');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 4, bankedList: [{ title: 'Weekly reset' }, { title: '5-hour reset' }, { title: 'Full reset' }] }])), '1 full reset · 1 weekly reset · 1 5-hour reset · 1 reset');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 2 }, { banked: 1 }])), '3 banked resets');       // counts without a credit list: the plain total
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 0, bankedList: [] }])), '0 banked resets');
+  assert.strictEqual(quotaBankedChip(cl([{}, {}])), '');
+  assert.strictEqual(quotaBankedChip({ id: 'codex', accounts: [{ banked: 2, bankedList: [{ title: 'Fable reset' }] }, { banked: 1 }] }), '3 banked resets');   // Codex's titles are its own: one total
+  assert.strictEqual(quotaBankedChip({ id: 'codex', accounts: [{ banked: 1 }] }), '1 banked reset');
 }
 // Claude's Apply kinds: the four the server accepts (usage-history.py RESET_KINDS), the owner's wording for Fable and full, a window each
 {
@@ -233,7 +245,7 @@ assert.strictEqual(quotaShare(600, 600), 100);
   const src = tpl.slice(tpl.indexOf('function panel(p, W) {'), tpl.indexOf('\nfunction render('));
   const nsrc = tpl.slice(tpl.indexOf('const nacc = '), tpl.indexOf('\n', tpl.indexOf('const nacc = ')));
   const nacc = new Function(nsrc + '\nreturn nacc;')();
-  const deps = { nacc, ui: { lim: {} }, D: { app: true }, esc: s => String(s), sh: x => x, quotaBankedTotal: () => null, quotaInUse: () => '', quotaBestBtn: () => '',
+  const deps = { nacc, ui: { lim: {} }, D: { app: true }, esc: s => String(s), sh: x => x, quotaBankedChip: () => '', quotaInUse: () => '', quotaBestBtn: () => '',
     swBusy: () => false, rateFor: () => ({}), seatsTxt: () => '', fr: x => x, chart: () => '', nm: a => a.label, accounts: () => '<ACCOUNTS>', quotaNoPool };
   const panel = new Function(...Object.keys(deps), src + '\nreturn panel;')(...Object.values(deps));
   const zero = panel({ id: 'claude', name: 'Claude', total: 2, limits: [], accounts: [{ label: 'A', w: 0, note: '' }, { label: 'B', w: 0, note: '' }] }, 600);

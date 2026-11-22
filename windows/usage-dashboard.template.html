@@ -345,9 +345,9 @@ function accounts(p) {
 }
 
 function panel(p, W) {
-  const lim = p.limits.find(l => l.id === ui.lim[p.id]) || p.limits[0], bk = quotaBankedTotal(p);
+  const lim = p.limits.find(l => l.id === ui.lim[p.id]) || p.limits[0], bk = quotaBankedChip(p);
   let h = `<section class="panel" style="--acc:var(--c-${esc(p.id)})"><div class="ph"><div class="nm"><span class="dot"></span><b>${esc(p.name)}</b><span class="muted">${nacc(p)} account${nacc(p) === 1 ? '' : 's'}</span>${quotaInUse(p, esc) ? `<span class="inuse">${quotaInUse(p, esc)}</span>` : ''}${D.app ? quotaBestBtn(p, swBusy(), esc) : ''}</div>`;
-  h += `<div class="chips">${p.limits.map(l => `<button data-a="lim" data-p="${esc(p.id)}" data-v="${esc(l.id)}" aria-pressed="${l === lim}">${esc(l.label)}<em>${Math.round(sh(l.now, l))}%</em></button>`).join('')}${bk != null ? `<span class="chip">${bk} banked reset${bk === 1 ? '' : 's'}</span>` : ''}</div></div>`;
+  h += `<div class="chips">${p.limits.map(l => `<button data-a="lim" data-p="${esc(p.id)}" data-v="${esc(l.id)}" aria-pressed="${l === lim}">${esc(l.label)}<em>${Math.round(sh(l.now, l))}%</em></button>`).join('')}${bk ? `<span class="chip" title="Banked resets across the seats">${esc(bk)}</span>` : ''}</div></div>`;
   if (p.note) h += `<p class="note">${esc(p.note)}</p>`;
   if (lim) {
     const rf = rateFor(lim);

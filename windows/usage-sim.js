@@ -140,6 +140,20 @@ function quotaBankedTotal(p) {
   const s = p.accounts.filter(a => a.banked != null);
   return s.length ? s.reduce((n, a) => n + a.banked, 0) : null;
 }
+// The header chip for a provider's banked resets: Claude's split by kind from the credit titles ("2 full resets · 3 Fable resets", a kind with none left out; a count the lists do
+// not account for is plain "reset"s); Codex's one total ("5 banked resets"). '' when no seat reports any.
+const QUOTA_CREDIT_ORDER = ['Full reset', 'Fable reset', 'Weekly reset', '5-hour reset'];
+function quotaBankedChip(p) {
+  const total = quotaBankedTotal(p);
+  if (total == null) return '';
+  const by = {};
+  let listed = 0;
+  if (p.id === 'claude') p.accounts.forEach(a => (a.bankedList || []).forEach(c => { const n = c.n || 1; by[c.title] = (by[c.title] || 0) + n; listed += n; }));
+  if (!listed) return total + ' banked reset' + (total === 1 ? '' : 's');
+  if (total > listed) by.Reset = (by.Reset || 0) + total - listed;
+  const rank = k => QUOTA_CREDIT_ORDER.includes(k) ? QUOTA_CREDIT_ORDER.indexOf(k) : QUOTA_CREDIT_ORDER.length;
+  return Object.keys(by).sort((x, y) => rank(x) - rank(y) || (x < y ? -1 : 1)).map(k => by[k] + ' ' + (k === 'Fable reset' ? k : k.toLowerCase()) + (by[k] === 1 ? '' : 's')).join(' · ');
+}
 // Why a provider has no pooled chart when every seat is weighted 0 (weight 0 leaves a seat out of the pool only): '' otherwise.
 const quotaNoPool = p => p.accounts.length && p.accounts.every(a => a.w === 0) ? 'No seats counted in the pool (all weights are 0).' : '';
-if (typeof module !== 'undefined') module.exports = { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn, quotaNoPool };
+if (typeof module !== 'undefined') module.exports = { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, quotaBankedChip, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn, quotaNoPool };
