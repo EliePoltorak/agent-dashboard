@@ -25,6 +25,7 @@ steps hide real burn.
 import bisect
 import contextlib
 import glob
+import hashlib
 import http.client
 import json
 import math
@@ -74,6 +75,7 @@ CARRY_MAX = 3600            # a failed read keeps a seat's last good reading in 
 PY = ["py", "-3"]
 IDLE_PRIORITY_CLASS = 0x40
 CHILD_FLAGS = 0x08000000 | IDLE_PRIORITY_CLASS if os.name == "nt" else 0     # every child: no console window, Idle CPU priority
+DETACH_FLAGS = (CHILD_FLAGS | 0x00000008 | 0x00000200) if os.name == "nt" else 0     # the restarted server: CHILD_FLAGS plus DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP, so it outlives the process (and the scheduled task run) that started it
 BOUND_GRACE = 1.0           # run_bounded: how long output still held by a grandchild's copy of the pipe is waited for once the child itself is done
 
 
@@ -1019,6 +1021,95 @@ def credits_enabled(cfg=None):
         return True
 
 
+def autoupdate_enabled(cfg=None):
+    """`autoUpdate` in rotator.local.json (next to this script): false stops the dashboard installing updates by itself (it then offers an Update now button). Default on."""
+    try:
+        with open(cfg or os.path.join(HERE, "rotator.local.json"), encoding="utf-8-sig") as fh:
+            return json.load(fh).get("autoUpdate") is not False
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+UPDATE_RETRY = 6 * 3600     # an update that failed is not tried again by itself for the same set of files before this
+UPDATE = {"state": "idle", "text": ""}     # in memory: "running" while an update installs, "failed" (with why) after one that did not; the last good one is in the provider cache ("updated")
+
+
+def update_decision(names, auto, busy, tried, now):
+    """What the dashboard does about the files that differ from GitHub (`names`): "none" (nothing differs), "manual" (autoUpdate is off: the page offers Update now),
+    "wait" (a refresh, switch or reset is running: not while anything else is), "backoff" (the same files failed to install less than UPDATE_RETRY ago) or "apply"."""
+    if not names:
+        return "none"
+    if not auto:
+        return "manual"
+    if busy:
+        return "wait"
+    if isinstance(tried, dict) and not tried.get("ok") and tried.get("sig") == "|".join(sorted(names)) and now - (_f(tried.get("at")) or 0) < UPDATE_RETRY:
+        return "backoff"
+    return "apply"
+
+
+def update_outcome(rc, out):
+    """rotator-sync --pull's exit code and output -> (ok, text for the page, the server's own file was replaced, so the server has to restart). Its output lists
+    "replaced <file>" / "added <file>" per file; its last line is its error when it failed."""
+    lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
+    if rc:
+        why = lines[-1] if lines else "it gave no reason"
+        return False, "The update did not install (%s). Nothing was changed." % why[:200], False
+    done = [x.split(None, 1)[1] for x in lines if x.startswith(("replaced ", "added   ", "added "))]
+    return True, "Updated %d file%s." % (len(done), "" if len(done) == 1 else "s") if done else "Already up to date.", SERVER_FILE in done
+
+
+SERVER_FILE = "usage-history.py"                    # rotator-sync's name for this script: a running server keeps the old code until it restarts
+
+
+def build_id(here=None):
+    """What the page compares to decide it is out of date: a short hash of the server code this process started with and of the page files as they are now
+    (the page is read again on every request, so a replaced page changes it at once; a replaced server changes it when the new server is up)."""
+    h = hashlib.sha1(SERVER_SIG)
+    for name in ("usage-dashboard.template.html", "usage-sim.js"):
+        try:
+            with open(os.path.join(here or HERE, name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
+
+def read_server_sig():
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
+
+
+SERVER_SIG = read_server_sig()
+
+
+def new_server_argv(argv=None, exe=None, wait=40):
+    """The command that starts this same server again: the same interpreter, the script by its full path, every argument as it was (port, state folder), plus
+    --wait-port so it can take the port over from this one."""
+    argv = list(sys.argv if argv is None else argv)
+    keep, skip = [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+        elif a == "--wait-port":
+            skip = True
+        else:
+            keep.append(a)
+    return [exe or sys.executable, os.path.abspath(argv[0])] + keep + ["--wait-port", str(wait)]
+
+
+def read_drift():
+    try:
+        with open(os.path.join(STATE, ".rotator-drift.json"), encoding="utf-8-sig") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
 def claude_version(now, run=run_bounded, which=shutil.which, home=None):
     """The installed Claude CLI's version (the usage endpoint's user-agent must track it), from `claude --version`, kept for 6 h; CLI_FALLBACK when it will not run.
     The binary is ~/.local/bin/claude.exe (what the `claude` wrapper runs) when it exists, else whatever `claude` resolves to: the same order as Get-CliVersion in claude-cli-account.ps1."""
@@ -1850,6 +1941,8 @@ def build(hist, now, emails=None, app=False, extra=None):
     set_weights(extra.get("weights"))
     provs = [p for p in (build_provider(hist, pid, emails or {}, now, extra) for pid in PROVIDERS) if p]
     out = {"now": int(now), "app": app, "first": hist[0]["t"] if hist else None, "providers": provs}
+    if extra.get("build"):
+        out["build"], out["update"] = extra["build"], extra.get("update")       # the page reloads itself when `build` changes; `update` says what the banner shows
     d = extra.get("drift")
     if d and d.get("differing"):
         out["drift"] = {"n": len(d["differing"]), "names": [str(x) for x in d["differing"]], "checked": int(_f(d.get("checked")) or 0) or None}
@@ -1977,7 +2070,8 @@ def load_extra():
     return {"notes": c.get("notes"), "pnote": c.get("pnote"), "credits": c.get("credits") if credits_enabled() else None, "claims": pending_claims(c), "claudeReset": credits_enabled(), "drift": drift if isinstance(drift, dict) else None, "canReset": redeem_script() is not None, "inUse": in_use(), "switch": switch_targets(),
             "weights": dict(read_weights_cfg(), plans={"codex": plans}), "codex": {"pairs": pairs},
             "codexPending": {s: (v.get("id") or "") if isinstance(v, dict) else "" for s, v in sorted((c.get("codex_pending") or {}).items())},
-            "codexAwait": sorted(s for s, v in (c.get("codex_pending") or {}).items() if isinstance(v, dict) and v.get("await")), "codexRefresh": codex_usage_argv() is not None, "pcacheError": perr}
+            "codexAwait": sorted(s for s, v in (c.get("codex_pending") or {}).items() if isinstance(v, dict) and v.get("await")), "codexRefresh": codex_usage_argv() is not None, "pcacheError": perr,
+            "build": build_id(), "update": {"auto": autoupdate_enabled(), "state": UPDATE["state"], "text": UPDATE["text"], "done": c.get("updated") if isinstance(c.get("updated"), dict) else None}}
 
 
 LOCK_WAIT = 30                      # s: how long a writer waits for the history or provider-cache lock
@@ -2976,6 +3070,72 @@ class Store:
             pass
         return True
 
+    restart = None      # serve() sets it: a callable that swaps this server for a new one; the selftest's fakes have none
+
+    def update(self, auto=False, run=run_bounded, delay=0.0, now=None):
+        """Install what GitHub has: rotator-sync --pull (all or nothing, with its journal and backups: it is not reimplemented here), then, when the server's own file was replaced,
+        restart the server `delay` s later (so a request's answer is out first). One at a time and never beside a refresh, switch or reset -> {"outcome": "ok" | "error" | "busy" | "none",
+        "text", "restart"}. The exclusive lock is kept while a restart is on its way; the restart gives it back only when it could not happen."""
+        now = time.time() if now is None else now
+        script = os.path.join(HERE, "rotator-sync.py")
+        if not os.path.isfile(script):
+            return {"outcome": "error", "text": "rotator-sync.py is missing next to the dashboard.", "restart": False}
+        if not self.refreshing.acquire(blocking=False):
+            return {"outcome": "busy", "text": "Another action is running; try again in a minute.", "restart": False}
+        if self.refresh_running():
+            self.refreshing.release()
+            return {"outcome": "busy", "text": "A refresh is running; try again in a minute.", "restart": False}
+        UPDATE.update(state="running", text="")
+        restarting, names = False, [str(x) for x in read_drift().get("differing") or []]
+        try:
+            try:
+                r = run(PY + [script, "--pull", "--state", os.path.join(STATE, ".rotator-drift.json")], 300, text=True, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+                ok, text, restarting = update_outcome(r.returncode, (r.stdout or "") + "\n" + (r.stderr or ""))
+            except (OSError, subprocess.SubprocessError) as e:
+                ok, text = False, "The update did not run: %s. Nothing was changed." % type(e).__name__
+            applog("update%s: %s" % (" (automatic)" if auto else "", text))
+            try:
+                with pcache_txn() as c:
+                    c["update_try"] = {"at": int(now), "ok": ok, "sig": "|".join(sorted(names))}
+                    if ok and text != "Already up to date.":
+                        c["updated"] = {"at": int(now), "sha": (read_drift().get("ref") or "").split(" ")[-1][:12], "restart": restarting}
+            except (PcacheError, OSError, TimeoutError) as e:
+                applog("update: not recorded: %s" % e)
+            UPDATE.update(state="idle" if ok else "failed", text="" if ok else text)
+            if restarting:
+                threading.Thread(target=self.restart_job, args=(delay,), daemon=True).start()
+            else:
+                try:
+                    with self.lock:
+                        self.rebuild(time.time())       # the drift banner goes, the page files are new already
+                except Exception as e:   # shortcut: the update is done; a page that cannot be rebuilt now is rebuilt at the next sample
+                    applog("update: page rebuild failed: %s: %s" % (type(e).__name__, e))
+            return {"outcome": "ok" if ok else "error", "text": text, "restart": restarting}
+        finally:
+            if not restarting:
+                self.refreshing.release()
+
+    def restart_job(self, delay):
+        """The restart after an update. Never returns when it works (the process is replaced); when it cannot, the old server carries on and says so."""
+        time.sleep(delay)
+        try:
+            ok = bool(self.restart and self.restart())
+        except Exception as e:   # shortcut: whatever goes wrong, the old server must stay up and the lock must come back
+            applog("update: restart failed: %s: %s" % (type(e).__name__, e))
+            ok = False
+        if not ok:
+            UPDATE.update(state="failed", text="Updated, but the dashboard could not restart itself. Restart it from Task Scheduler (Claude usage dashboard).")
+            self.refreshing.release()
+
+    def auto_update(self, now, cfg=None):
+        """The sampler's share: install what GitHub has once the drift check has found something, unless autoUpdate is off, anything else is running, or the same files
+        failed less than UPDATE_RETRY ago. -> what update_decision said."""
+        names = [str(x) for x in read_drift().get("differing") or []]
+        act = update_decision(names, autoupdate_enabled(cfg), self.refreshing.locked() or self.refresh_running(), load_pcache().get("update_try"), now)
+        if act == "apply":
+            self.update(auto=True, now=now)
+        return act
+
     def credits_read(self, label, now, fetch=http_json, force=False, ver=None, login=app_login):
         """Read one Claude seat's reset credits into the provider cache (`credits`: {seat: {ts, eligible, grants, next, hold, sig, note}}; `sig` only with a scope hold). `next` is claimed before the
         call, so a crash is not retried every sample; `hold` (429 and 401/403) is respected even by a forced read; "pending" (an app login whose organization is
@@ -3402,7 +3562,7 @@ def make_handler(store, port):
             if not host_ok(self.headers.get("Host"), port):
                 return self.refuse(403, "forbidden")
             path = self.path.split("?")[0]
-            if path not in ("/api/refresh", "/api/codex-reset", "/api/codex-reset-clear", "/api/claude-reset", "/api/claude-reset-clear", "/api/switch"):
+            if path not in ("/api/refresh", "/api/codex-reset", "/api/codex-reset-clear", "/api/claude-reset", "/api/claude-reset-clear", "/api/switch", "/api/update"):
                 return self.refuse(404, "not found")
             if self.headers.get("X-Quota-App") != "1":
                 return self.refuse(403, "forbidden")
@@ -3416,6 +3576,8 @@ def make_handler(store, port):
                 return self.claude_reset_clear()
             if path == "/api/switch":
                 return self.switch()
+            if path == "/api/update":
+                return self.update()
             try:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n)) if 0 < n <= 1024 else {}
@@ -3435,6 +3597,25 @@ def make_handler(store, port):
             except Exception as e:   # shortcut: broad catch so one bad request never kills the server thread
                 applog("refresh error: %s: %s" % (type(e).__name__, e))
                 self.js(500, {"error": type(e).__name__})
+
+        def update(self):
+            """Install what GitHub has now, then restart: the answer is sent first, and the page reloads itself when the new server's build id arrives."""
+            self.refuse_body()
+            try:
+                res = store.update(delay=1.0)
+                self.js({"ok": 200, "none": 200, "busy": 409}.get(res["outcome"], 500), res)
+            except Exception as e:   # shortcut: same broad catch as refresh
+                applog("update error: %s: %s" % (type(e).__name__, e))
+                self.js(500, {"outcome": "error", "text": "The update did not run: %s." % type(e).__name__, "restart": False})
+
+        def refuse_body(self):
+            """Read (and drop) a small request body, so the connection is not reset under the client."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if 0 < n <= 1024:
+                    self.rfile.read(n)
+            except (ValueError, OSError):
+                pass
 
         def codex_reset(self):
             try:
@@ -3558,14 +3739,15 @@ def make_handler(store, port):
     return H
 
 
-def serve(port):
+def serve(port, wait=0):
+    """The app. `wait` (--wait-port): keep trying for the port that many seconds, for a server started to take over from the one that is shutting down."""
     from http.server import ThreadingHTTPServer
     store = Store()
     H = make_handler(store, port)
 
     def sampler():
         while True:
-            for step in (store.drift_check, store.credits_tick, lambda now: store.take()):      # each on its own: one failing (a provider cache that cannot be read) must not stop the others
+            for step in (store.drift_check, store.auto_update, store.credits_tick, lambda now: store.take()):      # each on its own: one failing (a provider cache that cannot be read) must not stop the others
                 try:
                     step(time.time())
                 except Exception as e:   # shortcut: same, the loop must keep sampling
@@ -3574,11 +3756,40 @@ def serve(port):
 
     if not os.path.isfile(os.path.join(ICONS, "icon-512.png")):
         make_icons()
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    except OSError as e:
-        applog("cannot listen on 127.0.0.1:%d (%s)" % (port, e))
-        return 1
+    end = time.time() + wait
+    while True:
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+            break
+        except OSError as e:
+            if time.time() >= end:
+                applog("cannot listen on 127.0.0.1:%d (%s)" % (port, e))
+                return 1
+            time.sleep(0.5)
+
+    def restart():
+        """Swap this server for a new one running the files now on disk -> False when it cannot (this server then carries on). The new one is started FIRST and given a few seconds: if
+        it dies at once (an update that does not even load) this server stays up; only then does this one let go of the port and exit, and the new one takes it over (--wait-port).
+        It is detached from this process, so the Task Scheduler task that started this one ending does not end it.
+        shortcut: the replacement is not a child of the scheduled task, so Task Scheduler's own Stop does not stop it; Task Manager does, and so does the next logon."""
+        with store.lock:                # the sampler is not in the middle of a save
+            argv = new_server_argv()
+            try:
+                kid = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                                       creationflags=DETACH_FLAGS, start_new_session=os.name != "nt")
+            except OSError as e:
+                applog("update: could not start the new server: %s" % e)
+                return False
+            for _ in range(24):
+                if kid.poll() is not None:
+                    applog("update: the new server stopped at once (exit %s); keeping this one" % kid.returncode)
+                    return False
+                time.sleep(0.25)
+            applog("update: restarting (new server pid %s)" % kid.pid)
+            srv.shutdown()
+            srv.server_close()
+            os._exit(0)
+    store.restart = restart
     threading.Thread(target=sampler, daemon=True).start()
     applog("serving on 127.0.0.1:%d" % port)
     try:
@@ -4476,7 +4687,7 @@ def selftest():
     # B: Idle CPU priority. Every child is started with CHILD_FLAGS; this process lowers itself in main()
     with open(__file__, encoding="utf-8") as fh:
         flags = re.findall("creation" + r"flags=([^,)\n]+)", fh.read())
-    assert len(flags) >= 6 and set(flags) == {"CHILD_FLAGS"}, flags
+    assert len(flags) >= 6 and set(flags) <= {"CHILD_FLAGS", "DETACH_FLAGS"} and flags.count("DETACH_FLAGS") == 1 and DETACH_FLAGS & CHILD_FLAGS == CHILD_FLAGS, flags
     if os.name == "nt":
         k = _kernel32()
         me, was = k.GetCurrentProcess(), k.GetPriorityClass(k.GetCurrentProcess())
@@ -4707,6 +4918,150 @@ def selftest():
                 assert rec_["grok"]["grok"] == {"ok": False, "note": "Grok usage unavailable (ZeroDivisionError)"}
             finally:
                 globals().update(keep_f_, PCACHE=keep_pc_)
+        # A4: self-update. What to do about drift is one pure decision
+        D_ = ["usage-history.py"]
+        assert update_decision([], True, False, None, 100) == "none" and update_decision(D_, False, False, None, 100) == "manual" and update_decision(D_, True, True, None, 100) == "wait"
+        assert update_decision(D_, True, False, None, 100) == "apply" and update_decision(D_, True, False, {"ok": True, "sig": "usage-history.py", "at": 99}, 100) == "apply"
+        assert update_decision(D_, True, False, {"ok": False, "sig": "usage-history.py", "at": 100}, 100 + UPDATE_RETRY - 1) == "backoff"       # the same files failed a moment ago
+        assert update_decision(D_, True, False, {"ok": False, "sig": "usage-history.py", "at": 100}, 100 + UPDATE_RETRY) == "apply"             # ... and again after the wait
+        assert update_decision(D_ + ["x"], True, False, {"ok": False, "sig": "usage-history.py", "at": 100}, 101) == "apply"                      # other files: tried at once
+        assert update_decision(["b", "a"], True, False, {"ok": False, "sig": "a|b", "at": 100}, 101) == "backoff"                                 # order does not matter
+        with tempfile.TemporaryDirectory() as ut_:
+            cfg_ = os.path.join(ut_, "rotator.local.json")
+            assert autoupdate_enabled(cfg_) is True                                                       # no file: on
+            for txt_, want_ in (('{"autoUpdate": false}', False), ('{"autoUpdate": true}', True), ('{}', True), ('not json', True), ('{"autoUpdate": 0}', True)):
+                open(cfg_, "w").write(txt_)
+                assert autoupdate_enabled(cfg_) is want_, txt_
+            ok_, txt_, rs_ = update_outcome(0, "replaced usage-history.py\nadded    new.py\nrotator-sync: the usage dashboard's files changed")
+            assert ok_ and txt_ == "Updated 2 files." and rs_ is True
+            ok_, txt_, rs_ = update_outcome(0, "replaced usage-dashboard.template.html\nrotator-sync: the usage dashboard's page is updated")
+            assert ok_ and txt_ == "Updated 1 file." and rs_ is False
+            assert update_outcome(0, "rotator-sync: nothing to pull, live already matches the ref") == (True, "Already up to date.", False)
+            ok_, txt_, rs_ = update_outcome(1, "rotator-sync: another update is running; nothing was changed\n")
+            assert not ok_ and "another update is running" in txt_ and "Nothing was changed" in txt_ and rs_ is False and not update_outcome(2, "")[0]
+            # the restart command: same interpreter, script by full path, the arguments as they were, no doubled --wait-port
+            nsa_ = new_server_argv(["usage-history.py", "--serve", "--port", "8787", "--state-dir", "D:/s", "--wait-port", "5"], "pw.exe", 40)
+            assert nsa_ == ["pw.exe", os.path.abspath("usage-history.py"), "--serve", "--port", "8787", "--state-dir", "D:/s", "--wait-port", "40"], nsa_
+            # the build id: server code + the page files; it changes with either
+            open(os.path.join(ut_, "usage-dashboard.template.html"), "w").write("a")
+            open(os.path.join(ut_, "usage-sim.js"), "w").write("b")
+            id1_ = build_id(ut_)
+            assert re.fullmatch(r"[0-9a-f]{10}", id1_) and build_id(ut_) == id1_
+            open(os.path.join(ut_, "usage-sim.js"), "w").write("c")
+            assert build_id(ut_) != id1_ and build_id(os.path.join(ut_, "none")) not in (id1_, build_id(ut_))
+            assert SERVER_SIG.startswith(b'"""usage-history') and build([], 5, {}, False, {"build": "abc", "update": {"auto": True}})["build"] == "abc" and "build" not in build([], 5, {}, False, {})
+            # Store.update: rotator-sync --pull (injected here), then a restart only when the server's own file was replaced
+            sd_ = os.path.join(ut_, "state")
+            os.makedirs(sd_)
+            keep_u_ = {k: globals()[k] for k in ("STATE", "PCACHE", "HERE")}
+            globals().update(STATE=sd_, PCACHE=os.path.join(sd_, "p.json"), HERE=ut_)
+            open(os.path.join(ut_, "rotator-sync.py"), "w").write("")
+            open(os.path.join(sd_, ".rotator-drift.json"), "w").write(json.dumps({"differing": ["usage-history.py"], "ref": "origin/main abc1234def"}))
+            try:
+                us = Store.__new__(Store)
+                us.lock, us.refreshing, ub_ = threading.RLock(), threading.Lock(), []
+                us.rebuild = lambda now: ub_.append("rebuild")
+                runs_ = []
+
+                def fake_run(rc, out):
+                    def f(argv, timeout, **kw):
+                        runs_.append((argv, timeout))
+                        return subprocess.CompletedProcess(argv, rc, out, "")
+                    return f
+                us.restart = lambda: (ub_.append("restart"), True)[1]
+                res_ = us.update(run=fake_run(0, "replaced usage-history.py\n"), delay=0)
+                assert res_ == {"outcome": "ok", "text": "Updated 1 file.", "restart": True} and runs_[0][0][-3:-1] == ["--pull", "--state"] and runs_[0][0][-1] == os.path.join(sd_, ".rotator-drift.json")
+                end_ = time.time() + 5
+                while "restart" not in ub_ and time.time() < end_:
+                    time.sleep(0.02)
+                assert ub_ == ["restart"] and us.refreshing.locked() and UPDATE["state"] == "idle"          # the lock is kept: the process is about to be replaced
+                c_ = load_pcache()
+                assert c_["updated"]["sha"] == "abc1234def" and c_["updated"]["restart"] is True and c_["update_try"]["ok"] is True and c_["update_try"]["sig"] == "usage-history.py"
+                # a restart that cannot happen: the old server carries on, says so, and gives the lock back
+                us.refreshing.release()
+                us.restart = lambda: False
+                ub_.clear()
+                us.update(run=fake_run(0, "replaced usage-history.py\n"), delay=0)
+                end_ = time.time() + 5
+                while us.refreshing.locked() and time.time() < end_:
+                    time.sleep(0.02)
+                assert not us.refreshing.locked() and UPDATE["state"] == "failed" and "could not restart" in UPDATE["text"]
+                us.restart = lambda: 1 / 0
+                us.update(run=fake_run(0, "replaced usage-history.py\n"), delay=0)
+                end_ = time.time() + 5
+                while us.refreshing.locked() and time.time() < end_:
+                    time.sleep(0.02)
+                assert not us.refreshing.locked() and "restart failed: ZeroDivisionError" in open(APPLOG).read()
+                # only the page changed: no restart, the page is rebuilt, the lock is back
+                ub_.clear()
+                res_ = us.update(run=fake_run(0, "replaced usage-sim.js\n"), delay=0)
+                assert res_["restart"] is False and ub_ == ["rebuild"] and not us.refreshing.locked() and UPDATE["state"] == "idle"
+                # a failed pull: nothing restarts, the reason is kept, and the same files are not tried again by themselves for a while
+                res_ = us.update(run=fake_run(1, "rotator-sync: the update failed (OSError: x); every file was put back as it was\n"), delay=0, now=1000)
+                assert res_["outcome"] == "error" and "every file was put back" in res_["text"] and UPDATE["state"] == "failed" and not us.refreshing.locked()
+                assert load_pcache()["update_try"] == {"at": 1000, "ok": False, "sig": "usage-history.py"}
+                us.update = lambda auto=False, now=None: ub_.append(("auto", auto)) or {}
+                ub_.clear()
+                open(os.path.join(ut_, "rotator.local.json"), "w").write("{}")
+                assert us.auto_update(1000 + 60, os.path.join(ut_, "rotator.local.json")) == "backoff" and not ub_
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "apply" and ub_ == [("auto", True)]
+                ub_.clear()
+                us.refreshing.acquire()
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "wait" and not ub_              # a switch is running
+                us.refreshing.release()
+                us.plock("grok").acquire()
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "wait" and not ub_              # a refresh is running
+                us.plock("grok").release()
+                open(os.path.join(ut_, "rotator.local.json"), "w").write('{"autoUpdate": false}')
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "manual" and not ub_
+                open(os.path.join(sd_, ".rotator-drift.json"), "w").write(json.dumps({"differing": []}))
+                assert us.auto_update(5, os.path.join(ut_, "rotator.local.json")) == "none"
+                del us.update
+                # busy: a switch or reset (the exclusive lock) or a refresh (a provider lock) is running: nothing is pulled, and the lock is given back
+                runs_.clear()
+                us.refreshing.acquire()
+                assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "busy" and not runs_
+                us.refreshing.release()
+                us.plock("codex").acquire()
+                assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "busy" and not runs_ and not us.refreshing.locked()
+                us.plock("codex").release()
+                # no rotator-sync next to the dashboard
+                os.remove(os.path.join(ut_, "rotator-sync.py"))
+                assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "error" and not runs_
+                # POST /api/update
+                ups_ = Store.__new__(Store)
+                ups_.lock, ups_.refreshing, ups_.blob = threading.RLock(), threading.Lock(), {}
+                answers_ = [{"outcome": "ok", "text": "Updated 1 file.", "restart": True}, {"outcome": "busy", "text": "x", "restart": False}, {"outcome": "error", "text": "y", "restart": False}, None]
+                got_ = []
+
+                def fake_upd(auto=False, delay=0.0):
+                    got_.append(delay)
+                    a_ = answers_.pop(0)
+                    if a_ is None:
+                        raise RuntimeError("boom")
+                    return a_
+                ups_.update = fake_upd
+                usrv = __import__("http.server").server.ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
+                uport = usrv.server_address[1]
+                usrv.RequestHandlerClass = make_handler(ups_, uport)
+                threading.Thread(target=usrv.serve_forever, daemon=True).start()
+                try:
+                    def upost_(app="1", host=None, body=b""):
+                        cn = hc_.HTTPConnection("127.0.0.1", uport, timeout=10)
+                        cn.request("POST", "/api/update", body, dict({"Host": host or "127.0.0.1:%d" % uport}, **({"X-Quota-App": app} if app else {})))
+                        r = cn.getresponse()
+                        out = (r.status, json.loads(r.read() or b"null") if r.status != 403 else None)
+                        cn.close()
+                        return out
+                    assert upost_(app=None)[0] == 403 and upost_(host="evil.example")[0] == 403 and not got_
+                    assert upost_(body=b"{}") == (200, {"outcome": "ok", "text": "Updated 1 file.", "restart": True}) and got_ == [1.0]       # the restart waits a second: the answer is out first
+                    assert upost_()[0] == 409 and upost_()[0] == 500 and upost_()[0] == 500
+                finally:
+                    usrv.shutdown()
+                    usrv.server_close()
+            finally:
+                globals().update(keep_u_)
+                UPDATE.update(state="idle", text="")
         open(cfg, "w").write(json.dumps({"codexRedeemScript": scr}))
         assert redeem_script(cfg) == scr
         open(cfg, "w").write(json.dumps({"codexRedeemScript": os.path.join(td, "missing.py")}))
@@ -6491,7 +6846,7 @@ def main():
         say(backtest_table(backtest(load()))[0])
         return 0
     if "--serve" in sys.argv:
-        return serve(arg("--port", 8787))
+        return serve(arg("--port", 8787), arg("--wait-port", 0))
     now = time.time()
     hist = load() if "--render" in sys.argv else one_shot(now)
     render(build(hist, now, load_emails(), extra=load_extra()))
