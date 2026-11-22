@@ -446,6 +446,15 @@ def fetch_grok(now):
 MUSE_SCRIPT, MUSE_OUT, MUSE_EVERY = os.path.join(HERE, "muse_usage_for_dashboard.py"), os.path.join(STATE, ".muse_usage.json"), 300
 
 
+def muse_reset_at(text, now):
+    """A relative reset ("in 4h 51m", "in 2d 3h") -> epoch seconds, else None (an absolute date stays free text in the note)."""
+    m = re.fullmatch(r"\s*in\s+(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*", text or "") if isinstance(text, str) else None
+    if not m or not any(m.groups()):
+        return None
+    d, h, mi = (int(x or 0) for x in m.groups())
+    return int(now) + d * 86400 + h * 3600 + mi * 60
+
+
 def muse_seat(j, now):
     """muse_usage_for_dashboard.py's JSON -> seat dict. A field the script could not find is left out, never guessed; the reset text it found is free text,
     so it goes in the note rather than into a timestamp."""
@@ -462,7 +471,12 @@ def muse_seat(j, now):
         return {"ok": False, "note": "Muse usage not recognised: " + " ".join(str(x) for x in j.get("parse_notes") or [])[:300]}
     if isinstance(j.get("tier"), str) and j["tier"]:
         seat["plan"] = j["tier"][:60]
-    resets = ["%s resets %s" % (n, j[f]) for n, f in (("5-hour", "five_hour_resets_at"), ("Weekly", "weekly_resets_at")) if isinstance(j.get(f), str) and j[f]]
+    for key, field, period in (("s", "five_hour_resets_at", 18000), ("w", "weekly_resets_at", WEEK)):
+        at = muse_reset_at(j.get(field), now)
+        if key in seat and at:
+            seat[key + "r"], seat[key + "p"] = at, period
+    resets = ["%s resets %s" % (n, j[f]) for n, f in (("5-hour", "five_hour_resets_at"), ("Weekly", "weekly_resets_at"))
+              if isinstance(j.get(f), str) and j[f] and not muse_reset_at(j[f], now)]
     if resets or j.get("parse_notes"):
         seat["note"] = " · ".join(resets + [str(x) for x in j.get("parse_notes") or []])[:400]
     return seat
@@ -4033,6 +4047,9 @@ def selftest():
     assert ms["s"] == 0.12 and "w" not in ms and ms["ts"] == 50 and ms["plan"] == "Power Usage" and "5-hour resets 11 PM" in ms["note"], ms
     assert muse_seat({"ok": False, "error": "`muse` was not found on PATH."}, 1) == {"ok": False, "note": "`muse` was not found on PATH."}
     assert muse_seat({"ok": True, "parse_notes": ["x"]}, 1)["ok"] is False and muse_seat(None, 1)["ok"] is False
+    ms = muse_seat({"ok": True, "tier": "T", "five_hour_used_percent": 5, "weekly_used_percent": 1, "five_hour_resets_at": "in 4h 51m", "weekly_resets_at": "in 10h 27m"}, 1000)
+    assert (ms["sr"], ms["sp"], ms["wr"], ms["wp"], "note" in ms) == (1000 + 4 * 3600 + 51 * 60, 18000, 1000 + 10 * 3600 + 27 * 60, WEEK, False), ms
+    assert muse_reset_at("Nov 24 at 2:00 PM", 0) is None and muse_reset_at("in 2d 3h", 0) == 2 * 86400 + 3 * 3600 and muse_reset_at("in ", 0) is None
     assert fetch_muse.__doc__ and (shutil.which("muse") or fetch_muse(1) == (None, None))      # no muse CLI: no seat is recorded, so the provider has no account
     mb = build([{"t": 1000, "muse": {"muse": muse_seat({"ok": True, "five_hour_used_percent": 25.0, "weekly_used_percent": 50.0}, 1000)}}], 1100)["providers"][0]
     assert mb["id"] == "muse" and mb["name"] == "Muse (Meta)" and [x["label"] for x in mb["limits"]] == ["5-hour", "Weekly"], mb

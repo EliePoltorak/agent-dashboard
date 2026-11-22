@@ -46,7 +46,7 @@ import subprocess
 import sys
 
 # Keywords that identify the two allowances. Keep them broad on purpose.
-FIVE_HOUR_KEYS = ("5-hour", "5 hour", "5h", "session")
+FIVE_HOUR_KEYS = ("5-hour", "5 hour", "5h", "session", "window:")     # `muse usage` 1.4 prints the 5-hour limit as "Window:"
 WEEKLY_KEYS = ("weekly", "week", "7-day", "7 day")
 
 
@@ -190,6 +190,10 @@ def self_test():
         (
             "Plan: Power Usage\n5-hour usage: 12% used\nResets at 11:00 PM\nWeekly usage: 34% used\nWeekly limit resets Nov 24 at 2:00 PM\n",
             12.0, 34.0, "Power Usage",
+        ),
+        (
+            "Tier: Muse Code High Usage\nWindow: 5% used, resets in 4h 51m\nWeekly: 1% used, resets in 10h 27m\n",     # real 1.4.25 output
+            5.0, 1.0, "Muse Code High Usage",
         ),
         (
             "Weekly: 61% used, resets Monday\n5 hour: 8% used\n",
