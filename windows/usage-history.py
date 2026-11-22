@@ -43,6 +43,11 @@ import urllib.error
 import urllib.request
 import zlib
 
+try:
+    import dashboard_settings          # the Settings panel (dashboard_settings.py + settings.js); the page works without it
+except ImportError:
+    dashboard_settings = None
+
 HOME = os.path.expanduser("~")
 ROOT = os.path.join(HOME, ".claude-cli-accounts")
 
@@ -2951,6 +2956,8 @@ def make_handler(store, port):
             if not host_ok(self.headers.get("Host"), port):
                 return self.send(403, "forbidden")
             path = self.path.split("?")[0]
+            if dashboard_settings and dashboard_settings.owns(path):
+                return dashboard_settings.serve(self, "GET", store)
             if path == "/":
                 return self.send(200, page_html(store.blob), "text/html; charset=utf-8")
             if path == "/api/data":
@@ -2979,6 +2986,8 @@ def make_handler(store, port):
             if not host_ok(self.headers.get("Host"), port):
                 return self.refuse(403, "forbidden")
             path = self.path.split("?")[0]
+            if dashboard_settings and dashboard_settings.owns(path):
+                return dashboard_settings.serve(self, "POST", store)
             if path not in ("/api/refresh", "/api/codex-reset", "/api/codex-reset-clear", "/api/claude-reset", "/api/claude-reset-clear", "/api/switch"):
                 return self.refuse(404, "not found")
             if self.headers.get("X-Quota-App") != "1":
