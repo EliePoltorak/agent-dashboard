@@ -161,6 +161,7 @@ PROVIDERS = {
     "codex": ("Codex", [("s", "5-hour", 18000), ("w", "Weekly", WEEK)], [("w", "Weekly")]),
     "grok": ("xAI", [("w", "Weekly", WEEK)], [("w", "Weekly credits")]),
     "gemini": ("Gemini", None, None),      # its windows are whatever the language server reports
+    "muse": ("Muse (Meta)", [("s", "5-hour", 18000), ("w", "Weekly", WEEK)], [("s", "5-hour"), ("w", "Weekly")]),     # Muse Code, the muse terminal CLI (not the muse.ai agent)
 }
 BADGE = {"cli": "CLI", "app": "App"}     # which seat is in use: the key under a provider's "inUse" -> the pill on the seat
 PROVIDER_NOTE = {"grok": "Cursor's Grok usage counts against this same xAI quota."}
@@ -428,6 +429,48 @@ def fetch_grok(now):
         return {"ok": False, "note": "Grok usage unavailable (%s)" % (_bad(code, j) if code != 200 else "unexpected response")}, email
     seat["ts"] = int(now)
     return seat, email
+
+
+MUSE_SCRIPT, MUSE_OUT, MUSE_EVERY = os.path.join(HERE, "muse_usage_for_dashboard.py"), os.path.join(STATE, ".muse_usage.json"), 300
+
+
+def muse_seat(j, now):
+    """muse_usage_for_dashboard.py's JSON -> seat dict. A field the script could not find is left out, never guessed; the reset text it found is free text,
+    so it goes in the note rather than into a timestamp."""
+    if not isinstance(j, dict):
+        return {"ok": False, "note": "Muse usage unavailable (no readable result)"}
+    if not j.get("ok"):
+        return {"ok": False, "note": str(j.get("error") or "Muse usage unavailable")[:300]}
+    seat = {"ts": int(now)}
+    for key, field in (("s", "five_hour_used_percent"), ("w", "weekly_used_percent")):
+        v = _f(j.get(field))
+        if v is not None:
+            seat[key] = v / 100
+    if "s" not in seat and "w" not in seat:
+        return {"ok": False, "note": "Muse usage not recognised: " + " ".join(str(x) for x in j.get("parse_notes") or [])[:300]}
+    if isinstance(j.get("tier"), str) and j["tier"]:
+        seat["plan"] = j["tier"][:60]
+    resets = ["%s resets %s" % (n, j[f]) for n, f in (("5-hour", "five_hour_resets_at"), ("Weekly", "weekly_resets_at")) if isinstance(j.get(f), str) and j[f]]
+    if resets or j.get("parse_notes"):
+        seat["note"] = " · ".join(resets + [str(x) for x in j.get("parse_notes") or []])[:400]
+    return seat
+
+
+def fetch_muse(now):
+    """-> (seat, None): runs muse_usage_for_dashboard.py (plain `muse usage` text, no network, no credentials read) with --out, and reads its JSON.
+    python.exe, not pythonw: the child needs working std streams, and CHILD_FLAGS keeps its console hidden."""
+    if not shutil.which("muse"):
+        return None, None       # Muse Code is not installed: no account, so no tab and no count (the script's own "not found" error is for a run that was meant to work)
+    if not os.path.isfile(MUSE_SCRIPT):
+        return {"ok": False, "note": "muse_usage_for_dashboard.py is missing next to usage-history.py"}, None
+    exe = shutil.which("python") or sys.executable
+    try:
+        run_bounded([exe, MUSE_SCRIPT, "--out", MUSE_OUT, "--timeout", "30"], timeout=60, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+        with open(MUSE_OUT, encoding="utf-8") as fh:
+            j = json.load(fh)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"ok": False, "note": "Muse usage unavailable (could not run the script)"}, None
+    return muse_seat(j, now), None
 
 
 LS_PATH = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
@@ -1045,6 +1088,15 @@ def sample(now, force=False):
         seat = {"ok": False, "note": "Grok usage unavailable (%s)" % type(e).__name__}
     if seat:
         rec["grok"] = {"grok": seat}
+    try:
+        seat = read_live("muse", "muse", fetch_muse, MUSE_EVERY, now, force, cache)
+    except Exception as e:
+        applog("sample: muse read failed: %s: %s" % (type(e).__name__, e))
+        seat = {"ok": False, "note": "Muse usage unavailable (%s)" % type(e).__name__}
+    if seat:
+        rec["muse"] = {"muse": seat}
+        if seat.get("plan"):
+            cache.setdefault("pnote", {})["muse"] = "Plan: " + seat["plan"]
     try:
         seat, why = read_gemini(now)        # local call: read on every sample
     except Exception as e:
@@ -3305,6 +3357,14 @@ def selftest():
     assert g["w"] == 0.22 and g["wp"] == WEEK and g["wr"] - 1_700_000_000 > 0, g
     assert parse_grok({"error": 1}) is None and parse_grok(None) is None
     assert "cursor" not in PROVIDERS and not any(n in globals() for n in ("fetch_cursor", "parse_cursor"))     # A: Cursor is gone
+    # Muse Code: unknown fields stay unknown, a failed read is a note, never a zero
+    ms = muse_seat({"ok": True, "tier": "Power Usage", "five_hour_used_percent": 12.0, "five_hour_resets_at": "11 PM", "weekly_used_percent": None, "weekly_resets_at": None, "parse_notes": ["Weekly usage % not found in text."]}, 50)
+    assert ms["s"] == 0.12 and "w" not in ms and ms["ts"] == 50 and ms["plan"] == "Power Usage" and "5-hour resets 11 PM" in ms["note"], ms
+    assert muse_seat({"ok": False, "error": "`muse` was not found on PATH."}, 1) == {"ok": False, "note": "`muse` was not found on PATH."}
+    assert muse_seat({"ok": True, "parse_notes": ["x"]}, 1)["ok"] is False and muse_seat(None, 1)["ok"] is False
+    assert fetch_muse.__doc__ and (shutil.which("muse") or fetch_muse(1) == (None, None))      # no muse CLI: no seat is recorded, so the provider has no account
+    mb = build([{"t": 1000, "muse": {"muse": muse_seat({"ok": True, "five_hour_used_percent": 25.0, "weekly_used_percent": 50.0}, 1000)}}], 1100)["providers"][0]
+    assert mb["id"] == "muse" and mb["name"] == "Muse (Meta)" and [x["label"] for x in mb["limits"]] == ["5-hour", "Weekly"], mb
     assert PROVIDERS["grok"][0] == "xAI" and PROVIDERS["gemini"][0] == "Gemini" and manifest()["name"] == manifest()["short_name"] == "Agent Dashboard" and "same xAI quota" in PROVIDER_NOTE["grok"]
 
     # A: history lines and the provider cache lose the retired cursor key, on disk
