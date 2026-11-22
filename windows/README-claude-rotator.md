@@ -43,7 +43,7 @@ the Codex CLI, the Grok CLI, the Antigravity app (Gemini), Kimi Code (the `kimi`
 | Tab | Needs | Optional extras |
 |---|---|---|
 | Claude | accounts added with `claude-rotator` (step 4); readings appear once the rotator has probed a seat (`--status`, or the watcher) | Banked reset credits need a full Claude login for that account, which the desktop app keeps: sign in to the account in the app and capture it with `claude-account --capture <label>` (a setup-token cannot read them). Switch buttons need the desktop app for the App role. |
-| Codex | the Codex CLI; one saved login per seat in `%USERPROFILE%\.codex\homes\<label>\`; readings come from each seat's usage cache there and from the Codex session logs | `codexUsageScript` lets Refresh update Codex; `codexRedeemScript` adds Apply reset; a `codex-app-rotator.ps1` next to the dashboard adds switch buttons. All are off until set. |
+| Codex | the Codex CLI; one saved login per seat in `%USERPROFILE%\.codex\homes\<label>\`; readings come from each seat's usage cache there and from the Codex session logs | `codexUsageScript` lets Refresh update Codex; `codexRedeemScript` adds Apply reset; the `codex-app-rotator.ps1` that comes with this repo, next to the dashboard, adds switch buttons. The two scripts are off until set. |
 | xAI | the Grok CLI, signed in (`grok`) | none |
 | Gemini | the Antigravity app signed in once (its login is read from the Windows Credential Manager; the app need not be running). Older Antigravity versions with no saved login fall back to the running app's language server | none |
 | Kimi | Kimi Code (`kimi` on PATH, or `~/.kimi-code/bin`), signed in (`kimi`, then log in). Without Kimi installed the tab does not appear; installed but signed out, it says "Kimi isn't signed in" | none |
@@ -895,10 +895,43 @@ refused (409) until it exits, when its outcome is logged and the data rebuilt:
 
 A button is left off the seat that already holds that role (its CLI/App badge) and off seats the rotator cannot use (Claude CLI: no `token.txt`; Claude
 app: no captured `config.json`; Codex: no saved `auth.json`). The Codex buttons appear only when `codex-app-rotator.ps1` sits next to
-`usage-history.py` (it is not in this repo). The result shows as a toast: the exit code and the rotator's last unindented line, with tokens and email
+`usage-history.py` (it comes with this repo, with `codex-cli-account.ps1`). The result shows as a toast: the exit code and the rotator's last unindented line, with tokens and email
 addresses removed; the action is also written to the app log, and the data is reloaded so the badges move. Code: `switch_targets`, `switch_check`,
 `switch_argv`, `run_switch`, `switch_outcome`, `Store.switch` in `usage-history.py` (selftest block L); the buttons are `quotaSwitchBtns` /
 `quotaBestBtn` in `usage-sim.js`.
+
+## Settings panel (`dashboard_settings.py`, `settings.js`)
+
+The gear button in the page's top row opens the Settings drawer, so the rotator needs no terminal. The page loads `settings.js` (served by
+`dashboard_settings.serve`); `usage-history.py` only hands `/settings.js` and `/api/settings/*` to that module. Every action needs the same
+`X-Quota-App: 1` header as the other POSTs, takes a seat name of 1 to 32 letters, digits, `-` or `_` (not starting with `-` or `_`), and runs an
+existing rotator as an argv list (no shell, no page text in a command). A long action is a background job: the page polls
+`GET /api/settings/job?id=` and shows the last output lines (tokens and addresses removed) when it fails; one settings action runs at a time and
+it also waits for a running Refresh or switch. A rotator started this way is never killed. Tests: `test-dashboard-settings.py` (fake command runner,
+temp folders, fake Credential Manager; `RUN_REAL_CRED=1` also checks the ctypes layer on one throwaway entry of its own).
+
+| What | How (`POST /api/settings/action`, `action` =) |
+|---|---|
+| Claude CLI: add a seat | `claude.cli.add` opens `claude setup-token` in a visible console; `claude.cli.import` takes the pasted token, writes it to a private temp file and runs `claude-cli-account.ps1 --import <L> <file> [--replace]`; the file is removed afterwards |
+| Claude CLI: switch / best | `claude.cli.switch` = `--switch <L> --no-usage`; `claude.cli.best` = `--switch best --no-usage` |
+| Claude app: save login / switch | `claude.app.capture` = `claude-app-rotator.ps1 --capture <L>`, refused with a message while the app runs; `claude.app.switch` = `--switch <L> --relaunch` (the page asks first); `claude.app.best` picks from the dashboard's numbers |
+| Codex: add / switch / best | `codex.add` opens `codex login` in a visible console with `CODEX_HOME` set to a NEW home folder (an existing seat is never logged over), `codex.check` refuses a login already saved as another seat; `codex.switch` = `codex-app-rotator.ps1 --switch <L>`; `codex.best` |
+| Gemini, xAI (Grok), Kimi: seats | `cred.capture`, `cred.switch`, `cred.best`: see below |
+| Remove / restore a seat | `remove` MOVES the seat to `<store>\.removed\<label>-<UTC stamp>` (never deletes; the seat in use is refused; Claude moves its app and CLI folders together and undoes the first move if the second fails); `restore` moves it back, refused if the name is taken |
+| Display address, weight | `set.email` (`email.txt`, or the seat's `meta.json` for credential seats), `set.weight` (`seatWeights` in `rotator.local.json`, other keys kept) |
+| Automation | `task.set` runs `schtasks /Change /TN <name> /ENABLE or /DISABLE` for the listed tasks only (auto-rotate, app-history sync, app-seat keepalive, Codex keepalive, rotate proxy); `proxy.restart` ends and runs the proxy task; `auto.resume` creates or removes `~\.claude-cli-accounts\.auto-resume-off`, which `Ping-ActiveSessions` in `claude-cli-account.ps1` checks; `sync.history` runs `sync-app-history.ps1` (the `~\.grok\bin` copy when there is one); `keepalive.status` runs `claude-app-seat-keepalive.ps1 -Status` |
+
+**Credential seats (Gemini, xAI, Kimi).** A provider whose login is a file or a Windows Credential Manager entry gets a generic seat store in
+`~\.agent-dashboard-seats\<provider>\<label>\` (`meta.json`, `files\`, `cred\`). The login stores found on this PC: Gemini = the generic credential
+`gemini:antigravity` (the Antigravity app) plus `~\.gemini\oauth_creds.json` and `google_accounts.json` (the Gemini CLI), saved as one seat; xAI = `~\.grok\auth.json`;
+Kimi = a folder under `~\.kimi-code` (`credentials`, `auth` or `tokens`, whichever exists: **not verified**, Kimi is not signed in on the PC this was written on).
+Capture saves the login now in use (refused when it is already another seat's, or when the name holds a different account without "replace"). Switch is refused while
+the provider's program runs (`antigravity.exe`, `grok.exe`, `kimi.exe`); otherwise it copies the login in use to `.swap-backups\before-<label>-<stamp>`, saves it back into the
+seat it belongs to (matched by address) so refreshed tokens are kept, writes the chosen seat, reads it back, and puts the old login back if that fails. "Most headroom" uses the
+dashboard's own windows (the most used window decides; a capped seat is never picked); the dashboard reads only the login in use, so the last reading of each seat is kept in
+`.readings.json` whenever the panel is open (a seat never in use while it was open has no number and is not picked). **Muse** has no seats: its login is not in any file or Credential
+Manager entry the dashboard can find. Automatic rotation stays Claude and Codex only. Limits (`shortcut:` in the code): seat files are plain files like `token.txt` (not encrypted
+separately); the Kimi folder name is a guess; a job shows its output only when it ends.
 
 ## Keeping the install in sync (`rotator-sync`)
 
