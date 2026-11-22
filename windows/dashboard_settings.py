@@ -300,6 +300,11 @@ class Settings:
             used.append(u)
         return None if not used else round(1.0 - max(used), 4)
 
+    def capped(self, windows, now=None):
+        """Some window is used up and has not renewed: headroom() says None for that as well as for no reading, and the page tells the two apart."""
+        now = now or self.now()
+        return any(isinstance(w.get("used"), (int, float)) and w["used"] >= 1.0 and not (isinstance(w.get("reset"), (int, float)) and w["reset"] <= now) for w in windows or ())
+
     def pick_best(self, pid, role=None):
         """(label, headroom) of the usable seat with the most headroom that is not already in use for `role`, from the dashboard's own numbers."""
         best = None
@@ -483,7 +488,7 @@ class Settings:
             wins = (self.bprov(pid).get("accounts") or [{}])[0].get("windows") if l == active else (self.readings(pid).get(l) or {}).get("windows")
             ba = (self.bprov(pid).get("accounts") or [{}])[0] if l == active else {}
             out.append({"label": l, "email": m.get("display") or m.get("email") or "", "plan": ba.get("plan") or "",
-                        "weight": self.weight_of(pid, l, {}), "active": {"login": l == active}, "headroom": self.headroom(wins),
+                        "weight": self.weight_of(pid, l, {}), "active": {"login": l == active}, "headroom": self.headroom(wins), "capped": self.capped(wins),
                         "health": {"ok": ba.get("ok", True) if l == active else None, "note": ba.get("note", "") if l == active else ""}})
         return {"id": pid, "name": sp["name"], "kind": "cred", "app": sp["app"], "how": sp["how"], "seats": out,
                 "current": {"email": live_email, "saved": bool(active), "present": self.cred_has_login(pid)}, "signin": bool(sp.get("signin")),
@@ -510,7 +515,7 @@ class Settings:
             em = read_text(os.path.join(self.root, l, "email.txt")) or read_text(os.path.join(self.app_seats, l, "email.txt")) or a.get("email") or ""
             seats.append({"label": l, "email": em, "plan": "", "weight": self.weight_of("claude", l, a),
                           "roles": {"cli": l in cli, "app": l in app}, "active": {"cli": act.get("cli") == l, "app": act.get("app") == l},
-                          "headroom": self.headroom(a.get("windows")), "health": {"ok": a.get("ok", True), "note": a.get("note", "")}})
+                          "headroom": self.headroom(a.get("windows")), "capped": self.capped(a.get("windows")), "health": {"ok": a.get("ok", True), "note": a.get("note", "")}})
         can = ["cli.add", "app.capture", "email", "weight", "remove", "best"]
         for n, f in (("cli.switch", "claude-cli-account.ps1"), ("app.switch", "claude-app-rotator.ps1")):
             if os.path.isfile(os.path.join(self.here, f)):
@@ -524,7 +529,7 @@ class Settings:
             a = self.bacct("codex", l)
             seats.append({"label": l, "email": a.get("email") or jwt_email(((read_json(os.path.join(self.homes, l, "auth.json")) or {}).get("tokens") or {}).get("id_token") or ""),
                           "plan": a.get("plan") or "", "weight": self.weight_of("codex", l, a), "active": {"app": act.get("app") == l},
-                          "headroom": self.headroom(a.get("windows")), "health": {"ok": a.get("ok", True), "note": a.get("note", "")}})
+                          "headroom": self.headroom(a.get("windows")), "capped": self.capped(a.get("windows")), "health": {"ok": a.get("ok", True), "note": a.get("note", "")}})
         can = ["add", "weight", "remove", "best"] + (["switch"] if os.path.isfile(os.path.join(self.here, "codex-app-rotator.ps1")) else [])
         return {"id": "codex", "name": "Codex", "kind": "codex", "seats": seats, "removed": self.removed([self.homes]), "can": can,
                 "how": "The Codex CLI and app share one login, so a switch closes and reopens the Codex app."}

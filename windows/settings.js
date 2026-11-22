@@ -153,7 +153,7 @@
   }
 
   // ---- views
-  const pct = h => h == null ? '<span class="muted">no reading</span>' : `<span class="${h < .1 ? 'bad' : ''}">${Math.round(h * 100)}% left</span>`;
+  const pct = (h, capped) => capped ? '<span class="bad">a limit is reached</span>' : h == null ? '<span class="muted">no reading</span>' : `<span class="${h < .1 ? 'bad' : ''}">${Math.round(h * 100)}% left</span>`;
   const when = ts => { const m = /^(\d{4})(\d\d)(\d\d)T(\d\d)(\d\d)/.exec(ts); return m ? new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], +m[4], +m[5])).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : ts; };
   const busy = () => !!(S.job || S.wait);
   const dis = () => busy() ? ' disabled' : '';
@@ -172,7 +172,7 @@
     const h = s.health || {};
     return `<div class="seat"><div class="nm"><b>${L}</b>${badges}</div>` +
       `<div>${s.plan ? `<span class="muted">${esc(s.plan)}</span>` : ''}</div>` +
-      `<div class="meta">${emailsOn() && s.email ? `<span>${esc(s.email)}</span>` : ''}<span>${pct(s.headroom)}</span>` +
+      `<div class="meta">${emailsOn() && s.email ? `<span>${esc(s.email)}</span>` : ''}<span>${pct(s.headroom, s.capped)}</span>` +
       `<label>Counts as <input type="number" min="0" max="100" step="0.5" value="${esc(s.weight)}" data-w="${L}" aria-label="Weight of seat ${L}"${dis()}> seat(s)</label>` +
       (h.ok === false || h.note ? `<span class="${h.ok === false ? 'bad' : ''}">${esc(h.note || 'problem reading this seat')}</span>` : '') + `</div>` +
       `<div class="acts">${sw.join('')}` +
@@ -198,7 +198,7 @@
     const signin = p.signin && !cur.present
       ? `<div class="qs err" role="status"><b>${esc(p.name)} is installed but not signed in.</b> Press the button: ${esc(p.name)} opens in a new window and asks you to log in. When you are done, press Check again.` +
         `<div class="row"><button class="primary" data-a="cred-signin"${dis()}>Open ${esc(p.name)} to sign in</button><button data-a="recheck"${dis()}>Check again</button></div></div>` : '';
-    return signin + `<h3>Add a seat</h3><div class="hint">${esc(p.how)}</div>` +
+    return signin + `<h3>Add a seat</h3>` +
       `<div class="hint">Current login: ${cur.present ? (cur.saved ? 'already saved as a seat' : (emailsOn() && cur.email ? esc(cur.email) : 'not saved yet')) : 'none found'}.</div>` +
       `<div class="row">${nameIn}<label><input type="checkbox" id="qs-replace"${f.replace ? ' checked' : ''}> replace an existing seat</label>` +
       `<button class="primary" data-a="cred-capture"${dis()}${cur.present ? '' : ' disabled title="Sign in first: there is no login to save yet"'}>Save the current login</button></div>`;

@@ -411,6 +411,16 @@ class TestAutomation(Base):
 
 
 class TestHeadroom(Base):
+    def test_capped_is_told_apart_from_no_reading(self):
+        now = self.clock[0]
+        self.assertTrue(self.s.capped([{"used": 0.2, "reset": now + 99}, {"used": 1.0, "reset": now + 99}]))
+        self.assertFalse(self.s.capped([{"used": 1.0, "reset": now - 1}]))              # renewed since
+        self.assertFalse(self.s.capped([]) or self.s.capped(None) or self.s.capped([{"used": None}]))
+        self.store.blob = {"providers": [{"id": "claude", "accounts": [{"label": "A", "windows": [{"used": 1.0, "reset": now + 99}]}]}]}
+        self.claude_seat("A")
+        a = self.provider("claude")["seats"][0]
+        self.assertEqual((a["headroom"], a["capped"]), (None, True))
+
     def test_headroom_rules(self):
         h = self.s.headroom
         self.assertEqual(h([{"used": 0.3}, {"used": 0.6}]), 0.4)
