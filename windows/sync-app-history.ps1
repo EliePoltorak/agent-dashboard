@@ -58,6 +58,14 @@
   Categories 2 and 3 are OFF by default -- pass -KeepResumable to enable them (they're
   still CLI-resumable either way). They only count files untouched for >10 minutes.
 
+  A kept (or pinned) session also brings its FAMILY: the sessions linked to it by a record's spawnedFrom.sessionId (side
+  sessions it started, what it was spawned from), whatever their length or age, if their transcripts are here. Side
+  sessions started in an app worktree of -Cwd (transcripts in projects\<enc>--claude-worktrees-*, records with cwd =
+  the worktree and originCwd = -Cwd) are carried the same way, keep their own cwd, and are never fabricated: with no
+  record on any seat to clone they are skipped. A carried record keeps its session id (so spawnedFrom links resolve)
+  unless that seat ever had it (a record file or deletion tombstone for it, or its path in .flag-state.json); then it
+  gets a new id. A session fabricated without a record to clone still gets a different id on each seat.
+
   TITLES
   ------
   Records get real titles, tried in order:
@@ -158,6 +166,14 @@ if ($enc.Length -gt 200) {
 }
 if (-not (Test-Path -LiteralPath $projDir)) { if (-not $Quiet) { "no transcripts for $Cwd ($projDir)" }; return }
 $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
+# Side sessions started in an app worktree of -Cwd keep their transcripts in sibling folders <enc>--claude-worktrees-<name>.
+# shortcut: an over-200-character -Cwd is cut and hashed by the CLI, so its worktree folders can't be matched by prefix here; their sessions are not carried. Upgrade if one turns up.
+$wtCli = New-Object 'System.Collections.Generic.HashSet[string]'   # basenames of the worktree transcripts
+if ($enc.Length -le 200) {
+  foreach ($wd in @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith("$enc--claude-worktrees-", [StringComparison]::OrdinalIgnoreCase) })) {
+    foreach ($wf in @(Get-ChildItem -LiteralPath $wd.FullName -File -Filter '*.jsonl')) { $transcripts += $wf; [void]$wtCli.Add($wf.BaseName) }
+  }
+}
 if ($transcripts.Count -eq 0) { if (-not $Quiet) { "no transcripts for $Cwd" }; return }
 # a run killed between writing a .sync-tmp and moving it into place leaves it in the app's index; the suffix is
 # only ours and the lock means no other run is mid-write, so any found now is a leftover
@@ -396,7 +412,10 @@ $appUp = Test-AppUp
 $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
-$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title }
+$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title; sid = the id to clone under (link targets only) }
+# A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
+# Used only to find clone sources; the workspace vote, auto-archive and pass 1.5 still use cwd -eq $Cwd.
+function Test-OfRepo($j) { $j.cwd -eq $Cwd -or $j.originCwd -eq $Cwd }
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
 foreach ($acct in $accts) {
   $subCounts[$acct.Name] = @{}
@@ -408,8 +427,8 @@ foreach ($acct in $accts) {
       try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { continue }
       if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
-      if ($j.cwd -eq $Cwd) {
-        $cnt++
+      if ($j.cwd -eq $Cwd) { $cnt++ }
+      if (Test-OfRepo $j) {
         $cli = [string]$j.cliSessionId
         if ($cli) {
           $good = -not ([string]$j.title -match $DateTitleRx)
@@ -423,6 +442,15 @@ foreach ($acct in $accts) {
     if ($cnt -gt 0) { $guidVotes[$sub.Name] = [int]$guidVotes[$sub.Name] + $cnt }
   }
 }
+# The id a child's spawnedFrom names is the id a clone should carry, so prefer that record as the clone source.
+$linkTo = New-Object 'System.Collections.Generic.HashSet[string]'
+foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { $ls = [string]$r.j.spawnedFrom.sessionId; if ($ls) { [void]$linkTo.Add($ls) } } }
+foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
+  $lc = [string]$r.j.cliSessionId
+  if ($lc -and (Test-OfRepo $r.j) -and $linkTo.Contains([string]$r.j.sessionId) -and -not ([string]$r.j.title -match $DateTitleRx)) {
+    try { $recIndex[$lc] = @{ raw = (Get-Content -LiteralPath $r.file.FullName -Raw); good = $true; sid = [string]$r.j.sessionId } } catch { }
+  }
+} }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
 
 # ---- pass 1.4: archive and pin flags follow you across seats -------------------
@@ -466,6 +494,16 @@ if ($appUp) {
       Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old unpinned session of this workspace with a local transcript and no autoArchiveExempt record once more, un-archived ones included, because deleting it also forgets which sessions were archived for age)"
     }
   }
+}
+# Session ids each seat has had a record for: the state file's keys are <acct>\<ws>\<file> paths. A clone keeps its session id
+# only on a seat that never had it (pass 2). Read here, not from $flagPrevAll, which stays empty while the app runs.
+$sidEverOn = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase); $sidKeepOk = $true
+if (Test-Path -LiteralPath $flagStatePath) {
+  try {
+    $st = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable
+    if ($st -isnot [hashtable]) { throw 'not a JSON object' }
+    foreach ($fk in 'isArchived', 'isStarred') { if ($st[$fk] -is [hashtable]) { foreach ($k in $st[$fk].Keys) { $kp = $k -split '\\'; if ($kp.Count -ge 3) { [void]$sidEverOn.Add("$($kp[0])\$($kp[-1] -replace '\.json$', '')") } } } }
+  } catch { $sidKeepOk = $false }   # history unknown: mint new ids
 }
 $flagNextAll = @{}
 $flagWant = @{}         # cliSessionId -> @{ isArchived; isStarred }: the resolved values, for records pass 2 creates
@@ -740,7 +778,7 @@ foreach ($cli in @($byCli.Keys)) {
   # (from a well-titled record now at the tip: the tip record itself, or one this pass just reconciled)
   $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) }) | Select-Object -First 1
   if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true } }
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sid = $recIndex[$cli].sid } }   # sid: keep the linked id (pass 1)
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -758,6 +796,24 @@ foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $pin = if ($pinResolved.ContainsKey($pc)) { $pinResolved[$pc] } else { $r.j.isStarred -eq $true }
   if ($pin) { [void]$pinnedCli.Add($pc) }
 } }
+# FAMILIES: a session kept (or pinned) comes with the sessions linked to it by spawnedFrom (its side sessions, and what it
+# was spawned from), so a seat that gets one gets the lot. Union-find over cliSessionIds; links resolve through any seat's record.
+$sidCli = @{}
+foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { if ($r.j.sessionId -and $r.j.cliSessionId) { $sidCli[[string]$r.j.sessionId] = [string]$r.j.cliSessionId } } }
+$uf = @{}
+function Get-FamRoot([string]$x) { while ($uf.ContainsKey($x) -and $uf[$x] -ne $x) { $x = $uf[$x] }; return $x }
+foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
+  $fc = [string]$r.j.cliSessionId; $fp = $sidCli[[string]$r.j.spawnedFrom.sessionId]
+  if ($fc -and $fp) { $ra = Get-FamRoot $fc; $rb = Get-FamRoot $fp; if ($ra -ne $rb) { $uf[$ra] = $rb } }
+} }
+$fams = @{}
+foreach ($x in @($uf.Keys)) { $rt = Get-FamRoot $x; if (-not $fams.ContainsKey($rt)) { $fams[$rt] = New-Object System.Collections.Generic.List[string] }; $fams[$rt].Add($x); if ($x -ne $rt -and -not $fams[$rt].Contains($rt)) { $fams[$rt].Add($rt) } }
+$famAdded = 0
+foreach ($fm in $fams.Values) {
+  if (-not @($fm | Where-Object { $keep.Contains($_) -or ($pinnedCli.Contains($_) -and $allT.Contains($_)) }).Count) { continue }
+  foreach ($x in $fm) { if ($allT.Contains($x) -and $keep.Add($x)) { $famAdded++ } }
+}
+if (-not $Quiet -and $famAdded -gt 0) { "$famAdded linked (side) session(s) added to those to be on every seat" }
 foreach ($acct in $accts) {
   # primary sub for this workspace = the one holding the most of this cwd's records
   $bestSubName = $null; $bestCount = 0
@@ -813,12 +869,24 @@ foreach ($acct in $accts) {
   foreach ($m in $transcripts) {
     if (-not ($keep.Contains($m.BaseName) -or ($allT.Contains($m.BaseName) -and $pinnedCli.Contains($m.BaseName))) -or $present.Contains($m.BaseName)) { continue }
     $src = $recIndex[$m.BaseName]
+    # A worktree session with no good record to clone is never fabricated: Write-Record would point it at the repo root.
+    if ($wtCli.Contains($m.BaseName) -and -not ($src -and $src.good)) { continue }
     if ($src -and $src.good) {
       if ($DryRun) { $cloned++ }
       else {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
-          $cj.sessionId = "local_$([guid]::NewGuid().ToString())"
+          if ($src.sid) { $cj.sessionId = $src.sid }   # the id a child's spawnedFrom names (pass 1)
+          # Keep the source's session id (so spawnedFrom links resolve here) only if this seat never had it: no record file or
+          # deletion tombstone in any of its folders (checked now), and no path for it in the saved flag state. Else mint one.
+          $keepId = $sidKeepOk -and $cj.sessionId -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
+          if ($keepId) {
+            $kg = ([string]$cj.sessionId) -replace '^local_', ''
+            foreach ($sd in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
+              if ((Test-Path -LiteralPath (Join-Path $sd.FullName "$($cj.sessionId).json")) -or (Test-Path -LiteralPath (Join-Path $sd.FullName "deleted_$kg"))) { $keepId = $false; break }
+            }
+          }
+          if (-not $keepId) { $cj.sessionId = "local_$([guid]::NewGuid().ToString())" }
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
           else {   # flags not resolved, or not saved, this run: write a neutral (off) record, which the next run
@@ -830,8 +898,11 @@ foreach ($acct in $accts) {
           $madeRecs.Add(@{ cli = $m.BaseName; path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
           $cloned++
         } catch {
-          try { if (Write-Record $bestSub $m) { $made++ } }
-          catch { Write-Warning "could not add $($m.BaseName) to $bestSub ($($_.Exception.Message)); retried next run" }
+          if ($wtCli.Contains($m.BaseName)) { Write-Warning "could not add $($m.BaseName) to $bestSub ($($_.Exception.Message)); retried next run" }   # no fabricated fallback for a worktree session
+          else {
+            try { if (Write-Record $bestSub $m) { $made++ } }
+            catch { Write-Warning "could not add $($m.BaseName) to $bestSub ($($_.Exception.Message)); retried next run" }
+          }
         }
       }
     } else {

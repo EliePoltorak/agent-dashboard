@@ -7,17 +7,24 @@
   anything that routes by session id, resolves there); the child keeps its worktree cwd; the side session is
   carried although it is short (2 assistant turns, below -MinAssistant); a seat that already holds the parent
   under another id gets the child but no second parent; a second run adds nothing.
+  The id is kept only on a seat that never had it: seat D holds an unreadable file with the child's id as its
+  name (left byte-identical; D's copy gets a new id), seat E holds the child's deletion tombstone (new id), and a
+  record deleted from seat B after the first run comes back under a new id (its old path is in the flag state).
+  A worktree transcript no record names creates no record anywhere (it would point at the repo root).
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
-  %APPDATA% / %USERPROFILE% redirected and -AssumeAppClosed. Sandbox deleted on success, kept on failure. Exit 1 on failure.
+  %APPDATA% / %USERPROFILE% redirected, -AssumeAppClosed and an explicit synthetic -Cwd. Sandbox deleted on success,
+  kept on failure. Exit 1 on failure.
     pwsh -File test-sync-app-history-families.ps1 [<path to sync-app-history.ps1>]
 #>
 $Script = if ($args[0]) { [string]$args[0] } else { Join-Path $PSScriptRoot 'sync-app-history.ps1' }
 $sb = "C:\Dev\Temp\sync-app-history-families-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID"
-$repo = 'C:\Dev\hameishiv'; $wt = "$repo\.claude\worktrees\wt1"
+$repo = 'C:\SyncFamTest\repo'; $wt = "$repo\.claude\worktrees\wt1"   # synthetic: never a real checkout
 $projRoot = "$sb\home\.claude\projects"
 $ccs = "$sb\app\Claude\claude-code-sessions"; $ws = [guid]::NewGuid().ToString()
 $A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"; $C = "$ccs\cccccccc-0000-0000-0000-000000000003\$ws"
-New-Item -ItemType Directory $A, $B, $C, "$projRoot\C--Dev-hameishiv", "$projRoot\C--Dev-hameishiv--claude-worktrees-wt1", "$sb\home\.claude-app-seats" -Force | Out-Null
+$D = "$ccs\dddddddd-0000-0000-0000-000000000004\$ws"; $E = "$ccs\eeeeeeee-0000-0000-0000-000000000005\$ws"
+$pDir = "$projRoot\C--SyncFamTest-repo"; $wDir = "$projRoot\C--SyncFamTest-repo--claude-worktrees-wt1"
+New-Item -ItemType Directory $A, $B, $C, $D, $E, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
 "sandbox: $sb"
 
 function transcript($dir, $cli, [int]$turns, $prompt) {
@@ -32,38 +39,54 @@ function record($dir, $sid, $cli, $cwd, $title, $parent) {
   Set-Content "$dir\$sid.json" ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
 }
 
-$pCli = [guid]::NewGuid().ToString(); $cCli = [guid]::NewGuid().ToString(); $oCli = [guid]::NewGuid().ToString()
-$pSid = "local_$([guid]::NewGuid())"; $cSid = "local_$([guid]::NewGuid())"
-transcript "$projRoot\C--Dev-hameishiv" $pCli 7 'parent session that starts a side session'
-transcript "$projRoot\C--Dev-hameishiv--claude-worktrees-wt1" $cCli 2 'side session in a worktree'
+$pCli = [guid]::NewGuid().ToString(); $cCli = [guid]::NewGuid().ToString(); $oCli = [guid]::NewGuid().ToString(); $zCli = [guid]::NewGuid().ToString()
+$cGuid = [guid]::NewGuid().ToString(); $pSid = "local_$([guid]::NewGuid())"; $cSid = "local_$cGuid"
+transcript $pDir $pCli 7 'parent session that starts a side session'
+transcript $wDir $cCli 2 'side session in a worktree'
+transcript $wDir $zCli 7 'worktree session no record names'
 record $A $pSid $pCli $repo 'Parent session' $null
 record $A $cSid $cCli $wt 'Side session in worktree' $pSid
 record $B "local_$([guid]::NewGuid())" $oCli $repo 'Unrelated session on seat B' $null   # B tracks the workspace already
 record $C "local_$([guid]::NewGuid())" $pCli $repo 'Parent session' $null                  # C holds the parent under another id
+Set-Content "$D\$cSid.json" 'not json {' -NoNewline                                         # D: an unreadable file named like the child's id
+$junkHash = (Get-FileHash "$D\$cSid.json").Hash
+Set-Content "$E\deleted_$cGuid" 'x' -NoNewline                                              # E: the child's deletion tombstone
 
 $fail = 0
 function check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:fail++ } }
 function run {
-  $out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -AssumeAppClosed *>&1" 2>&1 | ForEach-Object { "$_" })
+  $out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -Cwd '$repo' -AssumeAppClosed *>&1" 2>&1 | ForEach-Object { "$_" })
   $out | Where-Object { $_ -match 'rror|xception|WARNING|classified' } | ForEach-Object { "    $_" }
 }
-function recsIn($dir) { @(Get-ChildItem $dir -Filter 'local_*.json' | ForEach-Object { Get-Content $_.FullName -Raw | ConvertFrom-Json }) }
+function recsIn($dir) { @(Get-ChildItem $dir -Filter 'local_*.json' | ForEach-Object { try { Get-Content $_.FullName -Raw | ConvertFrom-Json } catch { } }) }
 function count { @(Get-ChildItem $ccs -Recurse -Filter 'local_*.json').Count }
 
 run
-$b = recsIn $B; $c = recsIn $C
-$bp = @($b | Where-Object { $_.cliSessionId -eq $pCli }); $bc = @($b | Where-Object { $_.cliSessionId -eq $cCli })
+$rB = recsIn $B; $rC = recsIn $C; $rD = recsIn $D; $rE = recsIn $E   # (variable names are case-insensitive: not $b/$B)
+$bp = @($rB | Where-Object { $_.cliSessionId -eq $pCli }); $bc = @($rB | Where-Object { $_.cliSessionId -eq $cCli })
 check 'seat B gets the parent' ($bp.Count -eq 1)
 check 'seat B gets the worktree side session' ($bc.Count -eq 1)
 check 'the parent keeps its session id on seat B' ($bp.Count -eq 1 -and $bp[0].sessionId -eq $pSid)
 check 'the side session keeps its session id on seat B' ($bc.Count -eq 1 -and $bc[0].sessionId -eq $cSid)
 check 'the side session keeps its worktree cwd' ($bc.Count -eq 1 -and $bc[0].cwd -eq $wt)
-check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($b | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
-check 'seat C gets the side session' (@($c | Where-Object { $_.cliSessionId -eq $cCli }).Count -eq 1)
-check 'seat C gets no second parent' (@($c | Where-Object { $_.cliSessionId -eq $pCli }).Count -eq 1)
+check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($rB | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
+check 'seat C gets the side session' (@($rC | Where-Object { $_.cliSessionId -eq $cCli }).Count -eq 1)
+check 'seat C gets no second parent' (@($rC | Where-Object { $_.cliSessionId -eq $pCli }).Count -eq 1)
+$dc = @($rD | Where-Object { $_.cliSessionId -eq $cCli })
+check 'seat D leaves its unreadable file with the child id byte-identical' ((Get-FileHash "$D\$cSid.json").Hash -eq $junkHash)
+check 'seat D gets the side session under a different id' ($dc.Count -eq 1 -and $dc[0].sessionId -ne $cSid)
+$ec = @($rE | Where-Object { $_.cliSessionId -eq $cCli })
+check 'seat E (tombstone of the child id) gets the side session under a different id' ($ec.Count -eq 1 -and $ec[0].sessionId -ne $cSid)
+check 'a worktree transcript no record names creates no record on any seat' (@(Get-ChildItem $ccs -Recurse -Filter 'local_*.json' | ForEach-Object { Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue } | Where-Object { $_ -match $zCli }).Count -eq 0)
 $n = count
 run
 check 'a second run adds nothing' ((count) -eq $n)
+
+# a record deleted after it was written: its id is in the flag state, so the copy that comes back gets a new id
+Remove-Item "$B\$cSid.json" -ErrorAction SilentlyContinue
+run
+$bc2 = @(recsIn $B | Where-Object { $_.cliSessionId -eq $cCli })
+check 'a previously known id is not reused: the side session returns to seat B under a new id' ($bc2.Count -eq 1 -and $bc2[0].sessionId -ne $cSid)
 
 if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
 Remove-Item -LiteralPath $sb -Recurse -Force

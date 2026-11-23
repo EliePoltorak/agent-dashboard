@@ -656,6 +656,13 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
 
 - Script: `C:\Users\User\.grok\bin\sync-app-history.ps1`
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
+- **Side sessions and families.** A kept (or pinned) session brings the sessions linked to it by `spawnedFrom.sessionId`
+  (its side sessions, and what it was spawned from), whatever their length. Side sessions started in an app worktree of
+  `-Cwd` (transcripts under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, keep their worktree cwd, and are
+  never fabricated (no record to clone on any seat: skipped). A carried record keeps its session id, so the `spawnedFrom`
+  link resolves on the other seat, unless that seat ever had that id (a record file or `deleted_<id>` tombstone for it, or
+  its path in `.flag-state.json`): then it gets a new id. A record fabricated without a source still gets a different id on
+  each seat.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
   `~/.claude-app-seats\.pruned-history-backups\<timestamp>\`. Tune what's "substantive" via
   `-MinAssistant` and the `$AutoSignature` list at the top of the script; `-NoPrune` is still
