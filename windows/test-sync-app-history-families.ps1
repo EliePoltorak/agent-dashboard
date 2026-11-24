@@ -220,6 +220,11 @@ foreach ($lv in 'L', 'L2') {
 }
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
+# N: a repo session with a side-session-notes folder: its copy gets a new id (deleting it must never take the notes)
+$nCli = [guid]::NewGuid().ToString(); $nSid = "local_$([guid]::NewGuid())"
+transcript $pDir $nCli 7 'session with side-session notes'
+record $A $nSid $nCli $repo 'Session with notes' $null
+New-Item -ItemType Directory "$sb\app\Claude\side-session-notes\$nSid" -Force | Out-Null
 # M: a repo session whose record carries a malformed session id: its copy gets a fresh one
 $mCli = [guid]::NewGuid().ToString()
 transcript $pDir $mCli 7 'record with a malformed session id'
@@ -247,6 +252,7 @@ check 'pass 1.5 leaves a worktree-only session alone' (@($rA | Where-Object { $_
 check 'a worktree-only session with repo records is copied with its worktree cwd' (@($rC | Where-Object { $_.cliSessionId -eq $hCli -and $_.cwd -eq $wt }).Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $hCli }).Count -eq 1)
 check 'the not-carried notice counts recorded sessions (blank-titled, repo-cwd only) but not the unrecorded one' (@($script:lastOut | Where-Object { $_ -match '^2 worktree session\(s\) not carried' }).Count -eq 1)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
+check 'a session with side-session notes gets a new id on another seat' (@($rB | Where-Object { $_.cliSessionId -eq $nCli -and $_.sessionId -ne $nSid }).Count -eq 1)
 check 'a malformed session id is not reused' (@($rB | Where-Object { $_.cliSessionId -eq $mCli -and $_.sessionId -ne 'local_bad' }).Count -eq 1)
 check 'a worktree-only session is not copied from a repo-cwd record' (@($rB | Where-Object { $_.cliSessionId -eq $uCli }).Count -eq 0)
 check 'a worktree-only transcript does not bring a repo record into auto-archive' (@($rA | Where-Object { $_.cliSessionId -eq $wCli -and -not $_.isArchived }).Count -eq 1)

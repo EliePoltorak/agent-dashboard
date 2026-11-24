@@ -70,7 +70,8 @@
   leases worktrees by session id) or that seat has a record with that id, a deletion tombstone for it, or its path in the last
   saved .flag-state.json; then it gets a new id. Only a local_<guid> id is reused, and an unreadable state file means new ids.
   (The id kept is the one a child's link names, when one does: the one that seat's own records name, if any.) The app's shared
-  claude_desktop_config.json also names session ids (pinned order, the last open session), so a same-id copy shares those. A session fabricated without a record to clone still gets a different id on each seat.
+  claude_desktop_config.json also names session ids (pinned order, the last open session), so a same-id copy shares those. A session with a
+  side-session-notes\<id> folder (shared by every seat) gets a new id, so deleting a copy can never take its notes. A session fabricated without a record to clone still gets a different id on each seat.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -430,7 +431,8 @@ $appUp = Test-AppUp
 $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
-$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title; sid = the id to clone under (link targets only) }
+$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); sf = carries spawnedFrom.sessionId; sids = ordinal set of ids a child's link names (link targets only) }
+$notesDir  = Join-Path $env:APPDATA 'Claude\side-session-notes'   # one <sessionId> folder per session, shared by every seat
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
@@ -947,7 +949,10 @@ foreach ($acct in $accts) {
           # (a worktree session: a worktree-only transcript, or a source record whose cwd is a worktree of -Cwd; Test-CloneSrc
           # already keeps worktree-cwd records out of a repo session's sources, so the second half is a defence)
           $isWt = $wtCli.Contains($m.BaseName) -or ($cj.cwd -ne $Cwd -and $cj.originCwd -eq $Cwd)
-          $keepId = $sidKeepOk -and ([string]$cj.sessionId -match '^local_[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') -and -not $isWt -and -not $seatIds.Contains([string]$cj.sessionId) -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
+          # Nor for a session with a side-session-notes\<id> folder (shared by every seat): if the app removes it with its
+          # session, deleting the copy on another seat would delete the notes.
+          $hasNotes = $true; try { $hasNotes = Test-Path -LiteralPath (Join-Path $notesDir ([string]$cj.sessionId)) } catch { }
+          $keepId = -not $hasNotes -and $sidKeepOk -and ([string]$cj.sessionId -match '^local_[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') -and -not $isWt -and -not $seatIds.Contains([string]$cj.sessionId) -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
           if ($keepId) {
             $kg = ([string]$cj.sessionId) -replace '^local_', ''
             try {   # a failed check costs only the id, never the clone
