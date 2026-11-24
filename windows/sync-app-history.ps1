@@ -62,12 +62,13 @@
   sessions it started, what it was spawned from), whatever their length or age, if their transcripts are here. Side
   sessions started in an app worktree of -Cwd (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
   = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their own
-  cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (and counted). A session whose transcript is in the repo folder
+  cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
   is copied as before, from a cwd = -Cwd record only. Their copies are not caught up to the transcript tip afterwards
   (pass 1.5 covers cwd = -Cwd records only; issue #31). A carried
   record keeps its session id (so spawnedFrom links resolve) unless it is a worktree session (the shared git-worktrees.json
   leases worktrees by session id) or that seat has a record with that id, a deletion tombstone for it, or its path in the last
-  saved .flag-state.json; then it gets a new id. A session fabricated without a record to clone still gets a different id on each seat.
+  saved .flag-state.json; then it gets a new id. Only a local_<guid> id is reused, and an unreadable state file means new ids.
+  (The id kept is the one a child's link names, when one does.) A session fabricated without a record to clone still gets a different id on each seat.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -453,7 +454,7 @@ foreach ($acct in $accts) {
         $cli = [string]$j.cliSessionId
         if ($cli) {
           $good = ([string]$j.title).Trim() -and -not ([string]$j.title -match $DateTitleRx)   # a blank title is not a real one
-          $sf = [bool]$j.spawnedFrom.sessionId   # prefer a record that carries its family link (a sync-made one never does)
+          $sf = [bool]$j.spawnedFrom.sessionId   # prefer a record that carries its family link (a fabricated one never does)
           $cur = $recIndex[$cli]
           if (-not $cur -or ($good -and -not $cur.good) -or ($good -and $sf -and -not $cur.sf)) { $recIndex[$cli] = @{ raw = $rawRec; good = $good; sf = $sf } }
         }
@@ -464,13 +465,15 @@ foreach ($acct in $accts) {
     if ($cnt -gt 0) { $guidVotes[$sub.Name] = [int]$guidVotes[$sub.Name] + $cnt }
   }
 }
-# The id a child's spawnedFrom names is the id a clone should carry, so prefer that record as the clone source.
+# The id a child's spawnedFrom names is the id a clone should carry. Only the id is taken from that record: the content stays
+# the source chosen above (a record a child links to may be a fabricated copy, with no link or resume state of its own).
+# The first such id seen is kept.
 $linkTo = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { $ls = [string]$r.j.spawnedFrom.sessionId; if ($ls) { [void]$linkTo.Add($ls) } } }
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $lc = [string]$r.j.cliSessionId
   if ($lc -and (Test-CloneSrc $r.j) -and $linkTo.Contains([string]$r.j.sessionId) -and ([string]$r.j.title).Trim() -and -not ([string]$r.j.title -match $DateTitleRx)) {
-    try { $recIndex[$lc] = @{ raw = (Get-Content -LiteralPath $r.file.FullName -Raw); good = $true; sid = [string]$r.j.sessionId; sf = [bool]$r.j.spawnedFrom.sessionId } } catch { }
+    if ($recIndex[$lc] -and -not $recIndex[$lc].sid) { $recIndex[$lc].sid = [string]$r.j.sessionId }
   }
 } }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
@@ -800,9 +803,10 @@ foreach ($cli in @($byCli.Keys)) {
   }
   # clones for buckets that lack the session must start from the current state too
   # (from a well-titled record now at the tip: the tip record itself, or one this pass just reconciled)
-  $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) }) | Select-Object -First 1
+  # (a real title, non-blank and not a date; a record that carries its spawnedFrom link first)
+  $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and ([string]$_.j.title).Trim() -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
   if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sid = $recIndex[$cli].sid } }   # sid: keep the linked id (pass 1)
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sid = $recIndex[$cli].sid; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }   # sid: keep the linked id (pass 1)
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -934,9 +938,11 @@ foreach ($acct in $accts) {
           $keepId = $sidKeepOk -and ([string]$cj.sessionId -match '^local_[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') -and -not $isWt -and -not $seatIds.Contains([string]$cj.sessionId) -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
           if ($keepId) {
             $kg = ([string]$cj.sessionId) -replace '^local_', ''
-            foreach ($sd in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
-              if ((Test-Path -LiteralPath (Join-Path $sd.FullName "$($cj.sessionId).json")) -or (Test-Path -LiteralPath (Join-Path $sd.FullName "deleted_$kg"))) { $keepId = $false; break }
-            }
+            try {   # a failed check costs only the id, never the clone
+              foreach ($sd in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
+                if ((Test-Path -LiteralPath (Join-Path $sd.FullName "$($cj.sessionId).json")) -or (Test-Path -LiteralPath (Join-Path $sd.FullName "deleted_$kg"))) { $keepId = $false; break }
+              }
+            } catch { $keepId = $false }
           }
           if (-not $keepId) { $cj.sessionId = "local_$([guid]::NewGuid().ToString())" }
           $seatSid[$m.BaseName] = [string]$cj.sessionId; [void]$seatIds.Add([string]$cj.sessionId)

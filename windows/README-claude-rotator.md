@@ -659,12 +659,14 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
 - **Side sessions and families.** A kept (or pinned) session brings the sessions linked to it by `spawnedFrom.sessionId`
   (its side sessions, and what it was spawned from), whatever their length. Side sessions started in an app worktree of
   `-Cwd` (transcripts only under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, only from a worktree-cwd record (so
-  they keep their worktree cwd), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted). A session whose transcript is in
+  they keep their worktree cwd), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted
+  when some seat has a record of them). A session whose transcript is in
   the repo folder is copied as before, from a record whose cwd is `-Cwd`. Their copies are not caught up to the transcript
   tip afterwards (issue #31).
   A carried child's `spawnedFrom` link names the parent id its seat holds. A carried record keeps its session id unless it is
   a worktree session (the shared `git-worktrees.json` leases each worktree to a session id), or that seat has a record with
-  that id or a `deleted_<guid>` tombstone for it now (the id without `local_`), or its path in the last saved `.flag-state.json`: then it gets a new id. A record fabricated without a source still gets a different id on
+  that id or a `deleted_<guid>` tombstone for it now (the id without `local_`), or its path in the last saved `.flag-state.json`: then it gets a new id. Only a `local_<guid>` id is reused, and an
+  unreadable state file means new ids. A record fabricated without a source still gets a different id on
   each seat. A family member deleted on one seat comes back on the next run while its family is kept, as a kept session
   always has.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
