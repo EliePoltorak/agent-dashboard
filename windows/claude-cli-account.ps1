@@ -492,6 +492,11 @@ function Read-FableUsageCache($Seat) {
     return $legacy
   }
   if ($future) { return $null }   # nor is it returned: its reset must not count as a cap in force
+  if ($reading -and $reading.data -and -not $reading.data.oi7_stat) {   # an older proxy's Fable-claimed refusal: infer on a copy, as Get-LegacyFableCap does
+    $copy = $reading.data.PSObject.Copy(); $copy | Add-Member -NotePropertyName oi7_stat -NotePropertyValue $null -Force
+    $copy = Set-FableClaimInference $copy
+    if ($copy.oi7_stat) { return @{ ts = $reading.ts; observed_ms = (Get-CacheObservationMs $reading); data = $copy } }
+  }
   return $reading
 }
 

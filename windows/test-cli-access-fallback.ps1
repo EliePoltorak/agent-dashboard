@@ -561,6 +561,12 @@ Check 'a Fable-claimed refusal an older proxy saved with no oi7_stat counts as a
 Check 'inferring on read leaves the cached record itself unchanged' (-not $legacyClaim.data.oi7_stat)
 $legacyOther = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"five_hour","http":429}}' | ConvertFrom-Json
 Check 'an older proxy refusal claimed by another window is not read as a Fable observation' (-not (Get-LegacyFableCap $legacyOther))
+$utilSeat = Join-Path $env:TEMP ('pr22-legacy-util-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $utilSeat | Out-Null
+$utilRec = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"seven_day_overage_included","http":429,"oi7_util":"1.0"}}'
+Set-Content -LiteralPath (Join-Path $utilSeat 'usage-cache.json') -Value $utilRec; Set-Content -LiteralPath (Join-Path $utilSeat 'usage-cache-fable.json') -Value $utilRec
+$utilRead = Read-FableUsageCache $utilSeat
+Check 'an older proxy refusal saved to both caches with utilization counts as a Fable cap' ($utilRead -and (Test-FableReadingCap $utilRead $legacyNow))
+Remove-Item -LiteralPath $utilSeat -Recurse -Force
 Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 Reset-Case
 Clear-AppIdentity
