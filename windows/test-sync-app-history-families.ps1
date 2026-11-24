@@ -14,8 +14,9 @@
   A parent record deleted from seat B after the first run comes back under a new id (its old path is in the flag state).
   A worktree transcript no record names creates no record anywhere (it would point at the repo root).
   Second sandbox: a session with transcripts in the repo and a worktree folder (one record, not archived by its old
-  copy), a date-titled parent fabricated on the other seat (the child links to it), a worktree record behind the
-  transcript tip (reconciled), and a worktree session carried with no repo project folder at all.
+  copy), a date-titled parent fabricated on the other seat (the child links to it), a worktree-cwd record with a
+  repo-folder transcript (new id), a worktree-only session not auto-archived, and a worktree session carried with no
+  repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
   %APPDATA% / %USERPROFILE% redirected, -AssumeAppClosed and an explicit synthetic -Cwd. Sandbox deleted on success,
   kept on failure. Exit 1 on failure.
@@ -134,15 +135,11 @@ record $A "local_$([guid]::NewGuid())" $c2Cli $wt 'Child of a date-titled parent
 $yCli = [guid]::NewGuid().ToString(); $ySid = "local_$([guid]::NewGuid())"
 transcript $pDir $yCli 7 'worktree record with a repo-folder transcript'
 record $A $ySid $yCli $wt 'Worktree record, repo transcript' $null
-# W: a worktree session on both seats, B's copy behind the transcript tip: reconciled like a repo session
-$wCli = [guid]::NewGuid().ToString(); $u1 = [guid]::NewGuid().ToString(); $u2 = [guid]::NewGuid().ToString()
-Set-Content "$wDir\$wCli.jsonl" @('{"type":"user","message":{"role":"user","content":"worktree session to reconcile"}}',
-  ('{"parentUuid":null,"type":"assistant","uuid":"' + $u1 + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"one"}]}}'),
-  ('{"parentUuid":"' + $u1 + '","type":"assistant","uuid":"' + $u2 + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"two"}]}}'))
-(Get-Item "$wDir\$wCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-20)
-$wSidA = "local_$([guid]::NewGuid())"; $wSidB = "local_$([guid]::NewGuid())"
-record $A $wSidA $wCli $wt 'Worktree session to reconcile' $null; record $B $wSidB $wCli $wt 'Worktree session to reconcile' $null
-foreach ($pr in @(@($A, $wSidA, $u2), @($B, $wSidB, $u1))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
+# W: a session with a repo-cwd record whose only transcript is an old worktree copy: not brought into auto-archive
+$wCli = [guid]::NewGuid().ToString(); $wSidA = "local_$([guid]::NewGuid())"
+transcript $wDir $wCli 7 'old worktree-only transcript of a repo session'
+(Get-Item "$wDir\$wCli.jsonl").LastWriteTime = (Get-Date).AddDays(-40)
+record $A $wSidA $wCli $repo 'Repo record, worktree-only transcript' $null
 run
 $rA = recsIn $A; $rB = recsIn $B
 check 'a session in two folders gets one record on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $xCli }).Count -eq 1)
@@ -151,7 +148,7 @@ $bp2 = @($rB | Where-Object { $_.cliSessionId -eq $p2Cli }); $bc2 = @($rB | Wher
 check 'a date-titled parent is fabricated on seat B and its worktree child carried' ($bp2.Count -eq 1 -and $bc2.Count -eq 1)
 check "the child links to seat B's fabricated parent id" ($bp2.Count -eq 1 -and $bc2.Count -eq 1 -and $bc2[0].spawnedFrom.sessionId -eq $bp2[0].sessionId)
 check 'a worktree-cwd record with a repo-folder transcript gets a new id on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $yCli -and $_.sessionId -ne $ySid }).Count -eq 1)
-check "a worktree record behind the transcript tip is reconciled" (@($rB | Where-Object { $_.cliSessionId -eq $wCli -and $_.lastAssistantUuid -eq $u2 }).Count -eq 1)
+check 'a worktree-only transcript does not bring a repo record into auto-archive' (@($rA | Where-Object { $_.cliSessionId -eq $wCli -and -not $_.isArchived }).Count -eq 1)
 # the repo project folder missing: a substantive worktree session is still carried
 Remove-Item -LiteralPath $pDir -Recurse -Force
 $vCli = [guid]::NewGuid().ToString()

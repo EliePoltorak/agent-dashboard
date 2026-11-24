@@ -62,9 +62,10 @@
   sessions it started, what it was spawned from), whatever their length or age, if their transcripts are here. Side
   sessions started in an app worktree of -Cwd (transcripts in projects\<enc>--claude-worktrees-*, records with cwd =
   the worktree and originCwd = -Cwd) are carried the same way, keep their own cwd, and are never fabricated: with no
-  record on any seat to clone they are skipped; pass 1.5 keeps their copies at the transcript tip like any other. A carried
+  well-titled record on any seat to clone they are skipped. Their copies are not caught up to the transcript tip afterwards
+  (pass 1.5 covers cwd = -Cwd records only; issue #31). A carried
   record keeps its session id (so spawnedFrom links resolve) unless it is a worktree session (the shared git-worktrees.json
-  leases worktrees by session id) or that seat has a record file or deletion tombstone for it now, or its path in the last
+  leases worktrees by session id) or that seat has a record with that id, a deletion tombstone for it, or its path in the last
   saved .flag-state.json; then it gets a new id. A session fabricated without a record to clone still gets a different id on each seat.
 
   TITLES
@@ -425,7 +426,8 @@ $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title; sid = the id to clone under (link targets only) }
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
-# Used to find clone sources and by pass 1.5; the workspace vote and auto-archive still use cwd -eq $Cwd.
+# Used only to find clone sources; the workspace vote, auto-archive and pass 1.5 still use cwd -eq $Cwd (worktree records in
+# pass 1.5: issue #31).
 function Test-OfRepo($j) { $j.cwd -eq $Cwd -or $j.originCwd -eq $Cwd }
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
 foreach ($acct in $accts) {
@@ -628,7 +630,8 @@ if (-not $flagSkip) {
       $userOffChange = $flag -eq 'isArchived' -and $changed.Count -and -not $want   # as resolved above, before any override
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
-      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
+      # (a worktree-only transcript does not bring a session into scope: on main it had no transcript here)
+      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and -not $wtCli.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
       # An un-archive seen this run is remembered at ANY age, and in ANY run (also with -MaxAgeDays 0, another -Cwd, or no
       # transcript here: the baseline is saved for it either way, so a later run could not see it as a change), or the
       # session would be archived once it grows old. (A plain-date entry the user un-archived becomes a kept entry.)
@@ -733,7 +736,7 @@ $byCli = @{}
 foreach ($kv in $bucketRecs.GetEnumerator()) {
   foreach ($r in $kv.Value) {
     $cli = [string]$r.j.cliSessionId
-    if ((Test-OfRepo $r.j) -and $cli -and $r.j.lastAssistantUuid) {   # worktree records too: only resume state is copied
+    if ($r.j.cwd -eq $Cwd -and $cli -and $r.j.lastAssistantUuid) {
       if (-not $byCli.ContainsKey($cli)) { $byCli[$cli] = New-Object System.Collections.Generic.List[object] }
       $byCli[$cli].Add($r)
     }
@@ -893,6 +896,9 @@ foreach ($acct in $accts) {
   # a record Write-Record just fabricated: its id (the file name it wrote) and presence, so a child cloned later links to it
   function Add-Made([string]$c) { $mr = $madeRecs[$madeRecs.Count - 1]; $seatSid[$c] = [IO.Path]::GetFileNameWithoutExtension($mr.path); [void]$present.Add($c) }
   foreach ($r in $recs) { $sc = [string]$r.j.cliSessionId; if ($sc -and $r.j.sessionId -and -not $seatSid.ContainsKey($sc)) { $seatSid[$sc] = [string]$r.j.sessionId } }
+  # every session id this seat's records carry (a record's file name can differ from its id): a clone never reuses one
+  $seatIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($r in $recs) { if ($r.j.sessionId) { [void]$seatIds.Add([string]$r.j.sessionId) } }
 
   # Add kept transcripts missing from this sub: clone a well-titled record from another
   # bucket when one exists (preserves the app's own AI titles), else fabricate.
@@ -913,7 +919,7 @@ foreach ($acct in $accts) {
           # id, so a same-id copy on another seat could act on the worktree itself (deleting the copy). The links below still resolve.
           # (a worktree session: a worktree-only transcript, or a source record whose cwd is a worktree of -Cwd)
           $isWt = $wtCli.Contains($m.BaseName) -or ($cj.cwd -ne $Cwd -and $cj.originCwd -eq $Cwd)
-          $keepId = $sidKeepOk -and $cj.sessionId -and -not $isWt -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
+          $keepId = $sidKeepOk -and $cj.sessionId -and -not $isWt -and -not $seatIds.Contains([string]$cj.sessionId) -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
           if ($keepId) {
             $kg = ([string]$cj.sessionId) -replace '^local_', ''
             foreach ($sd in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
@@ -921,7 +927,7 @@ foreach ($acct in $accts) {
             }
           }
           if (-not $keepId) { $cj.sessionId = "local_$([guid]::NewGuid().ToString())" }
-          $seatSid[$m.BaseName] = [string]$cj.sessionId
+          $seatSid[$m.BaseName] = [string]$cj.sessionId; [void]$seatIds.Add([string]$cj.sessionId)
           # The parent may sit on this seat under another id (an older copy, or one minted above): point the links at that one.
           foreach ($lk in @(@($cj.spawnedFrom, 'sessionId'), @($cj.startChain, 'firstSessionId'))) {
             $lo = $lk[0]; $lpn = $lk[1]; if ($null -eq $lo) { continue }
