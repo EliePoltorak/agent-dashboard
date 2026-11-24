@@ -1241,8 +1241,8 @@ function Invoke-CheckRotateCore {
     # (which keeps its timestamp), or the default cache's proxy Fable reading. Count it once it was observed after the
     # last Fable reading counted here, judged by the same cap check ranking and fallback use. The baseline becomes the cap
     # (100), so the ladder stays armed at its floor and re-probes the seat if this rotation does not move it off.
-    if (-not $trigger -and (Test-FableCapCached $act)) {
-      $capReading = Read-FableUsageCache (Join-Path $Root $act)
+    $capReading = if (-not $trigger) { Read-FableUsageCache (Join-Path $Root $act) }   # read once: judge and act on the same record
+    if (-not $trigger -and $capReading -and (Test-FableReadingCap $capReading $now)) {
       $capAt = [int64][math]::Floor((Get-CacheObservationMs $capReading) / 1000)
       if ($capAt -gt [int64]$st.fableTs) {
         $st.fableTs = $capAt; $st.fableBase = 100; $st.nextFable = $now + $FableMinSec

@@ -227,13 +227,14 @@ FABLE_CLAIM = "seven_day_overage_included"
 
 
 def other_limit_rejection(data):
-    """A rejection some other limit made: its Fable window names a status that is not rejected, or, with no Fable
-    status, its representative claim names a window other than the Fable one (e.g. five_hour with only Fable utilization)."""
+    """A rejection some other limit made, or one nothing ties to the Fable window: its Fable window names a status that
+    is not rejected, or, with no Fable status, its representative claim does not name the Fable window (another window,
+    e.g. five_hour with only Fable utilization, or no claim at all). Such a rejection stays where the default readers see it."""
     if data.get("status") != "rejected":
         return False
     if data.get("oi7_stat"):
         return data.get("oi7_stat") != "rejected"
-    return bool(data.get("claim")) and data.get("claim") != FABLE_CLAIM
+    return data.get("claim") != FABLE_CLAIM
 
 
 def cache_entry(prior, suffix, entry, has_fable):
@@ -762,6 +763,9 @@ def cache_self_test():
                                                                  "claim": "five_hour", "oi7_util": 0.4}}
         stored = cache_entry(dict(prior), "", dict(util_only), True)
         assert stored["data"].get("status") == "rejected" and stored["data"].get("claim") == "five_hour",             "a five_hour rejection carrying only Fable utilization was nested out of the default readers' sight"
+        claimless = {"ts": now // 1000, "observed_ms": now, "data": {k: v for k, v in util_only["data"].items() if k != "claim"}}
+        stored = cache_entry(dict(prior), "", dict(claimless), True)
+        assert stored["data"].get("status") == "rejected" and "fable_cap" not in stored,             "a rejection that names no window and no claim was nested out of the default readers' sight"
         fable_util_only = {"ts": now // 1000, "observed_ms": now, "data": dict(util_only["data"], claim="seven_day_overage_included")}
         assert cache_entry(dict(prior), "", dict(fable_util_only), True)["fable_cap"]["data"]["claim"] == "seven_day_overage_included",             "a Fable-claimed rejection was not nested as the Fable backup"
     finally:
