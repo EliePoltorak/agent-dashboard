@@ -168,6 +168,7 @@ if (-not (Test-Path -LiteralPath $projDir)) { if (-not $Quiet) { "no transcripts
 $transcripts = @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')
 # Side sessions started in an app worktree of -Cwd keep their transcripts in sibling folders <enc>--claude-worktrees-<name>.
 # shortcut: an over-200-character -Cwd is cut and hashed by the CLI, so its worktree folders can't be matched by prefix here; their sessions are not carried. Upgrade if one turns up.
+# The same holds for a worktree folder whose OWN encoded name passes 200 (a -Cwd near 180 encoded characters): cut and hashed, not matched.
 $wtCli = New-Object 'System.Collections.Generic.HashSet[string]'   # basenames of the worktree transcripts
 if ($enc.Length -le 200) {
   foreach ($wd in @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith("$enc--claude-worktrees-", [StringComparison]::OrdinalIgnoreCase) })) {
@@ -814,6 +815,18 @@ foreach ($fm in $fams.Values) {
   foreach ($x in $fm) { if ($allT.Contains($x) -and $keep.Add($x)) { $famAdded++ } }
 }
 if (-not $Quiet -and $famAdded -gt 0) { "$famAdded linked (side) session(s) added to those to be on every seat" }
+# Pass 2 clones a parent before its side sessions, so a child cloned in the same pass can point at the id the parent got on that seat.
+$cliParent = @{}
+foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
+  $fc = [string]$r.j.cliSessionId; $fp = $sidCli[[string]$r.j.spawnedFrom.sessionId]
+  if ($fc -and $fp -and $fp -ne $fc -and -not $cliParent.ContainsKey($fc)) { $cliParent[$fc] = $fp }
+} }
+function Get-FamDepth([string]$x) {
+  $d = 0; $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+  while ($cliParent.ContainsKey($x) -and $seen.Add($x) -and $d -lt 50) { $x = $cliParent[$x]; $d++ }
+  return $d
+}
+$cloneOrder = @($transcripts | Sort-Object -Stable -Property @{ Expression = { Get-FamDepth $_.BaseName } })
 foreach ($acct in $accts) {
   # primary sub for this workspace = the one holding the most of this cwd's records
   $bestSubName = $null; $bestCount = 0
@@ -864,9 +877,13 @@ foreach ($acct in $accts) {
     }
   }
 
+  # cli -> the session id this seat holds for it (first seen), plus what this pass adds: a carried child's links name these.
+  $seatSid = @{}
+  foreach ($r in $recs) { $sc = [string]$r.j.cliSessionId; if ($sc -and $r.j.sessionId -and -not $seatSid.ContainsKey($sc)) { $seatSid[$sc] = [string]$r.j.sessionId } }
+
   # Add kept transcripts missing from this sub: clone a well-titled record from another
   # bucket when one exists (preserves the app's own AI titles), else fabricate.
-  foreach ($m in $transcripts) {
+  foreach ($m in $cloneOrder) {
     if (-not ($keep.Contains($m.BaseName) -or ($allT.Contains($m.BaseName) -and $pinnedCli.Contains($m.BaseName))) -or $present.Contains($m.BaseName)) { continue }
     $src = $recIndex[$m.BaseName]
     # A worktree session with no good record to clone is never fabricated: Write-Record would point it at the repo root.
@@ -887,6 +904,12 @@ foreach ($acct in $accts) {
             }
           }
           if (-not $keepId) { $cj.sessionId = "local_$([guid]::NewGuid().ToString())" }
+          # The parent may sit on this seat under another id (an older copy, or one minted above): point the links at that one.
+          foreach ($lk in @(@($cj.spawnedFrom, 'sessionId'), @($cj.startChain, 'firstSessionId'))) {
+            $lo = $lk[0]; $lpn = $lk[1]; if ($null -eq $lo) { continue }
+            $lv = [string]$lo.$lpn; $lc2 = if ($lv) { $sidCli[$lv] } else { $null }
+            if ($lc2 -and $seatSid.ContainsKey($lc2) -and $seatSid[$lc2] -ne $lv) { $lo.$lpn = $seatSid[$lc2] }
+          }
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
           else {   # flags not resolved, or not saved, this run: write a neutral (off) record, which the next run
@@ -896,6 +919,7 @@ foreach ($acct in $accts) {
           $cpath = Join-Path $bestSub "$($cj.sessionId).json"
           Write-RecordFile $cpath ($cj | ConvertTo-Json -Compress -Depth 100)
           $madeRecs.Add(@{ cli = $m.BaseName; path = $cpath; isArchived = [bool]$cj.isArchived; isStarred = [bool]$cj.isStarred })
+          $seatSid[$m.BaseName] = [string]$cj.sessionId
           $cloned++
         } catch {
           if ($wtCli.Contains($m.BaseName)) { Write-Warning "could not add $($m.BaseName) to $bestSub ($($_.Exception.Message)); retried next run" }   # no fabricated fallback for a worktree session

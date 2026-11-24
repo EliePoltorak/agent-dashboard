@@ -23,8 +23,9 @@ $projRoot = "$sb\home\.claude\projects"
 $ccs = "$sb\app\Claude\claude-code-sessions"; $ws = [guid]::NewGuid().ToString()
 $A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"; $C = "$ccs\cccccccc-0000-0000-0000-000000000003\$ws"
 $D = "$ccs\dddddddd-0000-0000-0000-000000000004\$ws"; $E = "$ccs\eeeeeeee-0000-0000-0000-000000000005\$ws"
+$F = "$ccs\ffffffff-0000-0000-0000-000000000006\$ws"
 $pDir = "$projRoot\C--SyncFamTest-repo"; $wDir = "$projRoot\C--SyncFamTest-repo--claude-worktrees-wt1"
-New-Item -ItemType Directory $A, $B, $C, $D, $E, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
+New-Item -ItemType Directory $A, $B, $C, $D, $E, $F, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
 "sandbox: $sb"
 
 function transcript($dir, $cli, [int]$turns, $prompt) {
@@ -40,7 +41,7 @@ function record($dir, $sid, $cli, $cwd, $title, $parent) {
 }
 
 $pCli = [guid]::NewGuid().ToString(); $cCli = [guid]::NewGuid().ToString(); $oCli = [guid]::NewGuid().ToString(); $zCli = [guid]::NewGuid().ToString()
-$cGuid = [guid]::NewGuid().ToString(); $pSid = "local_$([guid]::NewGuid())"; $cSid = "local_$cGuid"
+$cGuid = [guid]::NewGuid().ToString(); $pGuid = [guid]::NewGuid().ToString(); $pSid = "local_$pGuid"; $cSid = "local_$cGuid"
 transcript $pDir $pCli 7 'parent session that starts a side session'
 transcript $wDir $cCli 2 'side session in a worktree'
 transcript $wDir $zCli 7 'worktree session no record names'
@@ -51,6 +52,7 @@ record $C "local_$([guid]::NewGuid())" $pCli $repo 'Parent session' $null       
 Set-Content "$D\$cSid.json" 'not json {' -NoNewline                                         # D: an unreadable file named like the child's id
 $junkHash = (Get-FileHash "$D\$cSid.json").Hash
 Set-Content "$E\deleted_$cGuid" 'x' -NoNewline                                              # E: the child's deletion tombstone
+Set-Content "$F\deleted_$pGuid" 'x' -NoNewline                                              # F: the PARENT's deletion tombstone
 
 $fail = 0
 function check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:fail++ } }
@@ -59,6 +61,12 @@ function run {
   $out | Where-Object { $_ -match 'rror|xception|WARNING|classified' } | ForEach-Object { "    $_" }
 }
 function recsIn($dir) { @(Get-ChildItem $dir -Filter 'local_*.json' | ForEach-Object { try { Get-Content $_.FullName -Raw | ConvertFrom-Json } catch { } }) }
+# the child's spawnedFrom (and startChain root) name a parent record that seat actually holds
+function linkOk($recs) {
+  $ch = @($recs | Where-Object { $_.cliSessionId -eq $cCli }); if ($ch.Count -ne 1) { return $false }
+  $par = @($recs | Where-Object { $_.cliSessionId -eq $pCli }); if ($par.Count -ne 1) { return $false }
+  $ch[0].spawnedFrom.sessionId -eq $par[0].sessionId -and $ch[0].startChain.firstSessionId -eq $par[0].sessionId
+}
 function count { @(Get-ChildItem $ccs -Recurse -Filter 'local_*.json').Count }
 
 run
@@ -72,11 +80,17 @@ check 'the side session keeps its worktree cwd' ($bc.Count -eq 1 -and $bc[0].cwd
 check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($rB | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
 check 'seat C gets the side session' (@($rC | Where-Object { $_.cliSessionId -eq $cCli }).Count -eq 1)
 check 'seat C gets no second parent' (@($rC | Where-Object { $_.cliSessionId -eq $pCli }).Count -eq 1)
+check "seat C's side session links to the parent id seat C holds" (linkOk $rC)
 $dc = @($rD | Where-Object { $_.cliSessionId -eq $cCli })
 check 'seat D leaves its unreadable file with the child id byte-identical' ((Get-FileHash "$D\$cSid.json").Hash -eq $junkHash)
 check 'seat D gets the side session under a different id' ($dc.Count -eq 1 -and $dc[0].sessionId -ne $cSid)
 $ec = @($rE | Where-Object { $_.cliSessionId -eq $cCli })
 check 'seat E (tombstone of the child id) gets the side session under a different id' ($ec.Count -eq 1 -and $ec[0].sessionId -ne $cSid)
+check "seat D's side session links to seat D's parent" (linkOk $rD)
+check "seat E's side session links to seat E's parent" (linkOk $rE)
+$rF = recsIn $F; $fp = @($rF | Where-Object { $_.cliSessionId -eq $pCli })
+check 'seat F (tombstone of the parent id) gets the parent under a different id' ($fp.Count -eq 1 -and $fp[0].sessionId -ne $pSid)
+check "seat F's side session links to seat F's new parent id" (linkOk $rF)
 check 'a worktree transcript no record names creates no record on any seat' (@(Get-ChildItem $ccs -Recurse -Filter 'local_*.json' | ForEach-Object { Get-Content $_.FullName -Raw -ErrorAction SilentlyContinue } | Where-Object { $_ -match $zCli }).Count -eq 0)
 $n = count
 run
