@@ -68,7 +68,8 @@
   record keeps its session id (so spawnedFrom links resolve) unless it is a worktree session (the shared git-worktrees.json
   leases worktrees by session id) or that seat has a record with that id, a deletion tombstone for it, or its path in the last
   saved .flag-state.json; then it gets a new id. Only a local_<guid> id is reused, and an unreadable state file means new ids.
-  (The id kept is the one a child's link names, when one does.) A session fabricated without a record to clone still gets a different id on each seat.
+  (The id kept is the one a child's link names, when one does: the one that seat's own records name, if any.) The app's shared
+  claude_desktop_config.json also names session ids (pinned order, the last open session), so a same-id copy shares those. A session fabricated without a record to clone still gets a different id on each seat.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -467,13 +468,17 @@ foreach ($acct in $accts) {
 }
 # The id a child's spawnedFrom names is the id a clone should carry. Only the id is taken from that record: the content stays
 # the source chosen above (a record a child links to may be a fabricated copy, with no link or resume state of its own).
-# The first such id seen is kept.
+# A session can have several such ids (one per seat a child was made on); pass 2 gives each seat the one its own records
+# name, else the first in ordinal order (never hashtable order, which changes from run to run).
 $linkTo = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { $ls = [string]$r.j.spawnedFrom.sessionId; if ($ls) { [void]$linkTo.Add($ls) } } }
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $lc = [string]$r.j.cliSessionId
   if ($lc -and (Test-CloneSrc $r.j) -and $linkTo.Contains([string]$r.j.sessionId) -and ([string]$r.j.title).Trim() -and -not ([string]$r.j.title -match $DateTitleRx)) {
-    if ($recIndex[$lc] -and -not $recIndex[$lc].sid) { $recIndex[$lc].sid = [string]$r.j.sessionId }
+    if ($recIndex[$lc]) {
+      if (-not $recIndex[$lc].sids) { $recIndex[$lc].sids = New-Object 'System.Collections.Generic.SortedSet[string]' ([StringComparer]::Ordinal) }
+      [void]$recIndex[$lc].sids.Add([string]$r.j.sessionId)
+    }
   }
 } }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
@@ -805,8 +810,9 @@ foreach ($cli in @($byCli.Keys)) {
   # (from a well-titled record now at the tip: the tip record itself, or one this pass just reconciled)
   # (a real title, non-blank and not a date; a record that carries its spawnedFrom link first)
   $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and ([string]$_.j.title).Trim() -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
-  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sid = $recIndex[$cli].sid; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }   # sid: keep the linked id (pass 1)
+  # (never trade a source that carries its spawnedFrom link for one that doesn't)
+  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sids = $recIndex[$cli].sids; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }   # sids: keep the linked ids (pass 1)
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -913,6 +919,8 @@ foreach ($acct in $accts) {
   # every session id this seat's records carry (a record's file name can differ from its id): a clone never reuses one
   $seatIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
   foreach ($r in $recs) { if ($r.j.sessionId) { [void]$seatIds.Add([string]$r.j.sessionId) } }
+  $seatLinks = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # parent ids this seat's records name
+  foreach ($r in $recs) { foreach ($lv in @([string]$r.j.spawnedFrom.sessionId, [string]$r.j.startChain.firstSessionId)) { if ($lv) { [void]$seatLinks.Add($lv) } } }
 
   # Add kept transcripts missing from this sub: clone a well-titled record from another
   # bucket when one exists (preserves the app's own AI titles), else fabricate.
@@ -927,7 +935,10 @@ foreach ($acct in $accts) {
       else {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
-          if ($src.sid) { $cj.sessionId = $src.sid }   # the id a child's spawnedFrom names (pass 1)
+          if ($src.sids) {   # an id a child's spawnedFrom names (pass 1): the one this seat's records name, else the first
+            $pick = @($src.sids | Where-Object { $seatLinks.Contains($_) }) | Select-Object -First 1
+            $cj.sessionId = if ($pick) { $pick } else { @($src.sids)[0] }
+          }
           # Keep the source's session id (so spawnedFrom links resolve here) only if this seat never had it: no record file or
           # deletion tombstone in any of its folders (checked now), and no path for it in the saved flag state. Else mint one.
           # Never for a worktree session: %APPDATA%\Claude\git-worktrees.json (shared by every seat) leases each worktree to a session

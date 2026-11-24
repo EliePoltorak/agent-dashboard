@@ -184,6 +184,15 @@ record $A $gSid $gCli $repo 'Grandparent' $null
 record $A $ppSidA $ppCli $repo 'Middle session' $gSid
 record $B $ppSidB $ppCli $repo 'Middle session' $null
 record $B "local_$([guid]::NewGuid())" $pcCli $wt 'Child of a fabricated copy' $ppSidB
+# J: P2 used on seats A (jSidA, a child there) and B (jSidB, a child there); seat C already holds B's child but not P2:
+# seat C's new P2 takes jSidB, the id its own child names
+$jCli = [guid]::NewGuid().ToString(); $jaCli = [guid]::NewGuid().ToString(); $jbCli = [guid]::NewGuid().ToString()
+$jSidA = "local_$([guid]::NewGuid())"; $jSidB = "local_$([guid]::NewGuid())"; $jbSidC = "local_$([guid]::NewGuid())"
+transcript $pDir $jCli 3 'parent used on two seats'; transcript $wDir $jaCli 2 'child on seat A'; transcript $wDir $jbCli 7 'child on seat B'
+record $A $jSidA $jCli $repo 'Parent on two seats' $null; record $B $jSidB $jCli $repo 'Parent on two seats' $null
+record $A "local_$([guid]::NewGuid())" $jaCli $wt 'Child on seat A' $jSidA
+record $B "local_$([guid]::NewGuid())" $jbCli $wt 'Child on seat B' $jSidB
+record $C $jbSidC $jbCli $wt 'Child on seat B' $jSidB
 # H: a worktree-only session with two repo-cwd records at different turns and a worktree record: pass 1.5 leaves it alone,
 # and its copy keeps the worktree cwd
 $hCli = [guid]::NewGuid().ToString(); $h1 = [guid]::NewGuid().ToString(); $h2 = [guid]::NewGuid().ToString()
@@ -214,6 +223,7 @@ $ck = @($rC | Where-Object { $_.cliSessionId -eq $kcCli }); $cp = @($rC | Where-
 check "a child copied to seat C keeps its link (to seat C's parent)" ($ck.Count -eq 1 -and $cp.Count -eq 1 -and $ck[0].spawnedFrom.sessionId -eq $cp[0].sessionId)
 $cpp = @($rC | Where-Object { $_.cliSessionId -eq $ppCli }); $cg = @($rC | Where-Object { $_.cliSessionId -eq $gCli })
 check "seat C's copy of a session takes its content from the app record, not a fabricated copy a child links to" ($cpp.Count -eq 1 -and $cg.Count -eq 1 -and $cpp[0].spawnedFrom.sessionId -eq $cg[0].sessionId)
+check "seat C's new parent takes the id its existing child names" (@($rC | Where-Object { $_.cliSessionId -eq $jCli -and $_.sessionId -eq $jSidB }).Count -eq 1)
 check 'pass 1.5 leaves a worktree-only session alone' (@($rA | Where-Object { $_.sessionId -eq $hSidA -and $_.lastAssistantUuid -eq $h1 }).Count -eq 1)
 check 'a worktree-only session with repo records is copied with its worktree cwd' (@($rC | Where-Object { $_.cliSessionId -eq $hCli -and $_.cwd -eq $wt }).Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $hCli }).Count -eq 1)
 check 'the not-carried notice counts recorded sessions (blank-titled, repo-cwd only) but not the unrecorded one' (@($script:lastOut | Where-Object { $_ -match '^2 worktree session\(s\) not carried' }).Count -eq 1)

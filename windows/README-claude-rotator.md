@@ -666,7 +666,9 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
   A carried child's `spawnedFrom` link names the parent id its seat holds. A carried record keeps its session id unless it is
   a worktree session (the shared `git-worktrees.json` leases each worktree to a session id), or that seat has a record with
   that id or a `deleted_<guid>` tombstone for it now (the id without `local_`), or its path in the last saved `.flag-state.json`: then it gets a new id. Only a `local_<guid>` id is reused, and an
-  unreadable state file means new ids. A record fabricated without a source still gets a different id on
+  unreadable state file means new ids. The id kept is the one a child's link names, when one does (the one that seat's own records
+  name, if any), even if the content comes from another record. The app's shared `claude_desktop_config.json` also names
+  session ids (pinned order, the last open session), so a same-id copy shares those. A record fabricated without a source still gets a different id on
   each seat. A family member deleted on one seat comes back on the next run while its family is kept, as a kept session
   always has.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
