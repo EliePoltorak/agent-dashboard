@@ -692,7 +692,7 @@ claude-sync-history -MinAssistant 10     # stricter "substantive" bar
 claude-sync-history -Cwd 'C:\path\to\project'  # a different workspace
 ```
 
-- Script: `C:\Users\User\.grok\bin\sync-app-history.ps1`
+- Script: `%USERPROFILE%\.grok\bin\sync-app-history.ps1`
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
   `~/.claude-app-seats\.pruned-history-backups\<timestamp>\`. Tune what's "substantive" via
