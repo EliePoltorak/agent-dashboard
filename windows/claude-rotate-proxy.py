@@ -217,7 +217,7 @@ def default_fable_observation(cached):
     return nested
 
 
-FABLE_CLAIM = "seven_day_oi"
+FABLE_CLAIM = "seven_day_overage_included"
 
 
 def other_limit_rejection(data):
@@ -240,8 +240,9 @@ def cache_entry(prior, suffix, entry, has_fable):
     elif has_fable and all(entry["data"].get(k) is None for k in DEFAULT_WINDOW) and prior.get("data") and             observed_ms(prior) <= entry["observed_ms"] and not other_limit_rejection(entry["data"]):
         # A Fable-only response names no default window: keep the default reading (and any cap it holds) and add this
         # as the Fable backup, as the -fable file nests a status-only reading. A newer nested observation it raced
-        # (and not future-dated) stays. A rejection whose Fable window says it is not the Fable cap (another limit's,
-        # e.g. claim five_hour with no 5h fields) is stored at the top level, where default-cap readers see it.
+        # (and not future-dated) stays. Another limit's rejection (other_limit_rejection: its Fable window says it is not
+        # the Fable cap, or with no Fable status its claim names another window, e.g. five_hour with no 5h fields) is
+        # stored at the top level, where default-cap readers see it.
         nested = prior.get("fable_cap")
         if nested and entry["observed_ms"] < observed_ms(nested) <= time.time_ns() // 1_000_000:
             return prior
@@ -745,8 +746,8 @@ def cache_self_test():
                                                                  "claim": "five_hour", "oi7_util": 0.4}}
         stored = cache_entry(dict(prior), "", dict(util_only), True)
         assert stored["data"].get("status") == "rejected" and stored["data"].get("claim") == "five_hour",             "a five_hour rejection carrying only Fable utilization was nested out of the default readers' sight"
-        fable_util_only = {"ts": now // 1000, "observed_ms": now, "data": dict(util_only["data"], claim="seven_day_oi")}
-        assert cache_entry(dict(prior), "", dict(fable_util_only), True)["fable_cap"]["data"]["claim"] == "seven_day_oi",             "a Fable-claimed rejection was not nested as the Fable backup"
+        fable_util_only = {"ts": now // 1000, "observed_ms": now, "data": dict(util_only["data"], claim="seven_day_overage_included")}
+        assert cache_entry(dict(prior), "", dict(fable_util_only), True)["fable_cap"]["data"]["claim"] == "seven_day_overage_included",             "a Fable-claimed rejection was not nested as the Fable backup"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()
