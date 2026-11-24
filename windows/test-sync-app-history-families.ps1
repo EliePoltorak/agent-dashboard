@@ -18,7 +18,7 @@
   its repo-cwd record, never a linked worktree one (R), a worktree-cwd record with a repo-folder transcript (fabricated,
   new id; Y), a worktree-only session not auto-archived (W) nor copied from a repo-cwd record (U, H), a source carrying its
   link preferred (K), content never taken from a fabricated copy a child links to (G-P-C), a parent new to a seat that already
-  holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record, the copy at the tip with the link (L, L2), a blank title (T), a blank-titled repo record cloned with its link
+  holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record, the copy at the tip with the link (L, L2, L3), a blank title (T), a blank-titled repo record cloned with its link
   (BT), blank-titled records only, the tip one used for new copies (BL), a titled linkless source taking the link a
   blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a titled source's own dead link replaced by one that
   resolves (GD), a
@@ -219,15 +219,17 @@ record $A "local_$([guid]::NewGuid())" $hCli $wt 'Worktree session, worktree rec
 foreach ($pr in @(@($A, $hSidA, $h1), @($B, $hSidB, $h2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
 # L: a repo child: seat A's record is stale but carries its link, seat B's is at the tip without one; seat C's copy keeps the
 # link and is at the tip. L2: the same, but A's record names a turn not in the transcript (it can't be caught up): the copy is
-# made from the tip record and takes A's link
-foreach ($lv in 'L', 'L2') {
+# made from the tip record and takes A's link. L3: L with the seats swapped (the linked stale record on B), so whichever order
+# the run enumerates the seats in, one of L and L3 sees the linkless tip record first
+foreach ($lv in 'L', 'L2', 'L3') {
   $lCli = [guid]::NewGuid().ToString(); $l1 = [guid]::NewGuid().ToString(); $l2 = [guid]::NewGuid().ToString()
   Set-Content "$pDir\$lCli.jsonl" (@('{"type":"user","message":{"role":"user","content":"repo child ' + $lv + '"}}') + (1..6 | ForEach-Object { asst ([guid]::NewGuid()) $null }) + @((asst $l1 $null), (asst $l2 $l1)))
   (Get-Item "$pDir\$lCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-30)
   $lSidA = "local_$([guid]::NewGuid())"; $lSidB = "local_$([guid]::NewGuid())"
-  record $A $lSidA $lCli $repo "Repo child $lv" "local_$([guid]::NewGuid())"; record $B $lSidB $lCli $repo "Repo child $lv, tip" $null
-  $aUuid = if ($lv -eq 'L') { $l1 } else { [guid]::NewGuid().ToString() }
-  foreach ($pr in @(@($A, $lSidA, $aUuid), @($B, $lSidB, $l2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
+  $sLk, $sTip = if ($lv -eq 'L3') { $B, $A } else { $A, $B }   # the seat with the stale linked record, the seat with the tip
+  record $sLk $lSidA $lCli $repo "Repo child $lv" "local_$([guid]::NewGuid())"; record $sTip $lSidB $lCli $repo "Repo child $lv, tip" $null
+  $aUuid = if ($lv -ne 'L2') { $l1 } else { [guid]::NewGuid().ToString() }
+  foreach ($pr in @(@($sLk, $lSidA, $aUuid), @($sTip, $lSidB, $l2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
   Set-Variable "cli$lv" $lCli; Set-Variable "tip$lv" $l2
 }
 # BL: a repo session whose records are all blank-titled, seat A's stale and seat B's at the tip: seat C's copy is at the tip
@@ -287,6 +289,8 @@ check "seat C's copy of a session takes its content from the app record, not a f
 check "a parent new to seat C gets a new id, never a source seat's" (@($rC | Where-Object { $_.cliSessionId -eq $jCli -and $_.sessionId -ne $jSidA -and $_.sessionId -ne $jSidB }).Count -eq 1)
 $cl = @($rC | Where-Object { $_.cliSessionId -eq $cliL })
 check "seat C's copy of a repo child keeps its link and is at the tip (stale linked record, linkless tip record)" ($cl.Count -eq 1 -and $cl[0].spawnedFrom.sessionId -and $cl[0].lastAssistantUuid -eq $tipL -and $cl[0].title -eq 'Repo child L')
+$cl3 = @($rC | Where-Object { $_.cliSessionId -eq $cliL3 })
+check "the same with the seats swapped (L3)" ($cl3.Count -eq 1 -and $cl3[0].spawnedFrom.sessionId -and $cl3[0].lastAssistantUuid -eq $tipL3 -and $cl3[0].title -eq 'Repo child L3')
 check "a linked source that can't be caught up: the copy is at the tip and takes its link" (@($rC | Where-Object { $_.cliSessionId -eq $cliL2 -and $_.spawnedFrom.sessionId -and $_.lastAssistantUuid -eq $tipL2 }).Count -eq 1)
 check 'pass 1.5 leaves a worktree-only session alone' (@($rA | Where-Object { $_.sessionId -eq $hSidA -and $_.lastAssistantUuid -eq $h1 }).Count -eq 1)
 check 'a worktree-only session with repo records is copied with its worktree cwd' (@($rC | Where-Object { $_.cliSessionId -eq $hCli -and $_.cwd -eq $wt }).Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $hCli }).Count -eq 1)

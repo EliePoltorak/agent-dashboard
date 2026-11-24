@@ -70,6 +70,8 @@
   seats would share state the app keys by session id for the whole machine (git-worktrees.json leases a worktree to one,
   side-session-notes\<id>, claude_desktop_config.json). A carried child's spawnedFrom names the parent id, and its startChain the
   chain's first session id, that its own seat holds, when that seat holds it or gets it this run; otherwise copied as is.
+  A clone source with no link, or whose link names a parent id no seat holds, first takes the link (spawnedFrom and
+  startChain, from one record) another record of the session in this repo carries, one whose parent some seat holds first.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -429,8 +431,8 @@ $appUp = Test-AppUp
 $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
-$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); rank = 2 real title, 1 blank, 0 date; sf = carries spawnedFrom.sessionId }
-$linkOf    = @{}   # cliSessionId -> list of @{ to = parent id; sf; sc } from every record of this repo that carries spawnedFrom (grafted onto a linkless source)
+$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); rank = 2 real title, 1 blank, 0 date; sf = carries spawnedFrom.sessionId (read in pass 1 only) }
+$linkOf    = @{}   # cliSessionId -> list of @{ to = parent id; sf; sc } from every record of this repo that carries spawnedFrom (grafted onto a source that has no link, or whose link names a parent id no seat holds)
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
@@ -925,6 +927,7 @@ foreach ($acct in $accts) {
             if ($lk) {
               $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
               if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
+              else { $cj.PSObject.Properties.Remove('startChain') }   # never pair the new link with the source's own chain
             }
           }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
