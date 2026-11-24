@@ -430,6 +430,7 @@ $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); rank = 2 real title, 1 blank, 0 date; sf = carries spawnedFrom.sessionId }
+$linkOf    = @{}   # cliSessionId -> @{ spawnedFrom; startChain } from a clone-source record that carries the link (grafted onto a linkless source)
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
@@ -459,6 +460,7 @@ foreach ($acct in $accts) {
           $sf = [bool]$j.spawnedFrom.sessionId   # prefer a record that carries its family link (a fabricated one never does)
           $cur = $recIndex[$cli]
           if (-not $cur -or $rank -gt $cur.rank -or ($rank -eq $cur.rank -and $sf -and -not $cur.sf)) { $recIndex[$cli] = @{ raw = $rawRec; good = $good; rank = $rank; sf = $sf } }
+          if ($sf -and -not $linkOf.ContainsKey($cli)) { $linkOf[$cli] = @{ spawnedFrom = ($j.spawnedFrom | ConvertTo-Json -Compress -Depth 20); startChain = $(if ($j.startChain) { $j.startChain | ConvertTo-Json -Compress -Depth 20 } else { $null }) } }
         }
       }
     }
@@ -908,6 +910,11 @@ foreach ($acct in $accts) {
       else {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
+          # The source was chosen for its title; a linkless one takes the family link another record of the session carries
+          if (-not $cj.spawnedFrom.sessionId -and $linkOf.ContainsKey($m.BaseName)) {
+            $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($linkOf[$m.BaseName].spawnedFrom | ConvertFrom-Json -DateKind String) -Force
+            if ($linkOf[$m.BaseName].startChain -and -not $cj.startChain) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($linkOf[$m.BaseName].startChain | ConvertFrom-Json -DateKind String) -Force }
+          }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
           $seatSid[$m.BaseName] = [string]$cj.sessionId
           # The parent sits on this seat under its own id (an older copy, or one cloned or fabricated this run): point the links at it.
