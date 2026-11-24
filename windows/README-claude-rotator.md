@@ -658,8 +658,9 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
 - **Side sessions and families.** A kept (or pinned) session brings the sessions linked to it by `spawnedFrom.sessionId`
   (its side sessions, and what it was spawned from), whatever their length. Side sessions started in an app worktree of
-  `-Cwd` (transcripts under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, keep their worktree cwd, and are
-  never fabricated (no well-titled record to clone on any seat: skipped). Their copies are not caught up to the transcript
+  `-Cwd` (transcripts only under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, keep their worktree cwd, and
+  are never fabricated (no well-titled record to clone on any seat: skipped, and counted). A session whose transcript is in
+  the repo folder is copied as before, from a record whose cwd is `-Cwd`. Their copies are not caught up to the transcript
   tip afterwards (issue #31).
   A carried child's `spawnedFrom` link names the parent id its seat holds. A carried record keeps its session id unless it is
   a worktree session (the shared `git-worktrees.json` leases each worktree to a session id), or that seat has a record with

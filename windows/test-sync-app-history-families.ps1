@@ -115,9 +115,9 @@ Remove-Item -LiteralPath $sb -Recurse -Force
 # ---- second sandbox: one session id in two folders, a date-titled (fabricated) parent, worktree-only transcripts -----
 $sb = "C:\Dev\Temp\sync-app-history-families-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID-2"
 $projRoot = "$sb\home\.claude\projects"; $ccs = "$sb\app\Claude\claude-code-sessions"; $ws = [guid]::NewGuid().ToString()
-$A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"
+$A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"; $C = "$ccs\cccccccc-0000-0000-0000-000000000003\$ws"
 $pDir = "$projRoot\C--SyncFamTest-repo"; $wDir = "$projRoot\C--SyncFamTest-repo--claude-worktrees-wt1"
-New-Item -ItemType Directory $A, $B, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
+New-Item -ItemType Directory $A, $B, $C, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
 "sandbox: $sb"
 # X: resumed in the repo (fresh) and in a worktree (40 days old): one record per seat, never auto-archived
 $xCli = [guid]::NewGuid().ToString()
@@ -141,7 +141,15 @@ transcript $pDir $p2Cli 7 'parent with only a date title'
 transcript $wDir $c2Cli 2 'child of a date-titled parent'
 record $A $p2Sid $p2Cli $repo 'Session 2026-11-01 10:00' $null
 record $A "local_$([guid]::NewGuid())" $c2Cli $wt 'Child of a date-titled parent' $p2Sid
-# Y: a record whose cwd is the worktree, but whose transcript is in the repo folder: still a worktree session (new id)
+# R: transcript in the repo folder, a titled worktree-cwd record (named by a child's link) on A and a repo-cwd record on B:
+# seat C copies the repo-cwd record, as before worktrees were listed, never the worktree record's id or cwd
+$rCli = [guid]::NewGuid().ToString(); $rwSid = "local_$([guid]::NewGuid())"; $rrSid = "local_$([guid]::NewGuid())"; $rkCli = [guid]::NewGuid().ToString()
+transcript $pDir $rCli 7 'repo session also opened in a worktree'
+transcript $wDir $rkCli 2 'side session of the worktree record'
+record $A $rwSid $rCli $wt 'Opened in a worktree' $null
+record $A "local_$([guid]::NewGuid())" $rkCli $wt 'Side of the worktree record' $rwSid
+record $B $rrSid $rCli $repo 'Opened in the repo' $null
+# Y: a record whose cwd is the worktree, but whose transcript is in the repo folder: copied as before (new id)
 $yCli = [guid]::NewGuid().ToString(); $ySid = "local_$([guid]::NewGuid())"
 transcript $pDir $yCli 7 'worktree record with a repo-folder transcript'
 record $A $ySid $yCli $wt 'Worktree record, repo transcript' $null
@@ -157,6 +165,8 @@ check 'a session in two folders is not auto-archived by its old worktree copy' (
 $bp2 = @($rB | Where-Object { $_.cliSessionId -eq $p2Cli }); $bc2 = @($rB | Where-Object { $_.cliSessionId -eq $c2Cli })
 check 'a date-titled parent is fabricated on seat B and its worktree child carried' ($bp2.Count -eq 1 -and $bc2.Count -eq 1)
 check "the child links to seat B's fabricated parent id" ($bp2.Count -eq 1 -and $bc2.Count -eq 1 -and $bc2[0].spawnedFrom.sessionId -eq $bp2[0].sessionId)
+$rC = recsIn $C; $cr = @($rC | Where-Object { $_.cliSessionId -eq $rCli })
+check 'a repo-transcript session is copied from its repo-cwd record, not the worktree one' ($cr.Count -eq 1 -and $cr[0].cwd -eq $repo -and $cr[0].sessionId -ne $rwSid)
 check 'a worktree-cwd record with a repo-folder transcript gets a new id on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $yCli -and $_.sessionId -ne $ySid }).Count -eq 1)
 check 'a stale repo record is caught up from the repo copy when a newer worktree copy exists' (@($rB | Where-Object { $_.cliSessionId -eq $qCli -and $_.lastAssistantUuid -eq $q2 }).Count -eq 1)
 check 'a worktree-only transcript does not bring a repo record into auto-archive' (@($rA | Where-Object { $_.cliSessionId -eq $wCli -and -not $_.isArchived }).Count -eq 1)

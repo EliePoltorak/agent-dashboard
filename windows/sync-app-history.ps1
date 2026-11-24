@@ -60,9 +60,10 @@
 
   A kept (or pinned) session also brings its FAMILY: the sessions linked to it by a record's spawnedFrom.sessionId (side
   sessions it started, what it was spawned from), whatever their length or age, if their transcripts are here. Side
-  sessions started in an app worktree of -Cwd (transcripts in projects\<enc>--claude-worktrees-*, records with cwd =
-  the worktree and originCwd = -Cwd) are carried the same way, keep their own cwd, and are never fabricated: with no
-  well-titled record on any seat to clone they are skipped. Their copies are not caught up to the transcript tip afterwards
+  sessions started in an app worktree of -Cwd (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
+  = the worktree and originCwd = -Cwd) are carried the same way, keep their own cwd, and are never fabricated: with no
+  well-titled record on any seat to clone they are skipped (and counted). A session whose transcript is in the repo folder
+  is copied as before, from a cwd = -Cwd record only. Their copies are not caught up to the transcript tip afterwards
   (pass 1.5 covers cwd = -Cwd records only; issue #31). A carried
   record keeps its session id (so spawnedFrom links resolve) unless it is a worktree session (the shared git-worktrees.json
   leases worktrees by session id) or that seat has a record with that id, a deletion tombstone for it, or its path in the last
@@ -427,9 +428,11 @@ $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title; sid = the id to clone under (link targets only) }
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
-# Used only to find clone sources; the workspace vote, auto-archive and pass 1.5 still use cwd -eq $Cwd (worktree records in
-# pass 1.5: issue #31).
+# A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
+# worktree-only session (transcript only in a worktree folder) may clone from any record of the repo. The workspace vote,
+# auto-archive and pass 1.5 still use cwd -eq $Cwd (worktree records in pass 1.5: issue #31).
 function Test-OfRepo($j) { $j.cwd -eq $Cwd -or $j.originCwd -eq $Cwd }
+function Test-CloneSrc($j) { if ($wtCli.Contains([string]$j.cliSessionId)) { Test-OfRepo $j } else { $j.cwd -eq $Cwd } }
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
 foreach ($acct in $accts) {
   $subCounts[$acct.Name] = @{}
@@ -442,7 +445,7 @@ foreach ($acct in $accts) {
       if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
       if ($j.cwd -eq $Cwd) { $cnt++ }
-      if (Test-OfRepo $j) {
+      if (Test-CloneSrc $j) {
         $cli = [string]$j.cliSessionId
         if ($cli) {
           $good = -not ([string]$j.title -match $DateTitleRx)
@@ -461,7 +464,7 @@ $linkTo = New-Object 'System.Collections.Generic.HashSet[string]'
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { $ls = [string]$r.j.spawnedFrom.sessionId; if ($ls) { [void]$linkTo.Add($ls) } } }
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
   $lc = [string]$r.j.cliSessionId
-  if ($lc -and (Test-OfRepo $r.j) -and $linkTo.Contains([string]$r.j.sessionId) -and -not ([string]$r.j.title -match $DateTitleRx)) {
+  if ($lc -and (Test-CloneSrc $r.j) -and $linkTo.Contains([string]$r.j.sessionId) -and -not ([string]$r.j.title -match $DateTitleRx)) {
     try { $recIndex[$lc] = @{ raw = (Get-Content -LiteralPath $r.file.FullName -Raw); good = $true; sid = [string]$r.j.sessionId } } catch { }
   }
 } }
