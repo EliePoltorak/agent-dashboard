@@ -911,7 +911,9 @@ foreach ($acct in $accts) {
           # deletion tombstone in any of its folders (checked now), and no path for it in the saved flag state. Else mint one.
           # Never for a worktree session: %APPDATA%\Claude\git-worktrees.json (shared by every seat) leases each worktree to a session
           # id, so a same-id copy on another seat could act on the worktree itself (deleting the copy). The links below still resolve.
-          $keepId = $sidKeepOk -and $cj.sessionId -and -not $wtCli.Contains($m.BaseName) -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
+          # (a worktree session: a worktree-only transcript, or a source record whose cwd is a worktree of -Cwd)
+          $isWt = $wtCli.Contains($m.BaseName) -or ($cj.cwd -ne $Cwd -and $cj.originCwd -eq $Cwd)
+          $keepId = $sidKeepOk -and $cj.sessionId -and -not $isWt -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
           if ($keepId) {
             $kg = ([string]$cj.sessionId) -replace '^local_', ''
             foreach ($sd in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
