@@ -20,7 +20,8 @@
   link preferred (K), content never taken from a fabricated copy a child links to (G-P-C), a parent new to a seat that already
   holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record, the copy at the tip with the link (L, L2), a blank title (T), a blank-titled repo record cloned with its link
   (BT), blank-titled records only, the tip one used for new copies (BL), a titled linkless source taking the link a
-  blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a
+  blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a titled source's own dead link replaced by one that
+  resolves (GD), a
   malformed id (M), the
   not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
@@ -224,7 +225,7 @@ foreach ($lv in 'L', 'L2') {
   Set-Content "$pDir\$lCli.jsonl" (@('{"type":"user","message":{"role":"user","content":"repo child ' + $lv + '"}}') + (1..6 | ForEach-Object { asst ([guid]::NewGuid()) $null }) + @((asst $l1 $null), (asst $l2 $l1)))
   (Get-Item "$pDir\$lCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-30)
   $lSidA = "local_$([guid]::NewGuid())"; $lSidB = "local_$([guid]::NewGuid())"
-  record $A $lSidA $lCli $repo "Repo child $lv" "local_$([guid]::NewGuid())"; record $B $lSidB $lCli $repo "Repo child $lv" $null
+  record $A $lSidA $lCli $repo "Repo child $lv" "local_$([guid]::NewGuid())"; record $B $lSidB $lCli $repo "Repo child $lv, tip" $null
   $aUuid = if ($lv -eq 'L') { $l1 } else { [guid]::NewGuid().ToString() }
   foreach ($pr in @(@($A, $lSidA, $aUuid), @($B, $lSidB, $l2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
   Set-Variable "cli$lv" $lCli; Set-Variable "tip$lv" $l2
@@ -250,6 +251,13 @@ record $A $grPSid $grPCli $repo 'Parent of a resolvable link' $null
 record $A "local_$([guid]::NewGuid())" $grCli $repo 'Titled child GR' $null
 record $A "local_$([guid]::NewGuid())" $grCli $repo '' "local_$([guid]::NewGuid())"
 record $B "local_$([guid]::NewGuid())" $grCli $repo '' $grPSid
+# GD: a repo child whose titled record on A names a parent id no seat holds, while a blank-titled record on B names the parent A
+# holds: seat C's copy keeps A's title and takes B's link (spawnedFrom and startChain), remapped to seat C's parent
+$gdCli = [guid]::NewGuid().ToString(); $gdPCli = [guid]::NewGuid().ToString(); $gdPSid = "local_$([guid]::NewGuid())"
+transcript $pDir $gdPCli 7 'parent of a child with a dead own link'; transcript $pDir $gdCli 7 'child whose titled record has a dead link'
+record $A $gdPSid $gdPCli $repo 'Parent of a dead-linked child' $null
+record $A "local_$([guid]::NewGuid())" $gdCli $repo 'Titled child GD' "local_$([guid]::NewGuid())"
+record $B "local_$([guid]::NewGuid())" $gdCli $repo '' $gdPSid
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
 # N: a repo session with a side-session-notes folder: its copy gets a new id (deleting it must never take the notes)
@@ -273,12 +281,12 @@ check 'a repo-transcript session is copied from its repo-cwd record, not the wor
 check 'a worktree-cwd record with a repo-folder transcript is not cloned: seat B gets a repo record with a new id' (@($rB | Where-Object { $_.cliSessionId -eq $yCli -and $_.sessionId -ne $ySid -and $_.cwd -eq $repo }).Count -eq 1)
 check 'a stale repo record is caught up from the repo copy when a newer worktree copy exists' (@($rB | Where-Object { $_.cliSessionId -eq $qCli -and $_.lastAssistantUuid -eq $q2 }).Count -eq 1)
 $ck = @($rC | Where-Object { $_.cliSessionId -eq $kcCli }); $cp = @($rC | Where-Object { $_.cliSessionId -eq $kpCli })
-check "a child copied to seat C keeps its link (to seat C's parent)" ($ck.Count -eq 1 -and $cp.Count -eq 1 -and $ck[0].spawnedFrom.sessionId -eq $cp[0].sessionId)
+check "a child copied to seat C keeps its link (to seat C's parent)" ($ck.Count -eq 1 -and $cp.Count -eq 1 -and $ck[0].spawnedFrom.sessionId -eq $cp[0].sessionId -and $ck[0].title -eq 'Child, linked')
 $cpp = @($rC | Where-Object { $_.cliSessionId -eq $ppCli }); $cg = @($rC | Where-Object { $_.cliSessionId -eq $gCli })
 check "seat C's copy of a session takes its content from the app record, not a fabricated copy a child links to" ($cpp.Count -eq 1 -and $cg.Count -eq 1 -and $cpp[0].spawnedFrom.sessionId -eq $cg[0].sessionId)
 check "a parent new to seat C gets a new id, never a source seat's" (@($rC | Where-Object { $_.cliSessionId -eq $jCli -and $_.sessionId -ne $jSidA -and $_.sessionId -ne $jSidB }).Count -eq 1)
 $cl = @($rC | Where-Object { $_.cliSessionId -eq $cliL })
-check "seat C's copy of a repo child keeps its link and is at the tip (stale linked record, linkless tip record)" ($cl.Count -eq 1 -and $cl[0].spawnedFrom.sessionId -and $cl[0].lastAssistantUuid -eq $tipL)
+check "seat C's copy of a repo child keeps its link and is at the tip (stale linked record, linkless tip record)" ($cl.Count -eq 1 -and $cl[0].spawnedFrom.sessionId -and $cl[0].lastAssistantUuid -eq $tipL -and $cl[0].title -eq 'Repo child L')
 check "a linked source that can't be caught up: the copy is at the tip and takes its link" (@($rC | Where-Object { $_.cliSessionId -eq $cliL2 -and $_.spawnedFrom.sessionId -and $_.lastAssistantUuid -eq $tipL2 }).Count -eq 1)
 check 'pass 1.5 leaves a worktree-only session alone' (@($rA | Where-Object { $_.sessionId -eq $hSidA -and $_.lastAssistantUuid -eq $h1 }).Count -eq 1)
 check 'a worktree-only session with repo records is copied with its worktree cwd' (@($rC | Where-Object { $_.cliSessionId -eq $hCli -and $_.cwd -eq $wt }).Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $hCli }).Count -eq 1)
@@ -289,7 +297,9 @@ check "with blank-titled records only, seat C's copy starts from the tip record"
 $glP = @($rC | Where-Object { $_.cliSessionId -eq $glPCli }); $gl = @($rC | Where-Object { $_.cliSessionId -eq $glCli })
 check "a titled linkless source takes the family link another record carries, remapped to seat C's parent" ($gl.Count -eq 1 -and $glP.Count -eq 1 -and $gl[0].title -eq 'Titled child' -and $gl[0].spawnedFrom.sessionId -eq $glP[0].sessionId -and $gl[0].startChain.firstSessionId -eq $glP[0].sessionId)
 $grP = @($rC | Where-Object { $_.cliSessionId -eq $grPCli }); $gr = @($rC | Where-Object { $_.cliSessionId -eq $grCli })
-check "the grafted link is one that resolves, remapped to seat C's parent" ($gr.Count -eq 1 -and $grP.Count -eq 1 -and $gr[0].spawnedFrom.sessionId -eq $grP[0].sessionId)
+check "the grafted link is one that resolves, remapped to seat C's parent" ($gr.Count -eq 1 -and $grP.Count -eq 1 -and $gr[0].spawnedFrom.sessionId -eq $grP[0].sessionId -and $gr[0].startChain.firstSessionId -eq $grP[0].sessionId)
+$gdP = @($rC | Where-Object { $_.cliSessionId -eq $gdPCli }); $gd = @($rC | Where-Object { $_.cliSessionId -eq $gdCli })
+check "a titled source whose own link names a parent no seat holds takes a link that resolves, remapped to seat C's parent" ($gd.Count -eq 1 -and $gdP.Count -eq 1 -and $gd[0].title -eq 'Titled child GD' -and $gd[0].spawnedFrom.sessionId -eq $gdP[0].sessionId -and $gd[0].startChain.firstSessionId -eq $gdP[0].sessionId)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
 check 'a session with side-session notes gets a new id on another seat' (@($rB | Where-Object { $_.cliSessionId -eq $nCli -and $_.sessionId -ne $nSid }).Count -eq 1)
 check 'a malformed session id is not reused' (@($rB | Where-Object { $_.cliSessionId -eq $mCli -and $_.sessionId -ne 'local_bad' }).Count -eq 1)

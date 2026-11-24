@@ -797,7 +797,7 @@ foreach ($cli in @($byCli.Keys)) {
   $cRank = if ($cloneSrc -and ([string]$cloneSrc.j.title).Trim()) { 2 } else { 1 }
   # (a linkless tip record is fine: pass 2 grafts the link another record of the session carries)
   if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].rank -ge 1 -and $cRank -ge $recIndex[$cli].rank) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = ($cRank -eq 2); rank = $cRank; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = ($cRank -eq 2); rank = $cRank } }
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -916,12 +916,16 @@ foreach ($acct in $accts) {
       else {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
-          # The source was chosen for its title; a linkless one takes the family link another record of the session carries
-          # (a link whose parent id some seat holds first, so the remap below can resolve it; startChain from the same record)
-          if (-not $cj.spawnedFrom.sessionId -and $linkOf.ContainsKey($m.BaseName)) {
-            $lk = $null; foreach ($lkc2 in $linkOf[$m.BaseName]) { if ($null -eq $lk) { $lk = $lkc2 }; if ($sidCli.ContainsKey($lkc2.to)) { $lk = $lkc2; break } }
-            $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
-            if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
+          # The source was chosen for its title; a linkless one, or one whose link names a parent id no seat holds, takes the
+          # family link another record of the session carries (a link whose parent id some seat holds, so the remap below can
+          # resolve it; a linkless source takes any link when none resolves; startChain from the same record)
+          $ownTo = [string]$cj.spawnedFrom.sessionId
+          if ((-not $ownTo -or -not $sidCli.ContainsKey($ownTo)) -and $linkOf.ContainsKey($m.BaseName)) {
+            $lk = $null; foreach ($lkc2 in $linkOf[$m.BaseName]) { if ($null -eq $lk -and -not $ownTo) { $lk = $lkc2 }; if ($sidCli.ContainsKey($lkc2.to)) { $lk = $lkc2; break } }
+            if ($lk) {
+              $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
+              if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
+            }
           }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
           $seatSid[$m.BaseName] = [string]$cj.sessionId
