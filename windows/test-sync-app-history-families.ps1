@@ -180,6 +180,11 @@ record $B "local_$([guid]::NewGuid())" $kcCli $wt 'Child, linked' $kpSid
 $tCli = [guid]::NewGuid().ToString()
 transcript $wDir $tCli 7 'worktree session with a blank-titled record'
 record $A "local_$([guid]::NewGuid())" $tCli $wt '  ' $null
+# BT: a repo session whose only record is blank-titled and linked: cloned (keeping its link) rather than fabricated, as before
+$btCli = [guid]::NewGuid().ToString(); $btPCli = [guid]::NewGuid().ToString(); $btPSid = "local_$([guid]::NewGuid())"
+transcript $pDir $btPCli 7 'parent of a blank-titled session'; transcript $pDir $btCli 7 'blank-titled repo session'
+record $A $btPSid $btPCli $repo 'Parent of a blank-titled session' $null
+record $A "local_$([guid]::NewGuid())" $btCli $repo '' $btPSid
 # G->P->C: seat A holds P (linked to G, with a resume point); seat B holds a fabricated copy of P (no link) that B's C links to.
 # Seat C's copy of P takes its content from A's record, not the fabricated one
 $gCli = [guid]::NewGuid().ToString(); $ppCli = [guid]::NewGuid().ToString(); $pcCli = [guid]::NewGuid().ToString()
@@ -253,6 +258,8 @@ check "a linked source that can't be caught up is not traded for a linkless tip 
 check 'pass 1.5 leaves a worktree-only session alone' (@($rA | Where-Object { $_.sessionId -eq $hSidA -and $_.lastAssistantUuid -eq $h1 }).Count -eq 1)
 check 'a worktree-only session with repo records is copied with its worktree cwd' (@($rC | Where-Object { $_.cliSessionId -eq $hCli -and $_.cwd -eq $wt }).Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $hCli }).Count -eq 1)
 check 'the not-carried notice counts recorded sessions (blank-titled, repo-cwd only) but not the unrecorded one' (@($script:lastOut | Where-Object { $_ -match '^2 worktree session\(s\) not carried' }).Count -eq 1)
+$btP = @($rB | Where-Object { $_.cliSessionId -eq $btPCli }); $bt = @($rB | Where-Object { $_.cliSessionId -eq $btCli })
+check "a repo session's blank-titled record is cloned, not fabricated, its link naming seat B's parent" ($bt.Count -eq 1 -and $btP.Count -eq 1 -and $bt[0].spawnedFrom.sessionId -eq $btP[0].sessionId)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
 check 'a session with side-session notes gets a new id on another seat' (@($rB | Where-Object { $_.cliSessionId -eq $nCli -and $_.sessionId -ne $nSid }).Count -eq 1)
 check 'a malformed session id is not reused' (@($rB | Where-Object { $_.cliSessionId -eq $mCli -and $_.sessionId -ne 'local_bad' }).Count -eq 1)

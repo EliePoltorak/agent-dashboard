@@ -31,7 +31,7 @@
   be recorded as seen or kept; both keep it as it is). A failed record write is finished on the next run (below).
   Limit: an un-archive the sync never saw as a change (made before this version first ran, or with the state
   file deleted) is not known.
-  Not archived: a session pinned (isStarred, as this run resolves it), written in the last 10 minutes, one with a
+  Not archived: a session whose only transcript is in a worktree folder, a session pinned (isStarred, as this run resolves it), written in the last 10 minutes, one with a
   record known from the last run that can't be read, or one whose pin write failed this run. If an archive write fails on
   one record, the other records are still archived and the failed one is archived next run. With a state file from before the record map (no 'cli'
   map), any unreadable known record holds every session and nothing is saved. It runs in the flag step, so only
@@ -61,14 +61,15 @@
   A kept (or pinned) session also brings its FAMILY: every session connected to it through records' spawnedFrom.sessionId
   (side sessions, what it was spawned from, their siblings and so on), whatever their length or age, if their transcripts
   are here. Sessions whose transcript is only in an app worktree folder of -Cwd are classified and kept like any other, with
-  or without a parent; they (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
+  or without a parent, but are not archived for age; they (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
   = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their own
   cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
-  is copied as before, from a cwd = -Cwd record only. Their copies are not caught up to the transcript tip afterwards
-  (pass 1.5 covers cwd = -Cwd records only; issue #31). Every copy gets a new session id, as before: the same id on two
+  is copied as before, from a cwd = -Cwd record only (a blank-titled one as a last resort, rather than fabricating).
+  Copies of worktree records are not caught up to the transcript tip afterwards (pass 1.5 covers cwd = -Cwd records only;
+  issue #31). Every copy gets a new session id, as before: the same id on two
   seats would share state the app keys by session id for the whole machine (git-worktrees.json leases a worktree to one,
-  side-session-notes\<id>, claude_desktop_config.json). A carried child's spawnedFrom and startChain name the parent id
-  its own seat holds, when that seat holds the parent or gets it this run; otherwise the link is copied as is.
+  side-session-notes\<id>, claude_desktop_config.json). A carried child's spawnedFrom names the parent id, and its startChain the
+  chain's first session id, that its own seat holds, when that seat holds it or gets it this run; otherwise copied as is.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -428,7 +429,7 @@ $appUp = Test-AppUp
 $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
-$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); sf = carries spawnedFrom.sessionId }
+$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); rank = 2 real title, 1 blank, 0 date; sf = carries spawnedFrom.sessionId }
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
@@ -453,10 +454,11 @@ foreach ($acct in $accts) {
       if (Test-CloneSrc $j) {
         $cli = [string]$j.cliSessionId
         if ($cli) {
-          $good = ([string]$j.title).Trim() -and -not ([string]$j.title -match $DateTitleRx)   # a blank title is not a real one
+          $good = [bool](([string]$j.title).Trim() -and -not ([string]$j.title -match $DateTitleRx))   # a blank title is not a real one
+          $rank = if ($good) { 2 } elseif (-not ([string]$j.title -match $DateTitleRx)) { 1 } else { 0 }   # blank: a last resort, above a date title
           $sf = [bool]$j.spawnedFrom.sessionId   # prefer a record that carries its family link (a fabricated one never does)
           $cur = $recIndex[$cli]
-          if (-not $cur -or ($good -and -not $cur.good) -or ($good -and $sf -and -not $cur.sf)) { $recIndex[$cli] = @{ raw = $rawRec; good = $good; sf = $sf } }
+          if (-not $cur -or $rank -gt $cur.rank -or ($rank -eq $cur.rank -and $sf -and -not $cur.sf)) { $recIndex[$cli] = @{ raw = $rawRec; good = $good; rank = $rank; sf = $sf } }
         }
       }
     }
@@ -784,8 +786,8 @@ foreach ($cli in @($byCli.Keys)) {
   # (a real title, non-blank and not a date; a record that carries its spawnedFrom link first)
   $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and ([string]$_.j.title).Trim() -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
   # (never trade a source that carries its spawnedFrom link for one that doesn't)
-  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
+  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].rank -ge 1 -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; rank = 2; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -898,7 +900,8 @@ foreach ($acct in $accts) {
     # A worktree session with no good record to clone is never fabricated: Write-Record would point it at the repo root.
     # (one with no record at all, e.g. a CLI session in that folder, is not the app's: skipped without a count)
     if ($wtCli.Contains($m.BaseName) -and -not ($src -and $src.good)) { if ($hasRec.Contains($m.BaseName)) { [void]$wtSkip.Add($m.BaseName) }; continue }
-    if ($src -and $src.good) {
+    # A repo session's blank-titled record is still cloned, as before, rather than fabricated (it keeps its link and resume point)
+    if ($src -and ($src.good -or ($src.rank -eq 1 -and -not $wtCli.Contains($m.BaseName)))) {
       if ($DryRun) { $cloned++ }
       else {
         try {
