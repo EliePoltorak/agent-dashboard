@@ -656,9 +656,9 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
 
 - Script: `C:\Users\User\.grok\bin\sync-app-history.ps1`
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
-- **Side sessions and families.** A kept (or pinned) session brings the sessions linked to it by `spawnedFrom.sessionId`
-  (its side sessions, and what it was spawned from), whatever their length. Side sessions started in an app worktree of
-  `-Cwd` (transcripts only under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, only from a worktree-cwd record (so
+- **Side sessions and families.** A kept (or pinned) session brings every session connected to it through `spawnedFrom.sessionId`
+  (its side sessions, what it was spawned from, their siblings and so on), whatever their length. Sessions whose transcript
+  is only in an app worktree folder of `-Cwd` are classified and kept like any other, with or without a parent; they (transcripts only under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, only from a worktree-cwd record (so
   they keep their worktree cwd), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted
   when some seat has a record of them). A session whose transcript is in
   the repo folder is copied as before, from a record whose cwd is `-Cwd`. Their copies are not caught up to the transcript

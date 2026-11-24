@@ -58,9 +58,10 @@
   Categories 2 and 3 are OFF by default -- pass -KeepResumable to enable them (they're
   still CLI-resumable either way). They only count files untouched for >10 minutes.
 
-  A kept (or pinned) session also brings its FAMILY: the sessions linked to it by a record's spawnedFrom.sessionId (side
-  sessions it started, what it was spawned from), whatever their length or age, if their transcripts are here. Side
-  sessions started in an app worktree of -Cwd (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
+  A kept (or pinned) session also brings its FAMILY: every session connected to it through records' spawnedFrom.sessionId
+  (side sessions, what it was spawned from, their siblings and so on), whatever their length or age, if their transcripts
+  are here. Sessions whose transcript is only in an app worktree folder of -Cwd are classified and kept like any other, with
+  or without a parent; they (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
   = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their own
   cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
   is copied as before, from a cwd = -Cwd record only. Their copies are not caught up to the transcript tip afterwards

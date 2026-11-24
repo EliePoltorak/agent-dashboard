@@ -14,9 +14,12 @@
   A parent record deleted from seat B after the first run comes back under a new id (its old path is in the flag state).
   A worktree transcript no record names creates no record anywhere (it would point at the repo root).
   Second sandbox: a session with transcripts in the repo and a worktree folder (one record, not archived by its old
-  copy), a date-titled parent fabricated on the other seat (the child links to it), a worktree-cwd record with a
-  repo-folder transcript (new id), a worktree-only session not auto-archived, and a worktree session carried with no
-  repo project folder at all.
+  copy; X, Q), a date-titled parent fabricated on the other seat (the child links to it; P2), a repo session copied from
+  its repo-cwd record, never a linked worktree one (R), a worktree-cwd record with a repo-folder transcript (fabricated,
+  new id; Y), a worktree-only session not auto-archived (W) nor copied from a repo-cwd record (U, H), a source carrying its
+  link preferred (K), content never taken from a fabricated copy a child links to (G-P-C), each seat given the link id its
+  own child names (J), a stale linked record and a linkless tip record (L, L2), a blank title (T), a malformed id (M), the
+  not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
   %APPDATA% / %USERPROFILE% redirected, -AssumeAppClosed and an explicit synthetic -Cwd. Sandbox deleted on success,
   kept on failure. Exit 1 on failure.
@@ -187,7 +190,8 @@ record $B "local_$([guid]::NewGuid())" $pcCli $wt 'Child of a fabricated copy' $
 # J: P2 used on seats A (jSidA, a child there) and B (jSidB, a child there); seat C already holds B's child but not P2:
 # seat C's new P2 takes jSidB, the id its own child names
 $jCli = [guid]::NewGuid().ToString(); $jaCli = [guid]::NewGuid().ToString(); $jbCli = [guid]::NewGuid().ToString()
-$jSidA = "local_$([guid]::NewGuid())"; $jSidB = "local_$([guid]::NewGuid())"; $jbSidC = "local_$([guid]::NewGuid())"
+$jSidA = "local_00000000-$(([guid]::NewGuid().ToString()).Substring(9))"; $jSidB = "local_ffffffff-$(([guid]::NewGuid().ToString()).Substring(9))";   # A sorts first: the ordinal fallback alone picks A
+ $jbSidC = "local_$([guid]::NewGuid())"
 transcript $pDir $jCli 3 'parent used on two seats'; transcript $wDir $jaCli 2 'child on seat A'; transcript $wDir $jbCli 7 'child on seat B'
 record $A $jSidA $jCli $repo 'Parent on two seats' $null; record $B $jSidB $jCli $repo 'Parent on two seats' $null
 record $A "local_$([guid]::NewGuid())" $jaCli $wt 'Child on seat A' $jSidA
@@ -202,6 +206,18 @@ $hSidA = "local_$([guid]::NewGuid())"; $hSidB = "local_$([guid]::NewGuid())"
 record $A $hSidA $hCli $repo 'Worktree session, repo record A' $null; record $B $hSidB $hCli $repo 'Worktree session, repo record B' $null
 record $A "local_$([guid]::NewGuid())" $hCli $wt 'Worktree session, worktree record' $null
 foreach ($pr in @(@($A, $hSidA, $h1), @($B, $hSidB, $h2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
+# L: a repo child: seat A's record is stale but carries its link, seat B's is at the tip without one; seat C's copy keeps the
+# link and is at the tip. L2: the same, but A's record names a turn not in the transcript (it can't be caught up): the link survives
+foreach ($lv in 'L', 'L2') {
+  $lCli = [guid]::NewGuid().ToString(); $l1 = [guid]::NewGuid().ToString(); $l2 = [guid]::NewGuid().ToString()
+  Set-Content "$pDir\$lCli.jsonl" (@('{"type":"user","message":{"role":"user","content":"repo child ' + $lv + '"}}') + (1..6 | ForEach-Object { asst ([guid]::NewGuid()) $null }) + @((asst $l1 $null), (asst $l2 $l1)))
+  (Get-Item "$pDir\$lCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-30)
+  $lSidA = "local_$([guid]::NewGuid())"; $lSidB = "local_$([guid]::NewGuid())"
+  record $A $lSidA $lCli $repo "Repo child $lv" "local_$([guid]::NewGuid())"; record $B $lSidB $lCli $repo "Repo child $lv" $null
+  $aUuid = if ($lv -eq 'L') { $l1 } else { [guid]::NewGuid().ToString() }
+  foreach ($pr in @(@($A, $lSidA, $aUuid), @($B, $lSidB, $l2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
+  Set-Variable "cli$lv" $lCli; Set-Variable "tip$lv" $l2
+}
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
 # M: a repo session whose record carries a malformed session id: its copy gets a fresh one
@@ -224,6 +240,9 @@ check "a child copied to seat C keeps its link (to seat C's parent)" ($ck.Count 
 $cpp = @($rC | Where-Object { $_.cliSessionId -eq $ppCli }); $cg = @($rC | Where-Object { $_.cliSessionId -eq $gCli })
 check "seat C's copy of a session takes its content from the app record, not a fabricated copy a child links to" ($cpp.Count -eq 1 -and $cg.Count -eq 1 -and $cpp[0].spawnedFrom.sessionId -eq $cg[0].sessionId)
 check "seat C's new parent takes the id its existing child names" (@($rC | Where-Object { $_.cliSessionId -eq $jCli -and $_.sessionId -eq $jSidB }).Count -eq 1)
+$cl = @($rC | Where-Object { $_.cliSessionId -eq $cliL })
+check "seat C's copy of a repo child keeps its link and is at the tip (stale linked record, linkless tip record)" ($cl.Count -eq 1 -and $cl[0].spawnedFrom.sessionId -and $cl[0].lastAssistantUuid -eq $tipL)
+check "a linked source that can't be caught up is not traded for a linkless tip record" (@($rC | Where-Object { $_.cliSessionId -eq $cliL2 -and $_.spawnedFrom.sessionId }).Count -eq 1)
 check 'pass 1.5 leaves a worktree-only session alone' (@($rA | Where-Object { $_.sessionId -eq $hSidA -and $_.lastAssistantUuid -eq $h1 }).Count -eq 1)
 check 'a worktree-only session with repo records is copied with its worktree cwd' (@($rC | Where-Object { $_.cliSessionId -eq $hCli -and $_.cwd -eq $wt }).Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $hCli }).Count -eq 1)
 check 'the not-carried notice counts recorded sessions (blank-titled, repo-cwd only) but not the unrecorded one' (@($script:lastOut | Where-Object { $_ -match '^2 worktree session\(s\) not carried' }).Count -eq 1)
