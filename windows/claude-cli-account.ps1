@@ -1076,6 +1076,7 @@ function Get-ProxySample {
         # The default reading's weekly value stands in for a nested reading only while that reading is fresh.
         return [pscustomobject]@{ ok = $true; src = 'proxy'; status = 'rejected'; claim = $r.data.claim
                                   oi7_stat = $r.data.oi7_stat; fable_only_rejection = $true; oi7_util = $r.data.oi7_util
+                                  observed_ms = $rAt
                                   w7_util = $(if ($null -ne $r.data.w7_util) { $r.data.w7_util } elseif ($age -ge 0 -and $age -le $ProxyFreshSec) { $d.w7_util }) }
       }
     }
@@ -1141,6 +1142,9 @@ function Invoke-CheckRotateCore {
   } elseif ($now -ge [int64]$st.nextHaiku) {
     # A reading the proxy took off real traffic in the last 2 min is as good as a probe, and free.
     $u = Get-ProxySample $act $ForceNow
+    # A proxy Fable rejection already counted (by this trigger or the cached-cap check below) is not a new one: a second
+    # check inside the freshness window (the proxy's --now, then the StopFailure hook's) probes live instead of re-firing.
+    if ($u.fable_only_rejection -and [int64][math]::Floor([int64]$u.observed_ms / 1000) -le [int64]$st.fableTs) { $u = $null }
     if (-not $u) { $u = Get-UsageCached $act $true }          # live, haiku only: ~1s, ~9 tokens
     # A Fable rejection the proxy just saw (Fable-only, or a full Fable 429 whose 5h/7d windows are allowed):
     # a Haiku probe cannot see that window, so rotate on it now.
@@ -1154,9 +1158,9 @@ function Invoke-CheckRotateCore {
       $fk = if ($null -ne $fp) { "; fable $fp%" } else { '' }
       $wk = if ($null -ne $wp) { "; weekly $wp%" } else { '' }
       $trigger = "FABLE window REJECTED by the server (claim $($u.claim)$fk$wk; Gate C cannot run)"; $capped = 'fable'
-      # Count this observation once, as the cached-cap check below does: a fresh clock is at or after it, so that check
-      # does not fire on the same rejection again, and the ladder stays armed at its floor if this rotation cannot move.
-      $st.fableTs = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $st.fableBase = 100; $st.nextFable = $now + $FableMinSec
+      # Count this observation once, on its own clock as the cached-cap check below does, so neither path fires on it
+      # again; the ladder stays armed at its floor if this rotation cannot move.
+      $st.fableTs = [int64][math]::Floor([int64]$u.observed_ms / 1000); $st.fableBase = 100; $st.nextFable = $now + $FableMinSec
     }
     # An explicit 403 (oauth_org_not_allowed / subscription disabled) is not a blip. Do not probe
     # it twice and do not go blind: rotate. A timeout or any other non-403 is still retried once.
@@ -1329,6 +1333,12 @@ function Invoke-CheckRotateCore {
     Write-RotateLog "NO USABLE TARGET - staying on '$act'. $detail" Red
     Write-RotateLog "  every alternative is capped, fable-capped, the desktop-app seat, or already >= $sessBar% session. Owner action needed." Red
     if ($capped -eq 'access') { Write-SeatHealth $false $act 'exhausted' }
+    if ($capped -eq 'fable' -and -not $DryRun) {
+      # The ranking above probed this seat's Fable window again. Count everything observed up to now, so the next check
+      # (the StopFailure hook right after the proxy's --now, or the next tick) does not re-trigger on that probe; the
+      # ladder, armed at its floor, re-probes the seat on its own schedule.
+      $st.fableTs = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); Save-RotateState $st
+    }
     return 3
   }
   if ($win.label -eq $act) {

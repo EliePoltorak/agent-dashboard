@@ -1176,6 +1176,21 @@ $nestedFableRej | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path 
 $null = Invoke-CheckRotate 0 $false $true 'test'
 $stAfter = Get-Content $RotateState -Raw | ConvertFrom-Json
 Check 'with no free seat the Fable-only rejection leaves the session projection state alone' ([int]$stAfter.lastWorst -eq 55 -and [int64]$stAfter.lastTs -eq ($tn - 300)) ("lastWorst=$($stAfter.lastWorst) lastTs=$($stAfter.lastTs)")
+# The proxy's --now and the StopFailure hook both check the same Fable 429: with no free seat, the second check
+# must not fire on that observation, or on the ranking's own re-probe of the seat, again.
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+foreach ($l in 'B','C','D','E','F') { $script:plan[$l] = 'quota' }
+@{ acct = 'A'; nextHaiku = 0; lastWorst = 0; lastTs = 0; fableBase = 0; fableTs = 0; nextFable = 0; rotations = @() } |
+  ConvertTo-Json | Set-Content -LiteralPath $RotateState -Encoding UTF8
+@{ ts = $tn - 5; observed_ms = ($tn - 5) * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tn + 3600) } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$stOnce = Get-Content $RotateState -Raw | ConvertFrom-Json
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$rlTwice = Join-Path $Root '.rotate-log.txt'
+$logTwice = if (Test-Path -LiteralPath $rlTwice) { Get-Content -LiteralPath $rlTwice -Raw } else { '' }
+Check 'two checks of one proxy Fable rejection with no free seat trigger once' (([regex]::Matches($logTwice, 'FABLE window REJECTED')).Count -eq 1 -and ([regex]::Matches($logTwice, 'FABLE window CAPPED')).Count -eq 0) ("log=$logTwice")
+Check '... and the ladder is armed at its floor' ([int64]$stOnce.fableTs -ge ($tn - 5) -and [int]$stOnce.fableBase -eq 100) ("fableTs=$($stOnce.fableTs) base=$($stOnce.fableBase)")
 Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 @{ ts = $tn; observed_ms = $tn * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tn + 3600) } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
