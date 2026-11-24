@@ -483,6 +483,15 @@ Check 'a Fable cap whose reset has passed no longer counts' (-not (Test-FableCap
 Write-FableCache 'A' 10 $null
 Check 'a Fable cap with no reset counts' (Test-FableCapCached 'A')
 Check 'no Fable cache: no cap' (-not (Test-FableCapCached 'C'))
+# A sparse 429 whose claim names the Fable window and that carries no 7d_oi-status: the probe parser records the Fable
+# window as rejected, so the cached reading excludes the seat like any Fable cap.
+$claimOnly = Set-FableClaimInference ([pscustomobject]@{ label = 'A'; ok = $true; http = 429; status = 'rejected'; claim = 'seven_day_overage_included'; oi7_util = '1.0'; oi7_stat = $null })
+Check 'a Fable-claimed 429 with no Fable status is read as a Fable rejection' ($claimOnly.oi7_stat -eq 'rejected' -and $claimOnly.oi7_stat_inferred)
+@{ ts = $nowS - 10; data = $claimOnly } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -Encoding UTF8
+Check '... and the cached reading is a Fable cap for ranking and fallback' (Test-FableCapCached 'A')
+$otherOnly = Set-FableClaimInference ([pscustomobject]@{ label = 'A'; ok = $true; http = 429; status = 'rejected'; claim = 'five_hour'; oi7_util = '0.4'; oi7_stat = $null })
+Check '... while a five_hour-claimed one is not' (-not $otherOnly.oi7_stat -and -not $otherOnly.oi7_stat_inferred)
+Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 Reset-Case
 Clear-AppIdentity
 Set-Active 'B'

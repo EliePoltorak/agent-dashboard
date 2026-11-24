@@ -394,7 +394,7 @@ function Probe-Usage {
     try { $e = ($r.Content | ConvertFrom-Json).error; $note += ": $($e.type): $($e.message)" } catch {}
     $note = ConvertTo-SanitizedNote $note
   }
-  [pscustomobject]@{
+  $reading = [pscustomobject]@{
     label    = $Label; ok = $true; access = 'ok'; http = [int]$r.StatusCode; model = $Model; note = $note
     org      = (& $get 'anthropic-organization-id')
     status   = (& $get 'anthropic-ratelimit-unified-status')
@@ -410,6 +410,18 @@ function Probe-Usage {
     oi7_reset = (& $get 'anthropic-ratelimit-unified-7d_oi-reset')
     claim    = (& $get 'anthropic-ratelimit-unified-representative-claim')
   }
+  Set-FableClaimInference $reading
+}
+
+# The server named the Fable window as the one that refused but sent no 7d_oi-status: record that window as rejected
+# (marked inferred), as the proxy's usage_record does, so every Fable-cap reader (ranking, fallback, the watcher) sees
+# one Fable cap. Returns the reading.
+function Set-FableClaimInference($Reading) {
+  if ($Reading.status -eq 'rejected' -and -not $Reading.oi7_stat -and $Reading.claim -eq 'seven_day_overage_included') {
+    $Reading.oi7_stat = 'rejected'
+    $Reading | Add-Member -NotePropertyName oi7_stat_inferred -NotePropertyValue $true -Force
+  }
+  $Reading
 }
 
 function Read-UsageCacheFile($Path, [switch]$ForUpdate) {
@@ -619,7 +631,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Write-RotateLog','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Set-FableClaimInference','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Write-RotateLog','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(Get-PrefetchWork $Labels $models $HonorAccessCooldown)
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`

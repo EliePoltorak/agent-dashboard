@@ -124,6 +124,10 @@ def usage_record(label, status, model, headers):
     data = {"label": label, "ok": True, "http": status, "model": model, "note": "", "src": "proxy"}
     for key, h in FIELDS.items():
         data[key] = headers.get(h)
+    if data["status"] == "rejected" and not data["oi7_stat"] and data["claim"] == FABLE_CLAIM:
+        # The server named the Fable window as the one that refused but sent no 7d_oi-status: record that window as
+        # rejected (marked inferred), so every Fable-cap reader (ranking, fallback, the watcher) sees one Fable cap.
+        data["oi7_stat"], data["oi7_stat_inferred"] = "rejected", True
     # A rejection is worth recording even with no utilisation numbers: it is what a --now check
     # must see (Grok review 2026-10-30).
     rejected = any(data[k] == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
@@ -660,6 +664,14 @@ def self_test():
     rec = usage_record("A", 200, "m", h)
     assert rec["s5_util"] == "1.02" and rec["s5_stat"] == "rejected" and rec["src"] == "proxy"
     assert usage_record("A", 200, "m", {}) is None
+    # A sparse 429 whose claim names the Fable window, with no 7d_oi-status: the Fable window is recorded as rejected.
+    sparse_fable = {RL + "status": "rejected", RL + "representative-claim": FABLE_CLAIM, RL + "7d_oi-utilization": "1.0"}
+    rec = usage_record("A", 429, "m", sparse_fable)
+    assert rec["oi7_stat"] == "rejected" and rec["oi7_stat_inferred"] is True, rec
+    rec = usage_record("A", 429, "m", dict(sparse_fable, **{RL + "representative-claim": "five_hour"}))
+    assert rec["oi7_stat"] is None and "oi7_stat_inferred" not in rec, "a five_hour claim was read as a Fable rejection"
+    rec = usage_record("A", 429, "m", dict(sparse_fable, **{RL + "7d_oi-status": "allowed"}))
+    assert rec["oi7_stat"] == "allowed" and "oi7_stat_inferred" not in rec, "an explicit Fable status was overridden"
     assert bearer({"authorization": "Bearer abc"}) == "abc" and bearer({}) is None
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "fixtures", "access-responses.json"), encoding="utf-8") as handle:
