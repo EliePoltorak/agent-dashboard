@@ -248,7 +248,7 @@ def cache_entry(prior, suffix, entry, has_fable):
         # A Fable-only response names no default window: keep the default reading (and any cap it holds) and add this
         # as the Fable backup, as the -fable file nests a status-only reading. A newer nested observation it raced
         # (and not future-dated) stays. Another limit's rejection (other_limit_rejection: its Fable window says it is not
-        # the Fable cap, or with no Fable status its claim names another window, e.g. five_hour with no 5h fields) is
+        # the Fable cap, or with no Fable status its claim names another window or is missing, e.g. five_hour with no 5h fields) is
         # stored at the top level, where default-cap readers see it.
         nested = prior.get("fable_cap")
         if nested and entry["observed_ms"] < observed_ms(nested) <= time.time_ns() // 1_000_000:
