@@ -1048,9 +1048,9 @@ function Get-ProxySample {
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
     # Readers key on oi7_stat; the parsers record a Fable-claimed refusal with no 7d_oi-status as oi7_stat rejected
-    # (inferred) when the response was refused (not a 2xx). The claim test in the nested arm below covers records written
-    # before they did; it does not check the HTTP status, so it also reads a served 2xx with that shape as a Fable
-    # rejection (tracked in #24).
+    # (inferred) when the response was refused (not a 2xx), and records written before they did are inferred as they are
+    # read (Set-CacheClaimInference, below). The nested arm's own claim test adds only the claimless and served-2xx
+    # shapes (tracked in #24).
     # A Fable-only proxy rejection is nested under the default reading (fable_cap), which keeps its own
     # timestamp and source, or, with no default reading to nest under, stored at the top level (below). Judge the nested reading on its own freshness (not future-dated): it is the
     # rejection that just happened, returned as its own sample, never feeding the session projection.
