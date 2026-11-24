@@ -663,7 +663,7 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
   tip afterwards (issue #31).
   A carried child's `spawnedFrom` link names the parent id its seat holds. A carried record keeps its session id unless it is
   a worktree session (the shared `git-worktrees.json` leases each worktree to a session id), or that seat has a record with
-  that id or a `deleted_<id>` tombstone for it now, or its path in the last saved `.flag-state.json`: then it gets a new id. A record fabricated without a source still gets a different id on
+  that id or a `deleted_<guid>` tombstone for it now (the id without `local_`), or its path in the last saved `.flag-state.json`: then it gets a new id. A record fabricated without a source still gets a different id on
   each seat.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
   `~/.claude-app-seats\.pruned-history-backups\<timestamp>\`. Tune what's "substantive" via

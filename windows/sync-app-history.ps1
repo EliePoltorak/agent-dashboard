@@ -171,17 +171,18 @@ if (Test-Path -LiteralPath $projDir) { foreach ($f in @(Get-ChildItem -LiteralPa
 # Side sessions started in an app worktree of -Cwd keep their transcripts in sibling folders <enc>--claude-worktrees-<name>.
 # shortcut: an over-200-character -Cwd is cut and hashed by the CLI, so its worktree folders can't be matched by prefix here; their sessions are not carried. Upgrade if one turns up.
 # The same holds for a worktree folder whose OWN encoded name passes 200 (a -Cwd near 180 encoded characters): cut and hashed, not matched.
-# A session resumed in both the repo and a worktree has a transcript in each folder: the newest copy is the one read.
-# It counts as a worktree session (never fabricated, new id per seat) only when the repo folder has no copy of it.
+# A session resumed in both the repo and a worktree has a transcript in each folder: the repo copy is the one read, as
+# before worktrees were listed (classify, age, pass 1.5 all see what they always saw). A worktree copy is read only for a
+# session with no repo copy (the newest such copy), and only that makes it a worktree session (never fabricated, new id).
 $wtCli = New-Object 'System.Collections.Generic.HashSet[string]'   # basenames of the worktree-only transcripts
 if ($enc.Length -le 200) {
   foreach ($wd in @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith("$enc--claude-worktrees-", [StringComparison]::OrdinalIgnoreCase) })) {
     try { $wfs = @(Get-ChildItem -LiteralPath $wd.FullName -File -Filter '*.jsonl') }
     catch { Write-Warning "could not list $($wd.FullName) ($($_.Exception.Message)); its sessions are left alone this run"; continue }
     foreach ($wf in $wfs) {
-      $inRepo = $byName.Contains($wf.BaseName) -and -not $wtCli.Contains($wf.BaseName)
+      if ($byName.Contains($wf.BaseName) -and -not $wtCli.Contains($wf.BaseName)) { continue }   # the repo copy stands
       if (-not $byName.Contains($wf.BaseName) -or $wf.LastWriteTimeUtc -gt $byName[$wf.BaseName].LastWriteTimeUtc) { $byName[$wf.BaseName] = $wf }
-      if (-not $inRepo) { [void]$wtCli.Add($wf.BaseName) }
+      [void]$wtCli.Add($wf.BaseName)
     }
   }
 }
@@ -802,6 +803,7 @@ if (-not $Quiet -and $reconciled -gt 0) { "$(if ($DryRun) { 'WOULD reconcile' } 
 
 # ---- pass 2: per account -- seed, retitle, add (no record is ever removed) -----
 $made = 0; $cloned = 0; $retitled = 0
+$wtSkip = New-Object 'System.Collections.Generic.HashSet[string]'   # worktree sessions due on a seat, with no titled record to copy
 # A pinned session of -Cwd whose transcript is on this machine is copied to the seats that lack it, like a kept
 # one, whatever its age. "Pinned" is the records' isStarred flag as this run resolved it ($pinResolved, set in a
 # dry run too and for held sessions), else as read.
@@ -906,7 +908,7 @@ foreach ($acct in $accts) {
     if (-not ($keep.Contains($m.BaseName) -or ($allT.Contains($m.BaseName) -and $pinnedCli.Contains($m.BaseName))) -or $present.Contains($m.BaseName)) { continue }
     $src = $recIndex[$m.BaseName]
     # A worktree session with no good record to clone is never fabricated: Write-Record would point it at the repo root.
-    if ($wtCli.Contains($m.BaseName) -and -not ($src -and $src.good)) { continue }
+    if ($wtCli.Contains($m.BaseName) -and -not ($src -and $src.good)) { [void]$wtSkip.Add($m.BaseName); continue }
     if ($src -and $src.good) {
       if ($DryRun) { $cloned++ }
       else {
@@ -1055,6 +1057,7 @@ if (-not $DryRun -and -not $flagSkip -and -not $flagFail) {
 if (-not $Quiet) {
   $verb = if ($DryRun) { 'WOULD: ' } else { '' }
   "${verb}added $made, cloned $cloned, retitled $retitled record(s) for $Cwd"
+  if ($wtSkip.Count) { "$($wtSkip.Count) worktree session(s) not carried: no titled record on any seat to copy from" }
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
 }
 } finally { $runLock.Dispose(); try { $selfProc.PriorityClass = $prevPriority } catch { } }

@@ -112,7 +112,7 @@ check 'a previously known id is not reused: the parent returns to seat B under a
 if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
 Remove-Item -LiteralPath $sb -Recurse -Force
 
-# ---- second sandbox: one session id in two folders, a date-titled (fabricated) parent, worktree reconcile -----
+# ---- second sandbox: one session id in two folders, a date-titled (fabricated) parent, worktree-only transcripts -----
 $sb = "C:\Dev\Temp\sync-app-history-families-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID-2"
 $projRoot = "$sb\home\.claude\projects"; $ccs = "$sb\app\Claude\claude-code-sessions"; $ws = [guid]::NewGuid().ToString()
 $A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"
@@ -125,6 +125,16 @@ transcript $pDir $xCli 7 'session resumed in two folders'
 transcript $wDir $xCli 7 'session resumed in two folders'
 (Get-Item "$wDir\$xCli.jsonl").LastWriteTime = (Get-Date).AddDays(-40)
 record $A "local_$([guid]::NewGuid())" $xCli $repo 'Session in two folders' $null
+# Q: in two folders, the worktree copy newer: pass 1.5 still catches a stale repo record up from the repo copy
+$qCli = [guid]::NewGuid().ToString(); $q1 = [guid]::NewGuid().ToString(); $q2 = [guid]::NewGuid().ToString(); $q3 = [guid]::NewGuid().ToString()
+function asst($u, $parent) { '{"parentUuid":' + $(if ($parent) { '"' + $parent + '"' } else { 'null' }) + ',"type":"assistant","uuid":"' + $u + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"t"}]}}' }
+$qUser = '{"type":"user","message":{"role":"user","content":"session resumed in a worktree after the repo"}}'
+Set-Content "$pDir\$qCli.jsonl" (@($qUser) + (1..6 | ForEach-Object { asst ([guid]::NewGuid()) $null }) + @((asst $q1 $null), (asst $q2 $q1)))
+Set-Content "$wDir\$qCli.jsonl" @($qUser, (asst $q3 $q2))
+(Get-Item "$pDir\$qCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-30); (Get-Item "$wDir\$qCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-15)
+$qSidA = "local_$([guid]::NewGuid())"; $qSidB = "local_$([guid]::NewGuid())"
+record $A $qSidA $qCli $repo 'Resumed in a worktree' $null; record $B $qSidB $qCli $repo 'Resumed in a worktree' $null
+foreach ($pr in @(@($A, $qSidA, $q2), @($B, $qSidB, $q1))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
 # P2 only has a date-titled record (cloned from nowhere: fabricated on B); its worktree child must link to B's fabricated id
 $p2Cli = [guid]::NewGuid().ToString(); $c2Cli = [guid]::NewGuid().ToString(); $p2Sid = "local_$([guid]::NewGuid())"
 transcript $pDir $p2Cli 7 'parent with only a date title'
@@ -148,6 +158,7 @@ $bp2 = @($rB | Where-Object { $_.cliSessionId -eq $p2Cli }); $bc2 = @($rB | Wher
 check 'a date-titled parent is fabricated on seat B and its worktree child carried' ($bp2.Count -eq 1 -and $bc2.Count -eq 1)
 check "the child links to seat B's fabricated parent id" ($bp2.Count -eq 1 -and $bc2.Count -eq 1 -and $bc2[0].spawnedFrom.sessionId -eq $bp2[0].sessionId)
 check 'a worktree-cwd record with a repo-folder transcript gets a new id on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $yCli -and $_.sessionId -ne $ySid }).Count -eq 1)
+check 'a stale repo record is caught up from the repo copy when a newer worktree copy exists' (@($rB | Where-Object { $_.cliSessionId -eq $qCli -and $_.lastAssistantUuid -eq $q2 }).Count -eq 1)
 check 'a worktree-only transcript does not bring a repo record into auto-archive' (@($rA | Where-Object { $_.cliSessionId -eq $wCli -and -not $_.isArchived }).Count -eq 1)
 # the repo project folder missing: a substantive worktree session is still carried
 Remove-Item -LiteralPath $pDir -Recurse -Force
