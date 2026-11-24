@@ -21,7 +21,7 @@
   holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record, the copy at the tip with the link (L, L2, L3), a blank title (T), a blank-titled repo record cloned with its link
   (BT), blank-titled records only, the tip one used for new copies (BL), a titled linkless source taking the link a
   blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a titled source's own dead link replaced by one that
-  resolves (GD), a
+  resolves (GD), and its own dead startChain dropped when the grafted link brings none (GC), a
   malformed id (M), the
   not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
@@ -260,6 +260,13 @@ transcript $pDir $gdPCli 7 'parent of a child with a dead own link'; transcript 
 record $A $gdPSid $gdPCli $repo 'Parent of a dead-linked child' $null
 record $A "local_$([guid]::NewGuid())" $gdCli $repo 'Titled child GD' "local_$([guid]::NewGuid())"
 record $B "local_$([guid]::NewGuid())" $gdCli $repo '' $gdPSid
+# GC: like GD, but B's linked record has no startChain: seat C's copy takes B's spawnedFrom and drops A's own dead startChain
+$gcCli = [guid]::NewGuid().ToString(); $gcPCli = [guid]::NewGuid().ToString(); $gcPSid = "local_$([guid]::NewGuid())"
+transcript $pDir $gcPCli 7 'parent of a child whose live link has no chain'; transcript $pDir $gcCli 7 'child with a dead chain'
+record $A $gcPSid $gcPCli $repo 'Parent of a chainless link' $null
+record $A "local_$([guid]::NewGuid())" $gcCli $repo 'Titled child GC' "local_$([guid]::NewGuid())"
+$gcB = "local_$([guid]::NewGuid())"; record $B $gcB $gcCli $repo '' $gcPSid
+$f = "$B\$gcB.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('startChain'); Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
 # N: a repo session with a side-session-notes folder: its copy gets a new id (deleting it must never take the notes)
@@ -302,6 +309,8 @@ $glP = @($rC | Where-Object { $_.cliSessionId -eq $glPCli }); $gl = @($rC | Wher
 check "a titled linkless source takes the family link another record carries, remapped to seat C's parent" ($gl.Count -eq 1 -and $glP.Count -eq 1 -and $gl[0].title -eq 'Titled child' -and $gl[0].spawnedFrom.sessionId -eq $glP[0].sessionId -and $gl[0].startChain.firstSessionId -eq $glP[0].sessionId)
 $grP = @($rC | Where-Object { $_.cliSessionId -eq $grPCli }); $gr = @($rC | Where-Object { $_.cliSessionId -eq $grCli })
 check "the grafted link is one that resolves, remapped to seat C's parent" ($gr.Count -eq 1 -and $grP.Count -eq 1 -and $gr[0].spawnedFrom.sessionId -eq $grP[0].sessionId -and $gr[0].startChain.firstSessionId -eq $grP[0].sessionId)
+$gcP = @($rC | Where-Object { $_.cliSessionId -eq $gcPCli }); $gc = @($rC | Where-Object { $_.cliSessionId -eq $gcCli })
+check "a grafted link whose record has no startChain drops the source's own dead startChain (GC)" ($gc.Count -eq 1 -and $gcP.Count -eq 1 -and $gc[0].title -eq 'Titled child GC' -and $gc[0].spawnedFrom.sessionId -eq $gcP[0].sessionId -and $null -eq $gc[0].startChain)
 $gdP = @($rC | Where-Object { $_.cliSessionId -eq $gdPCli }); $gd = @($rC | Where-Object { $_.cliSessionId -eq $gdCli })
 check "a titled source whose own link names a parent no seat holds takes a link that resolves, remapped to seat C's parent" ($gd.Count -eq 1 -and $gdP.Count -eq 1 -and $gd[0].title -eq 'Titled child GD' -and $gd[0].spawnedFrom.sessionId -eq $gdP[0].sessionId -and $gd[0].startChain.firstSessionId -eq $gdP[0].sessionId)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)

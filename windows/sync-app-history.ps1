@@ -70,8 +70,10 @@
   seats would share state the app keys by session id for the whole machine (git-worktrees.json leases a worktree to one,
   side-session-notes\<id>, claude_desktop_config.json). A carried child's spawnedFrom names the parent id, and its startChain the
   chain's first session id, that its own seat holds, when that seat holds it or gets it this run; otherwise copied as is.
-  A clone source with no link, or whose link names a parent id no seat holds, first takes the link (spawnedFrom and
-  startChain, from one record) another record of the session in this repo carries, one whose parent some seat holds first.
+  A clone source with no link, or whose link names a parent id no seat holds, first takes the link another record of the
+  session in this repo carries whose parent some seat holds; a source with no link takes any link when none resolves, and
+  one whose own link is dead keeps it. startChain comes from the same record; when that record has none, the source's own
+  startChain is kept only if its first session id is one some seat holds.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -927,7 +929,7 @@ foreach ($acct in $accts) {
             if ($lk) {
               $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
               if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
-              else { $cj.PSObject.Properties.Remove('startChain') }   # never pair the new link with the source's own chain
+              elseif (-not ($cj.startChain.firstSessionId -and $sidCli.ContainsKey([string]$cj.startChain.firstSessionId))) { $cj.PSObject.Properties.Remove('startChain') }   # keep the source's own chain only if it resolves
             }
           }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
