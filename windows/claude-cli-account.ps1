@@ -1246,7 +1246,9 @@ function Invoke-CheckRotateCore {
       $capAt = [int64][math]::Floor((Get-CacheObservationMs $capReading) / 1000)
       if ($capAt -gt [int64]$st.fableTs) {
         $st.fableTs = $capAt; $st.fableBase = 100; $st.nextFable = $now + $FableMinSec
-        $trigger = if ($null -ne $capReading.data.oi7_util) { "FABLE window CAPPED at $([int][math]::Round([double]$capReading.data.oi7_util * 100))% (Gate C cannot run)" }
+        $capPct = $null
+        try { if ($null -ne $capReading.data.oi7_util) { $capPct = [int][math]::Round([double]$capReading.data.oi7_util * 100) } } catch {}   # a malformed header must not stop the rotation
+        $trigger = if ($null -ne $capPct) { "FABLE window CAPPED at $capPct% (Gate C cannot run)" }
                    else { "FABLE window CAPPED (a rejection with no utilization; Gate C cannot run)" }
         $capped = 'fable'
       }
