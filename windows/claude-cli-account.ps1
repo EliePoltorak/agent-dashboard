@@ -1237,6 +1237,16 @@ function Invoke-CheckRotateCore {
       $st.nextFable = $fc.ts + [math]::Min($FableMaxSec, [math]::Max($FableMinSec, (100 - $fc.pct) * $FableSecPerPt))
       if ($fc.capped) { $trigger = "FABLE window CAPPED at $($fc.pct)% (Gate C cannot run)"; $capped = 'fable' }
     }
+    # A Fable rejection with no utilization (status only) supplies no baseline above, and is stored nested under the
+    # older measurement, which keeps its timestamp. Count it once it was observed after the last Fable reading counted
+    # here, judged by the same cap check ranking and fallback use.
+    if (-not $trigger -and (Test-FableCapCached $act)) {
+      $capAt = [int64][math]::Floor((Get-CacheObservationMs (Read-FableUsageCache (Join-Path $Root $act))) / 1000)
+      if ($capAt -gt [int64]$st.fableTs) {
+        $st.fableTs = $capAt
+        $trigger = "FABLE window CAPPED (a rejection with no utilization; Gate C cannot run)"; $capped = 'fable'
+      }
+    }
     $dist = 100 - [int]$st.fableBase
     if (-not $trigger -and [int64]$st.fableTs -gt 0 -and $dist -le $FableArmAt) {
       if ($now -ge [int64]$st.nextFable) {
@@ -1258,6 +1268,12 @@ function Invoke-CheckRotateCore {
           $st.fableTs = if ($back) { $back.ts } else { $now }
           $dist = 100 - [int]$st.fableBase
           if ($fu.oi7_stat -eq 'rejected') { $trigger = "FABLE window CAPPED at $($st.fableBase)% (Gate C cannot run)"; $capped = 'fable' }
+        } elseif ($fu.ok -and $fu.oi7_stat -eq 'rejected') {
+          # Rejected with no utilization: the baseline stays as it was, but the seat is capped now. Record the
+          # rejection's observation so the cached check above does not count it a second time.
+          $capAt = [int64][math]::Floor((Get-CacheObservationMs (Read-FableUsageCache (Join-Path $Root $act))) / 1000)
+          if ($capAt -gt [int64]$st.fableTs) { $st.fableTs = $capAt }
+          $trigger = "FABLE window CAPPED (a rejection with no utilization; Gate C cannot run)"; $capped = 'fable'
         }
         $st.nextFable = $now + [math]::Min($FableMaxSec, [math]::Max($FableMinSec, $dist * $FableSecPerPt))
       }

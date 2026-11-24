@@ -51,6 +51,9 @@ $global:ClaudeRotatorProbeOverride = {
       $f = $plan.Split(':')[1]; $r | Add-Member -NotePropertyName $f -NotePropertyValue $(if ($f -eq 'oi7_util') { 0.1 } else { 'allowed' })
       return $r
     }
+    if ($plan -eq 'fable-429-status') {     # a Fable rejection that carries its status but no utilization
+      return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; status='rejected'; oi7_stat='rejected'; oi7_reset=[string]([DateTimeOffset]::UtcNow.ToUnixTimeSeconds() + 3600); note='' }
+    }
     if ($plan -eq 'fable-429-fields') {     # a non-2xx that still carries the oi7 window
       return [pscustomobject]@{ label=$Label; ok=$true; access='ok'; http=429; oi7_util=0.1; oi7_stat='allowed'; note='' }
     }
@@ -346,6 +349,38 @@ $rc = Invoke-CheckRotate 0 $false $false 'test'
 Check 'an armed Fable refusal on the active seat rotates off it' (($rc -eq 0) -and ((Get-ActiveLabel) -ne 'A')) "rc=$rc active=$(Get-ActiveLabel)"
 Check '... through the access path (marker on A), not declared ready' ((Test-Path (Join-Path (Join-Path $Root 'A') 'access-disabled.json')) -and
   ((Get-Content (Join-Path $Root '.rotate-log.txt') -Raw) -match 'subscription access disabled \(403 oauth_org_not_allowed\)')) (Get-Content (Join-Path $Root '.rotate-log.txt') -Raw -ErrorAction SilentlyContinue)
+
+# --- the ACTIVE seat's armed Fable probe is a rejection with no utilization: rotate, never declare the seat ready ---
+Reset-Case
+Clear-AppIdentity
+Set-Active 'A'
+$script:plan['A'] = 'fable-429-status'
+$script:head['C'] = 0.30
+$nowTs = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+@{ acct='A'; nextHaiku=($nowTs + 36000); lastWorst=0; lastTs=0; fableBase=90; fableTs=($nowTs - 60); nextFable=0; rotations=@() } | ConvertTo-Json | Set-Content -LiteralPath $RotateState -Encoding UTF8
+$rc = Invoke-CheckRotate 0 $false $false 'test'
+Check 'an armed Fable rejection with no utilization rotates off the active seat' (($rc -eq 0) -and ((Get-ActiveLabel) -ne 'A')) "rc=$rc active=$(Get-ActiveLabel)"
+Check '... as a Fable cap' ([bool]((Get-Content (Join-Path $Root '.rotate-log.txt') -Raw -ErrorAction SilentlyContinue) -match 'FABLE window CAPPED \(a rejection with no utilization')) (Get-Content (Join-Path $Root '.rotate-log.txt') -Raw -ErrorAction SilentlyContinue)
+
+# --- a status-only Fable rejection cached under an older measurement: the watcher counts it once ---
+Reset-Case
+Clear-AppIdentity
+Set-Active 'A'
+$script:plan['A'] = 'fable-429-status'   # the server still refuses Fable when ranking probes A
+$script:head['C'] = 0.30
+$nowTs = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$nestedStatusOnly = @{ ts = $nowTs - 1800; observed_ms = ($nowTs - 1800) * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.5 }
+   fable_cap = @{ ts = $nowTs - 30; observed_ms = ($nowTs - 30) * 1000; data = @{ label = 'A'; ok = $true; http = 429; status = 'rejected'; oi7_stat = 'rejected'; oi7_reset = [string]($nowTs + 3600) } } } | ConvertTo-Json -Depth 5
+$nestedStatusOnly | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -Encoding UTF8
+@{ acct='A'; nextHaiku=($nowTs + 36000); lastWorst=0; lastTs=0; fableBase=50; fableTs=($nowTs - 1800); nextFable=0; rotations=@() } | ConvertTo-Json | Set-Content -LiteralPath $RotateState -Encoding UTF8
+$rc = Invoke-CheckRotate 0 $false $false 'test'
+Check 'a cached status-only Fable rejection newer than the baseline rotates off the active seat' (($rc -eq 0) -and ((Get-ActiveLabel) -ne 'A')) "rc=$rc active=$(Get-ActiveLabel)"
+Set-Active 'A'
+$nestedStatusOnly | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -Encoding UTF8   # ranking's probe wrote a newer rejection
+@{ acct='A'; nextHaiku=($nowTs + 36000); lastWorst=0; lastTs=0; fableBase=50; fableTs=($nowTs - 30); nextFable=0; rotations=@() } | ConvertTo-Json | Set-Content -LiteralPath $RotateState -Encoding UTF8
+$rc = Invoke-CheckRotate 0 $false $false 'test'
+Check '... but not again once that rejection was counted' ((Get-ActiveLabel) -eq 'A') "rc=$rc active=$(Get-ActiveLabel)"
+Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 
 # --- only a successful Fable probe clears the shared refusal marker: a Haiku success beside a refused Fable probe does not ---
 Reset-Case
