@@ -3,22 +3,22 @@
   test-sync-app-history-families.ps1 -- a session carried to another seat brings its linked family.
   A parent session in the repo folder and a side session started from it in an app worktree
   (cwd <repo>\.claude\worktrees\<name>, record field spawnedFrom.sessionId = the parent's id) exist only on seat A.
-  After a sync: seat B has both; the parent keeps its session id, the worktree child gets a new one (the app leases a
-  worktree to a session id in a file every seat shares), and the child's spawnedFrom names the parent id each seat
+  After a sync: seat B has both, each under a new session id (the app keys some state by session id for the whole
+  machine, e.g. worktree leases and side-session notes), and the child's spawnedFrom names the parent id each seat
   holds; the child keeps its worktree cwd; the side session is carried although it is short (2 assistant turns,
   below -MinAssistant); a seat that already holds the parent under another id gets the child but no second parent,
   linked to that id; a second run adds nothing.
-  The parent keeps its id only on a seat with no trace of it: seat D holds an unreadable file with the parent's id
+  Seats with traces of the parent's id: seat D holds an unreadable file with the parent's id
   as its name (left byte-identical), seat E a readable record named with the parent's id in another workspace folder
   (left alone), seat F the parent's deletion tombstone: each gets the parent under a new id, the child linked to it.
-  A parent record deleted from seat B after the first run comes back under a new id (its old path is in the flag state).
+  A parent record deleted from seat B after the first run comes back under a new id.
   A worktree transcript no record names creates no record anywhere (it would point at the repo root).
   Second sandbox: a session with transcripts in the repo and a worktree folder (one record, not archived by its old
   copy; X, Q), a date-titled parent fabricated on the other seat (the child links to it; P2), a repo session copied from
   its repo-cwd record, never a linked worktree one (R), a worktree-cwd record with a repo-folder transcript (fabricated,
   new id; Y), a worktree-only session not auto-archived (W) nor copied from a repo-cwd record (U, H), a source carrying its
-  link preferred (K), content never taken from a fabricated copy a child links to (G-P-C), each seat given the link id its
-  own child names (J), a stale linked record and a linkless tip record (L, L2), a blank title (T), a malformed id (M), the
+  link preferred (K), content never taken from a fabricated copy a child links to (G-P-C), a parent new to a seat that already
+  holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record (L, L2), a blank title (T), a malformed id (M), the
   not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
   %APPDATA% / %USERPROFILE% redirected, -AssumeAppClosed and an explicit synthetic -Cwd. Sandbox deleted on success,
@@ -87,7 +87,7 @@ $rB = recsIn $B; $rC = recsIn $C; $rD = recsIn $D; $rE = recsIn $E   # (variable
 $bp = @($rB | Where-Object { $_.cliSessionId -eq $pCli }); $bc = @($rB | Where-Object { $_.cliSessionId -eq $cCli })
 check 'seat B gets the parent' ($bp.Count -eq 1)
 check 'seat B gets the worktree side session' ($bc.Count -eq 1)
-check 'the parent keeps its session id on seat B' ($bp.Count -eq 1 -and $bp[0].sessionId -eq $pSid)
+check 'the parent gets a new session id on seat B' ($bp.Count -eq 1 -and $bp[0].sessionId -ne $pSid)
 check 'the worktree side session gets a new id on seat B (worktree leases are keyed by session id)' ($bc.Count -eq 1 -and $bc[0].sessionId -ne $cSid)
 check 'the side session keeps its worktree cwd' ($bc.Count -eq 1 -and $bc[0].cwd -eq $wt)
 check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($rB | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
@@ -188,7 +188,7 @@ record $A $ppSidA $ppCli $repo 'Middle session' $gSid
 record $B $ppSidB $ppCli $repo 'Middle session' $null
 record $B "local_$([guid]::NewGuid())" $pcCli $wt 'Child of a fabricated copy' $ppSidB
 # J: P2 used on seats A (jSidA, a child there) and B (jSidB, a child there); seat C already holds B's child but not P2:
-# seat C's new P2 takes jSidB, the id its own child names
+# seat C's new P2 gets a new id (every copy does); the existing child is not relinked (a known limit)
 $jCli = [guid]::NewGuid().ToString(); $jaCli = [guid]::NewGuid().ToString(); $jbCli = [guid]::NewGuid().ToString()
 $jSidA = "local_00000000-$(([guid]::NewGuid().ToString()).Substring(9))"; $jSidB = "local_ffffffff-$(([guid]::NewGuid().ToString()).Substring(9))";   # A sorts first: the ordinal fallback alone picks A
  $jbSidC = "local_$([guid]::NewGuid())"
@@ -244,7 +244,7 @@ $ck = @($rC | Where-Object { $_.cliSessionId -eq $kcCli }); $cp = @($rC | Where-
 check "a child copied to seat C keeps its link (to seat C's parent)" ($ck.Count -eq 1 -and $cp.Count -eq 1 -and $ck[0].spawnedFrom.sessionId -eq $cp[0].sessionId)
 $cpp = @($rC | Where-Object { $_.cliSessionId -eq $ppCli }); $cg = @($rC | Where-Object { $_.cliSessionId -eq $gCli })
 check "seat C's copy of a session takes its content from the app record, not a fabricated copy a child links to" ($cpp.Count -eq 1 -and $cg.Count -eq 1 -and $cpp[0].spawnedFrom.sessionId -eq $cg[0].sessionId)
-check "seat C's new parent takes the id its existing child names" (@($rC | Where-Object { $_.cliSessionId -eq $jCli -and $_.sessionId -eq $jSidB }).Count -eq 1)
+check "a parent new to seat C gets a new id, never a source seat's" (@($rC | Where-Object { $_.cliSessionId -eq $jCli -and $_.sessionId -ne $jSidA -and $_.sessionId -ne $jSidB }).Count -eq 1)
 $cl = @($rC | Where-Object { $_.cliSessionId -eq $cliL })
 check "seat C's copy of a repo child keeps its link and is at the tip (stale linked record, linkless tip record)" ($cl.Count -eq 1 -and $cl[0].spawnedFrom.sessionId -and $cl[0].lastAssistantUuid -eq $tipL)
 check "a linked source that can't be caught up is not traded for a linkless tip record" (@($rC | Where-Object { $_.cliSessionId -eq $cliL2 -and $_.spawnedFrom.sessionId }).Count -eq 1)

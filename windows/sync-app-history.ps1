@@ -65,13 +65,10 @@
   = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their own
   cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
   is copied as before, from a cwd = -Cwd record only. Their copies are not caught up to the transcript tip afterwards
-  (pass 1.5 covers cwd = -Cwd records only; issue #31). A carried
-  record keeps its session id (so spawnedFrom links resolve) unless it is a worktree session (the shared git-worktrees.json
-  leases worktrees by session id) or that seat has a record with that id, a deletion tombstone for it, or its path in the last
-  saved .flag-state.json; then it gets a new id. Only a local_<guid> id is reused, and an unreadable state file means new ids.
-  (The id kept is the one a child's link names, when one does: the one that seat's own records name, if any.) The app's shared
-  claude_desktop_config.json also names session ids (pinned order, the last open session), so a same-id copy shares those. A session with a
-  side-session-notes\<id> folder (shared by every seat) gets a new id, so deleting a copy can never take its notes. A session fabricated without a record to clone still gets a different id on each seat.
+  (pass 1.5 covers cwd = -Cwd records only; issue #31). Every copy gets a new session id, as before: the same id on two
+  seats would share state the app keys by session id for the whole machine (git-worktrees.json leases a worktree to one,
+  side-session-notes\<id>, claude_desktop_config.json). A carried child's spawnedFrom and startChain name the parent id
+  its own seat holds instead.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -431,8 +428,7 @@ $appUp = Test-AppUp
 $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
-$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); sf = carries spawnedFrom.sessionId; sids = ordinal set of ids a child's link names (link targets only) }
-$notesDir  = Join-Path $env:APPDATA 'Claude\side-session-notes'   # one <sessionId> folder per session, shared by every seat
+$recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); sf = carries spawnedFrom.sessionId }
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
@@ -469,21 +465,6 @@ foreach ($acct in $accts) {
     if ($cnt -gt 0) { $guidVotes[$sub.Name] = [int]$guidVotes[$sub.Name] + $cnt }
   }
 }
-# The id a child's spawnedFrom names is the id a clone should carry. Only the id is taken from that record: the content stays
-# the source chosen above (a record a child links to may be a fabricated copy, with no link or resume state of its own).
-# A session can have several such ids (one per seat a child was made on); pass 2 gives each seat the one its own records
-# name, else the first in ordinal order (never hashtable order, which changes from run to run).
-$linkTo = New-Object 'System.Collections.Generic.HashSet[string]'
-foreach ($l in $bucketRecs.Values) { foreach ($r in $l) { $ls = [string]$r.j.spawnedFrom.sessionId; if ($ls) { [void]$linkTo.Add($ls) } } }
-foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
-  $lc = [string]$r.j.cliSessionId
-  if ($lc -and (Test-CloneSrc $r.j) -and $linkTo.Contains([string]$r.j.sessionId) -and ([string]$r.j.title).Trim() -and -not ([string]$r.j.title -match $DateTitleRx)) {
-    if ($recIndex[$lc]) {
-      if (-not $recIndex[$lc].sids) { $recIndex[$lc].sids = New-Object 'System.Collections.Generic.SortedSet[string]' ([StringComparer]::Ordinal) }
-      [void]$recIndex[$lc].sids.Add([string]$r.j.sessionId)
-    }
-  }
-} }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
 
 # ---- pass 1.4: archive and pin flags follow you across seats -------------------
@@ -527,17 +508,6 @@ if ($appUp) {
       Write-Warning "flag state file $flagStatePath is unreadable ($($_.Exception.Message)); archive/pin flags not synced this run. If it is corrupt, delete it to start again (the next run then counts a flag set on any seat as set on all, and, with the app closed, archives every old unpinned session of this workspace with a local transcript and no autoArchiveExempt record once more, un-archived ones included, because deleting it also forgets which sessions were archived for age)"
     }
   }
-}
-# Session ids each seat had a record for at the last saved run: the state file's keys are <acct>\<ws>\<file> paths. A clone
-# keeps its session id only on a seat with no record or tombstone for it now and none in that state (pass 2). Read here, not from $flagPrevAll, which stays empty while the app runs.
-$sidEverOn = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase); $sidKeepOk = $true
-if (Test-Path -LiteralPath $flagStatePath) {
-  try {
-    $st = Get-Content -LiteralPath $flagStatePath -Raw | ConvertFrom-Json -AsHashtable
-    if ($st -isnot [hashtable]) { throw 'not a JSON object' }
-    foreach ($fk in 'isArchived', 'isStarred', 'cli') { if ($st.ContainsKey($fk) -and $st[$fk] -isnot [hashtable]) { throw "'$fk' is not an object" } }
-    foreach ($fk in 'isArchived', 'isStarred', 'cli') { if ($st[$fk] -is [hashtable]) { foreach ($k in $st[$fk].Keys) { $kp = $k -split '\\'; if ($kp.Count -ge 3) { [void]$sidEverOn.Add("$($kp[0])\$($kp[-1] -replace '\.json$', '')") } } } }
-  } catch { $sidKeepOk = $false }   # history unknown: mint new ids
 }
 $flagNextAll = @{}
 $flagWant = @{}         # cliSessionId -> @{ isArchived; isStarred }: the resolved values, for records pass 2 creates
@@ -815,7 +785,7 @@ foreach ($cli in @($byCli.Keys)) {
   $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and ([string]$_.j.title).Trim() -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
   # (never trade a source that carries its spawnedFrom link for one that doesn't)
   if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].good -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sids = $recIndex[$cli].sids; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }   # sids: keep the linked ids (pass 1)
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -919,11 +889,6 @@ foreach ($acct in $accts) {
   # a record Write-Record just fabricated: its id (the file name it wrote) and presence, so a child cloned later links to it
   function Add-Made([string]$c) { $mr = $madeRecs[$madeRecs.Count - 1]; $seatSid[$c] = [IO.Path]::GetFileNameWithoutExtension($mr.path); [void]$present.Add($c) }
   foreach ($r in $recs) { $sc = [string]$r.j.cliSessionId; if ($sc -and $r.j.sessionId -and -not $seatSid.ContainsKey($sc)) { $seatSid[$sc] = [string]$r.j.sessionId } }
-  # every session id this seat's records carry (a record's file name can differ from its id): a clone never reuses one
-  $seatIds = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-  foreach ($r in $recs) { if ($r.j.sessionId) { [void]$seatIds.Add([string]$r.j.sessionId) } }
-  $seatLinks = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)   # parent ids this seat's records name
-  foreach ($r in $recs) { foreach ($lv in @([string]$r.j.spawnedFrom.sessionId, [string]$r.j.startChain.firstSessionId)) { if ($lv) { [void]$seatLinks.Add($lv) } } }
 
   # Add kept transcripts missing from this sub: clone a well-titled record from another
   # bucket when one exists (preserves the app's own AI titles), else fabricate.
@@ -938,32 +903,9 @@ foreach ($acct in $accts) {
       else {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
-          if ($src.sids) {   # an id a child's spawnedFrom names (pass 1): the one this seat's records name, else the first
-            $pick = @($src.sids | Where-Object { $seatLinks.Contains($_) }) | Select-Object -First 1
-            $cj.sessionId = if ($pick) { $pick } else { @($src.sids)[0] }
-          }
-          # Keep the source's session id (so spawnedFrom links resolve here) only if this seat never had it: no record file or
-          # deletion tombstone in any of its folders (checked now), and no path for it in the saved flag state. Else mint one.
-          # Never for a worktree session: %APPDATA%\Claude\git-worktrees.json (shared by every seat) leases each worktree to a session
-          # id, so a same-id copy on another seat could act on the worktree itself (deleting the copy). The links below still resolve.
-          # (a worktree session: a worktree-only transcript, or a source record whose cwd is a worktree of -Cwd; Test-CloneSrc
-          # already keeps worktree-cwd records out of a repo session's sources, so the second half is a defence)
-          $isWt = $wtCli.Contains($m.BaseName) -or ($cj.cwd -ne $Cwd -and $cj.originCwd -eq $Cwd)
-          # Nor for a session with a side-session-notes\<id> folder (shared by every seat): if the app removes it with its
-          # session, deleting the copy on another seat would delete the notes.
-          $hasNotes = $true; try { $hasNotes = Test-Path -LiteralPath (Join-Path $notesDir ([string]$cj.sessionId)) } catch { }
-          $keepId = -not $hasNotes -and $sidKeepOk -and ([string]$cj.sessionId -match '^local_[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}$') -and -not $isWt -and -not $seatIds.Contains([string]$cj.sessionId) -and -not $sidEverOn.Contains("$($acct.Name)\$($cj.sessionId)")
-          if ($keepId) {
-            $kg = ([string]$cj.sessionId) -replace '^local_', ''
-            try {   # a failed check costs only the id, never the clone
-              foreach ($sd in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
-                if ((Test-Path -LiteralPath (Join-Path $sd.FullName "$($cj.sessionId).json")) -or (Test-Path -LiteralPath (Join-Path $sd.FullName "deleted_$kg"))) { $keepId = $false; break }
-              }
-            } catch { $keepId = $false }
-          }
-          if (-not $keepId) { $cj.sessionId = "local_$([guid]::NewGuid().ToString())" }
-          $seatSid[$m.BaseName] = [string]$cj.sessionId; [void]$seatIds.Add([string]$cj.sessionId)
-          # The parent may sit on this seat under another id (an older copy, or one minted above): point the links at that one.
+          $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
+          $seatSid[$m.BaseName] = [string]$cj.sessionId
+          # The parent sits on this seat under its own id (an older copy, or one cloned or fabricated this run): point the links at it.
           foreach ($lk in @(@($cj.spawnedFrom, 'sessionId'), @($cj.startChain, 'firstSessionId'))) {
             $lo = $lk[0]; $lpn = $lk[1]; if ($null -eq $lo) { continue }
             $lv = [string]$lo.$lpn; $lc2 = if ($lv) { $sidCli[$lv] } else { $null }
