@@ -242,6 +242,7 @@ Why this is cheap: a **capped** account 429s instantly and spends nothing, so th
 costs anything is "high but not yet capped". A quiet day costs **zero** Fable tokens; a seat parked
 at 90% costs 48 probes/day (~1.5k tokens), and at the 15-min floor at most 96/day (~3k).
 An armed Fable probe that is refused outright (a 403 subscription refusal) rotates the active seat at once, through the same access trigger as a refused Haiku probe.
+A Fable rejection that comes with no utilization rotates the active seat too: an armed probe's 429, or a cap found in the cache on any tick, armed or not (a status-only rejection the baseline cannot show, or the default cache's proxy Fable reading). Each observation is counted once, and the baseline then counts as the cap (100%), so the ladder stays armed at its 15-minute floor and re-probes a seat it could not leave.
 
 ⚠ **No safety net, by explicit choice.** While disarmed nothing re-reads Fable, so a seat that
 climbs past the arming line with no rotation and no manual `--usage`/`--status`/`--best` in between

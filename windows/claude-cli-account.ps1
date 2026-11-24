@@ -1237,14 +1237,18 @@ function Invoke-CheckRotateCore {
       $st.nextFable = $fc.ts + [math]::Min($FableMaxSec, [math]::Max($FableMinSec, (100 - $fc.pct) * $FableSecPerPt))
       if ($fc.capped) { $trigger = "FABLE window CAPPED at $($fc.pct)% (Gate C cannot run)"; $capped = 'fable' }
     }
-    # A Fable rejection with no utilization (status only) supplies no baseline above, and is stored nested under the
-    # older measurement, which keeps its timestamp. Count it once it was observed after the last Fable reading counted
-    # here, judged by the same cap check ranking and fallback use.
+    # A Fable cap the baseline above does not report: a status-only rejection stored nested under the older measurement
+    # (which keeps its timestamp), or the default cache's proxy Fable reading. Count it once it was observed after the
+    # last Fable reading counted here, judged by the same cap check ranking and fallback use. The baseline becomes the cap
+    # (100), so the ladder stays armed at its floor and re-probes the seat if this rotation does not move it off.
     if (-not $trigger -and (Test-FableCapCached $act)) {
-      $capAt = [int64][math]::Floor((Get-CacheObservationMs (Read-FableUsageCache (Join-Path $Root $act))) / 1000)
+      $capReading = Read-FableUsageCache (Join-Path $Root $act)
+      $capAt = [int64][math]::Floor((Get-CacheObservationMs $capReading) / 1000)
       if ($capAt -gt [int64]$st.fableTs) {
-        $st.fableTs = $capAt
-        $trigger = "FABLE window CAPPED (a rejection with no utilization; Gate C cannot run)"; $capped = 'fable'
+        $st.fableTs = $capAt; $st.fableBase = 100; $st.nextFable = $now + $FableMinSec
+        $trigger = if ($null -ne $capReading.data.oi7_util) { "FABLE window CAPPED at $([int][math]::Round([double]$capReading.data.oi7_util * 100))% (Gate C cannot run)" }
+                   else { "FABLE window CAPPED (a rejection with no utilization; Gate C cannot run)" }
+        $capped = 'fable'
       }
     }
     $dist = 100 - [int]$st.fableBase
@@ -1269,10 +1273,11 @@ function Invoke-CheckRotateCore {
           $dist = 100 - [int]$st.fableBase
           if ($fu.oi7_stat -eq 'rejected') { $trigger = "FABLE window CAPPED at $($st.fableBase)% (Gate C cannot run)"; $capped = 'fable' }
         } elseif ($fu.ok -and $fu.oi7_stat -eq 'rejected') {
-          # Rejected with no utilization: the baseline stays as it was, but the seat is capped now. Record the
-          # rejection's observation so the cached check above does not count it a second time.
+          # Rejected with no utilization: the seat is capped now, so the baseline becomes the cap (100) and the ladder stays
+          # armed at its floor. Record the rejection's observation so the cached check above does not count it again.
           $capAt = [int64][math]::Floor((Get-CacheObservationMs (Read-FableUsageCache (Join-Path $Root $act))) / 1000)
           if ($capAt -gt [int64]$st.fableTs) { $st.fableTs = $capAt }
+          $st.fableBase = 100; $dist = 0
           $trigger = "FABLE window CAPPED (a rejection with no utilization; Gate C cannot run)"; $capped = 'fable'
         }
         $st.nextFable = $now + [math]::Min($FableMaxSec, [math]::Max($FableMinSec, $dist * $FableSecPerPt))

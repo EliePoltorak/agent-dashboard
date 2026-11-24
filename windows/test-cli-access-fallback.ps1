@@ -382,6 +382,30 @@ $rc = Invoke-CheckRotate 0 $false $false 'test'
 Check '... but not again once that rejection was counted' ((Get-ActiveLabel) -eq 'A') "rc=$rc active=$(Get-ActiveLabel)"
 Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 
+# --- a counted status-only cap with nowhere to go keeps the ladder armed, and rotates once a seat frees up ---
+Reset-Case
+Clear-AppIdentity
+Set-Active 'A'
+$script:plan['A'] = 'fable-429-status'
+foreach ($l in 'B','C','D','E','F') { $script:plan[$l] = 'http401' }
+$nowTs = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$nestedStatusOnly | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -Encoding UTF8
+@{ acct='A'; nextHaiku=($nowTs + 36000); lastWorst=0; lastTs=0; fableBase=50; fableTs=($nowTs - 1800); nextFable=0; rotations=@() } | ConvertTo-Json | Set-Content -LiteralPath $RotateState -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $false 'test'
+$stuck = Get-Content -LiteralPath $RotateState -Raw | ConvertFrom-Json
+Check 'a counted status-only cap with no usable target keeps the Fable ladder armed' ((Get-ActiveLabel) -eq 'A' -and [int]$stuck.fableBase -eq 100 -and [int64]$stuck.nextFable -gt 0) "active=$(Get-ActiveLabel) base=$($stuck.fableBase) next=$($stuck.nextFable)"
+foreach ($l in 'B','C','D','E','F') {
+  $script:plan[$l] = 'ok'
+  Get-ChildItem -LiteralPath (Join-Path $Root $l) -Filter 'usage-cache*.json' -ErrorAction SilentlyContinue | Remove-Item -Force   # the 401s read above
+}
+$script:UnknownProbeMemo = @{}
+$script:head['C'] = 0.30
+$stuck.nextFable = 0
+$stuck | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $RotateState -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $false 'test'
+Check '... and its armed probe rotates off the seat once a target frees up' ((Get-ActiveLabel) -ne 'A') "active=$(Get-ActiveLabel)"
+Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
+
 # --- only a successful Fable probe clears the shared refusal marker: a Haiku success beside a refused Fable probe does not ---
 Reset-Case
 Clear-AppIdentity
