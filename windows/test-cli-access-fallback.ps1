@@ -1118,6 +1118,14 @@ $sparse | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Pa
 $null = Invoke-CheckRotate 0 $false $true 'test'
 $logS = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
 Check 'a nested 429 whose Fable window says allowed is not reported as a Fable cap' ($logS -notmatch 'FABLE window REJECTED' -and ($script:pings -join ' ') -notmatch 'fable') ("log=$logS pings=$($script:pings -join ' | ')")
+# An older proxy's nested 429 with no Fable status, only Fable utilization, claimed by five_hour: not a Fable cap either.
+$sparseU = @{ ts = $sparse.ts; observed_ms = $sparse.observed_ms; data = $sparse.data
+  fable_cap = @{ ts = $tn; observed_ms = $tn * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'five_hour'; oi7_util = 0.4 } } }
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+$sparseU | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logS = if (Test-Path -LiteralPath $rlP) { Get-Content -LiteralPath $rlP -Raw } else { '' }
+Check '... nor a nested five_hour 429 that carries only Fable utilization' ($logS -notmatch 'FABLE window REJECTED' -and ($script:pings -join ' ') -notmatch 'fable') ("log=$logS pings=$($script:pings -join ' | ')")
 $sparse.fable_cap.data.oi7_stat = 'allowed_warning'
 Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 $sparse | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8

@@ -217,9 +217,17 @@ def default_fable_observation(cached):
     return nested
 
 
+FABLE_CLAIM = "seven_day_oi"
+
+
 def other_limit_rejection(data):
-    """A rejection whose Fable window names a status that is not rejected: some other limit refused it."""
-    return data.get("status") == "rejected" and bool(data.get("oi7_stat")) and data.get("oi7_stat") != "rejected"
+    """A rejection some other limit made: its Fable window names a status that is not rejected, or, with no Fable
+    status, its representative claim names a window other than the Fable one (e.g. five_hour with only Fable utilization)."""
+    if data.get("status") != "rejected":
+        return False
+    if data.get("oi7_stat"):
+        return data.get("oi7_stat") != "rejected"
+    return bool(data.get("claim")) and data.get("claim") != FABLE_CLAIM
 
 
 def cache_entry(prior, suffix, entry, has_fable):
@@ -732,6 +740,13 @@ def cache_self_test():
                                                                      "claim": "five_hour", "oi7_stat": fable_word}}
             stored = cache_entry(dict(prior), "", dict(other), True)
             assert stored["data"].get("status") == "rejected" and stored["data"].get("claim") == "five_hour",                 "another limit's sparse rejection was nested out of the default readers' sight"
+        # No per-window status at all, only Fable utilization: the claim says whose rejection it is.
+        util_only = {"ts": now // 1000, "observed_ms": now, "data": {"ok": True, "src": "proxy", "http": 429, "status": "rejected",
+                                                                 "claim": "five_hour", "oi7_util": 0.4}}
+        stored = cache_entry(dict(prior), "", dict(util_only), True)
+        assert stored["data"].get("status") == "rejected" and stored["data"].get("claim") == "five_hour",             "a five_hour rejection carrying only Fable utilization was nested out of the default readers' sight"
+        fable_util_only = {"ts": now // 1000, "observed_ms": now, "data": dict(util_only["data"], claim="seven_day_oi")}
+        assert cache_entry(dict(prior), "", dict(fable_util_only), True)["fable_cap"]["data"]["claim"] == "seven_day_oi",             "a Fable-claimed rejection was not nested as the Fable backup"
     finally:
         time.time_ns = real_ns
         _state["written"].clear(); _state["failed"].clear(); _state["fable_capped"].clear()
