@@ -66,6 +66,7 @@ $fail = 0
 function check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:fail++ } }
 function run {
   $out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -Cwd '$repo' -AssumeAppClosed *>&1" 2>&1 | ForEach-Object { "$_" })
+  if ($LASTEXITCODE -ne 0) { "FAIL sync exited $LASTEXITCODE"; $script:fail++ }
   $out | Where-Object { $_ -match 'rror|xception|WARNING|classified' } | ForEach-Object { "    $_" }
 }
 function recsIn($dir) { @(Get-ChildItem $dir -Filter 'local_*.json' | ForEach-Object { try { Get-Content $_.FullName -Raw | ConvertFrom-Json } catch { } }) }
@@ -149,7 +150,7 @@ transcript $wDir $rkCli 2 'side session of the worktree record'
 record $A $rwSid $rCli $wt 'Opened in a worktree' $null
 record $A "local_$([guid]::NewGuid())" $rkCli $wt 'Side of the worktree record' $rwSid
 record $B $rrSid $rCli $repo 'Opened in the repo' $null
-# Y: a record whose cwd is the worktree, but whose transcript is in the repo folder: copied as before (new id)
+# Y: a record whose cwd is the worktree, but whose transcript is in the repo folder: never cloned from (a repo record is fabricated)
 $yCli = [guid]::NewGuid().ToString(); $ySid = "local_$([guid]::NewGuid())"
 transcript $pDir $yCli 7 'worktree record with a repo-folder transcript'
 record $A $ySid $yCli $wt 'Worktree record, repo transcript' $null
@@ -158,6 +159,25 @@ $wCli = [guid]::NewGuid().ToString(); $wSidA = "local_$([guid]::NewGuid())"
 transcript $wDir $wCli 7 'old worktree-only transcript of a repo session'
 (Get-Item "$wDir\$wCli.jsonl").LastWriteTime = (Get-Date).AddDays(-40)
 record $A $wSidA $wCli $repo 'Repo record, worktree-only transcript' $null
+# U: a fresh worktree-only transcript whose only record is repo-cwd: never copied with the repo cwd
+$uCli = [guid]::NewGuid().ToString()
+transcript $wDir $uCli 7 'fresh worktree-only transcript with a repo-cwd record'
+record $A "local_$([guid]::NewGuid())" $uCli $repo 'Repo record of a worktree-only session' $null
+# K: a worktree child whose seat-A record lost its link (a sync-made copy) and whose seat-B record keeps it: seat C gets the link
+$kpCli = [guid]::NewGuid().ToString(); $kcCli = [guid]::NewGuid().ToString(); $kpSid = "local_$([guid]::NewGuid())"
+transcript $pDir $kpCli 7 'parent of a child with a linkless copy'
+transcript $wDir $kcCli 2 'child with a linkless copy'
+record $B $kpSid $kpCli $repo 'Parent of a linkless copy' $null
+record $A "local_$([guid]::NewGuid())" $kcCli $wt 'Child, linkless copy' $null
+record $B "local_$([guid]::NewGuid())" $kcCli $wt 'Child, linked' $kpSid
+# T: a worktree-only session whose only record has a blank title: not copied
+$tCli = [guid]::NewGuid().ToString()
+transcript $wDir $tCli 7 'worktree session with a blank-titled record'
+record $A "local_$([guid]::NewGuid())" $tCli $wt '  ' $null
+# M: a repo session whose record carries a malformed session id: its copy gets a fresh one
+$mCli = [guid]::NewGuid().ToString()
+transcript $pDir $mCli 7 'record with a malformed session id'
+record $A 'local_bad' $mCli $repo 'Malformed session id' $null
 run
 $rA = recsIn $A; $rB = recsIn $B
 check 'a session in two folders gets one record on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $xCli }).Count -eq 1)
@@ -167,8 +187,13 @@ check 'a date-titled parent is fabricated on seat B and its worktree child carri
 check "the child links to seat B's fabricated parent id" ($bp2.Count -eq 1 -and $bc2.Count -eq 1 -and $bc2[0].spawnedFrom.sessionId -eq $bp2[0].sessionId)
 $rC = recsIn $C; $cr = @($rC | Where-Object { $_.cliSessionId -eq $rCli })
 check 'a repo-transcript session is copied from its repo-cwd record, not the worktree one' ($cr.Count -eq 1 -and $cr[0].cwd -eq $repo -and $cr[0].sessionId -ne $rwSid)
-check 'a worktree-cwd record with a repo-folder transcript gets a new id on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $yCli -and $_.sessionId -ne $ySid }).Count -eq 1)
+check 'a worktree-cwd record with a repo-folder transcript is not cloned: seat B gets a repo record with a new id' (@($rB | Where-Object { $_.cliSessionId -eq $yCli -and $_.sessionId -ne $ySid -and $_.cwd -eq $repo }).Count -eq 1)
 check 'a stale repo record is caught up from the repo copy when a newer worktree copy exists' (@($rB | Where-Object { $_.cliSessionId -eq $qCli -and $_.lastAssistantUuid -eq $q2 }).Count -eq 1)
+$ck = @($rC | Where-Object { $_.cliSessionId -eq $kcCli }); $cp = @($rC | Where-Object { $_.cliSessionId -eq $kpCli })
+check "a child copied to seat C keeps its link (to seat C's parent)" ($ck.Count -eq 1 -and $cp.Count -eq 1 -and $ck[0].spawnedFrom.sessionId -eq $cp[0].sessionId)
+check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
+check 'a malformed session id is not reused' (@($rB | Where-Object { $_.cliSessionId -eq $mCli -and $_.sessionId -ne 'local_bad' }).Count -eq 1)
+check 'a worktree-only session is not copied from a repo-cwd record' (@($rB | Where-Object { $_.cliSessionId -eq $uCli }).Count -eq 0)
 check 'a worktree-only transcript does not bring a repo record into auto-archive' (@($rA | Where-Object { $_.cliSessionId -eq $wCli -and -not $_.isArchived }).Count -eq 1)
 # the repo project folder missing: a substantive worktree session is still carried
 Remove-Item -LiteralPath $pDir -Recurse -Force
