@@ -784,10 +784,12 @@ foreach ($cli in @($byCli.Keys)) {
   # clones for buckets that lack the session must start from the current state too
   # (from a well-titled record now at the tip: the tip record itself, or one this pass just reconciled)
   # (a real title, non-blank and not a date; a record that carries its spawnedFrom link first)
-  $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and ([string]$_.j.title).Trim() -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
+  # (a blank-titled tip record too, when the current source is no better than blank: a real title first, then a linked record)
+  $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not ([string]$_.j.title).Trim() }, { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
+  $cRank = if ($cloneSrc -and ([string]$cloneSrc.j.title).Trim()) { 2 } else { 1 }
   # (never trade a source that carries its spawnedFrom link for one that doesn't)
-  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].rank -ge 1 -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
-    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = $true; rank = 2; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
+  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].rank -ge 1 -and $cRank -ge $recIndex[$cli].rank -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
+    try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = ($cRank -eq 2); rank = $cRank; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
  } catch { Write-Warning "could not reconcile session $cli ($($_.Exception.Message)); retried next run" }
@@ -892,8 +894,8 @@ foreach ($acct in $accts) {
   function Add-Made([string]$c) { $mr = $madeRecs[$madeRecs.Count - 1]; $seatSid[$c] = [IO.Path]::GetFileNameWithoutExtension($mr.path); [void]$present.Add($c) }
   foreach ($r in $recs) { $sc = [string]$r.j.cliSessionId; if ($sc -and $r.j.sessionId -and -not $seatSid.ContainsKey($sc)) { $seatSid[$sc] = [string]$r.j.sessionId } }
 
-  # Add kept transcripts missing from this sub: clone a well-titled record from another
-  # bucket when one exists (preserves the app's own AI titles), else fabricate.
+  # Add kept transcripts missing from this sub: clone the best record from another bucket (a real title first, preserving
+  # the app's own AI titles; a blank one as a last resort for repo sessions), else fabricate (never a worktree-only session).
   foreach ($m in $cloneOrder) {
     if (-not ($keep.Contains($m.BaseName) -or ($allT.Contains($m.BaseName) -and $pinnedCli.Contains($m.BaseName))) -or $present.Contains($m.BaseName)) { continue }
     $src = $recIndex[$m.BaseName]

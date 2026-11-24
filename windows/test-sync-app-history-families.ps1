@@ -18,7 +18,8 @@
   its repo-cwd record, never a linked worktree one (R), a worktree-cwd record with a repo-folder transcript (fabricated,
   new id; Y), a worktree-only session not auto-archived (W) nor copied from a repo-cwd record (U, H), a source carrying its
   link preferred (K), content never taken from a fabricated copy a child links to (G-P-C), a parent new to a seat that already
-  holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record (L, L2), a blank title (T), a malformed id (M), the
+  holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record (L, L2), a blank title (T), a blank-titled repo record cloned with its link
+  (BT), blank-titled records only, the tip one used for new copies (BL), a malformed id (M), the
   not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
   %APPDATA% / %USERPROFILE% redirected, -AssumeAppClosed and an explicit synthetic -Cwd. Sandbox deleted on success,
@@ -225,6 +226,13 @@ foreach ($lv in 'L', 'L2') {
   foreach ($pr in @(@($A, $lSidA, $aUuid), @($B, $lSidB, $l2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
   Set-Variable "cli$lv" $lCli; Set-Variable "tip$lv" $l2
 }
+# BL: a repo session whose records are all blank-titled, seat A's stale and seat B's at the tip: seat C's copy is at the tip
+$blCli = [guid]::NewGuid().ToString(); $bl1 = [guid]::NewGuid().ToString(); $bl2 = [guid]::NewGuid().ToString()
+Set-Content "$pDir\$blCli.jsonl" (@('{"type":"user","message":{"role":"user","content":"blank-titled repo session"}}') + (1..6 | ForEach-Object { asst ([guid]::NewGuid()) $null }) + @((asst $bl1 $null), (asst $bl2 $bl1)))
+(Get-Item "$pDir\$blCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-30)
+$blSidA = "local_$([guid]::NewGuid())"; $blSidB = "local_$([guid]::NewGuid())"
+record $A $blSidA $blCli $repo '' $null; record $B $blSidB $blCli $repo '' $null
+foreach ($pr in @(@($A, $blSidA, $bl1), @($B, $blSidB, $bl2))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
 # N: a repo session with a side-session-notes folder: its copy gets a new id (deleting it must never take the notes)
@@ -260,6 +268,7 @@ check 'a worktree-only session with repo records is copied with its worktree cwd
 check 'the not-carried notice counts recorded sessions (blank-titled, repo-cwd only) but not the unrecorded one' (@($script:lastOut | Where-Object { $_ -match '^2 worktree session\(s\) not carried' }).Count -eq 1)
 $btP = @($rB | Where-Object { $_.cliSessionId -eq $btPCli }); $bt = @($rB | Where-Object { $_.cliSessionId -eq $btCli })
 check "a repo session's blank-titled record is cloned, not fabricated, its link naming seat B's parent" ($bt.Count -eq 1 -and $btP.Count -eq 1 -and $bt[0].spawnedFrom.sessionId -eq $btP[0].sessionId)
+check "with blank-titled records only, seat C's copy starts from the tip record" (@($rC | Where-Object { $_.cliSessionId -eq $blCli -and $_.lastAssistantUuid -eq $bl2 }).Count -eq 1)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
 check 'a session with side-session notes gets a new id on another seat' (@($rB | Where-Object { $_.cliSessionId -eq $nCli -and $_.sessionId -ne $nSid }).Count -eq 1)
 check 'a malformed session id is not reused' (@($rB | Where-Object { $_.cliSessionId -eq $mCli -and $_.sessionId -ne 'local_bad' }).Count -eq 1)
