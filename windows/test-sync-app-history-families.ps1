@@ -75,7 +75,7 @@ $bp = @($rB | Where-Object { $_.cliSessionId -eq $pCli }); $bc = @($rB | Where-O
 check 'seat B gets the parent' ($bp.Count -eq 1)
 check 'seat B gets the worktree side session' ($bc.Count -eq 1)
 check 'the parent keeps its session id on seat B' ($bp.Count -eq 1 -and $bp[0].sessionId -eq $pSid)
-check 'the side session keeps its session id on seat B' ($bc.Count -eq 1 -and $bc[0].sessionId -eq $cSid)
+check 'the worktree side session gets a new id on seat B (worktree leases are keyed by session id)' ($bc.Count -eq 1 -and $bc[0].sessionId -ne $cSid)
 check 'the side session keeps its worktree cwd' ($bc.Count -eq 1 -and $bc[0].cwd -eq $wt)
 check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($rB | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
 check 'seat C gets the side session' (@($rC | Where-Object { $_.cliSessionId -eq $cCli }).Count -eq 1)
@@ -97,10 +97,56 @@ run
 check 'a second run adds nothing' ((count) -eq $n)
 
 # a record deleted after it was written: its id is in the flag state, so the copy that comes back gets a new id
-Remove-Item "$B\$cSid.json" -ErrorAction SilentlyContinue
+Remove-Item "$B\$pSid.json" -ErrorAction SilentlyContinue
 run
-$bc2 = @(recsIn $B | Where-Object { $_.cliSessionId -eq $cCli })
-check 'a previously known id is not reused: the side session returns to seat B under a new id' ($bc2.Count -eq 1 -and $bc2[0].sessionId -ne $cSid)
+$bp2 = @(recsIn $B | Where-Object { $_.cliSessionId -eq $pCli })
+check 'a previously known id is not reused: the parent returns to seat B under a new id' ($bp2.Count -eq 1 -and $bp2[0].sessionId -ne $pSid)
+if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
+Remove-Item -LiteralPath $sb -Recurse -Force
+
+# ---- second sandbox: one session id in two folders, a date-titled (fabricated) parent, worktree reconcile -----
+$sb = "C:\Dev\Temp\sync-app-history-families-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID-2"
+$projRoot = "$sb\home\.claude\projects"; $ccs = "$sb\app\Claude\claude-code-sessions"; $ws = [guid]::NewGuid().ToString()
+$A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"
+$pDir = "$projRoot\C--SyncFamTest-repo"; $wDir = "$projRoot\C--SyncFamTest-repo--claude-worktrees-wt1"
+New-Item -ItemType Directory $A, $B, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
+"sandbox: $sb"
+# X: resumed in the repo (fresh) and in a worktree (40 days old): one record per seat, never auto-archived
+$xCli = [guid]::NewGuid().ToString()
+transcript $pDir $xCli 7 'session resumed in two folders'
+transcript $wDir $xCli 7 'session resumed in two folders'
+(Get-Item "$wDir\$xCli.jsonl").LastWriteTime = (Get-Date).AddDays(-40)
+record $A "local_$([guid]::NewGuid())" $xCli $repo 'Session in two folders' $null
+# P2 only has a date-titled record (cloned from nowhere: fabricated on B); its worktree child must link to B's fabricated id
+$p2Cli = [guid]::NewGuid().ToString(); $c2Cli = [guid]::NewGuid().ToString(); $p2Sid = "local_$([guid]::NewGuid())"
+transcript $pDir $p2Cli 7 'parent with only a date title'
+transcript $wDir $c2Cli 2 'child of a date-titled parent'
+record $A $p2Sid $p2Cli $repo 'Session 2026-11-01 10:00' $null
+record $A "local_$([guid]::NewGuid())" $c2Cli $wt 'Child of a date-titled parent' $p2Sid
+# W: a worktree session on both seats, B's copy behind the transcript tip: reconciled like a repo session
+$wCli = [guid]::NewGuid().ToString(); $u1 = [guid]::NewGuid().ToString(); $u2 = [guid]::NewGuid().ToString()
+Set-Content "$wDir\$wCli.jsonl" @('{"type":"user","message":{"role":"user","content":"worktree session to reconcile"}}',
+  ('{"parentUuid":null,"type":"assistant","uuid":"' + $u1 + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"one"}]}}'),
+  ('{"parentUuid":"' + $u1 + '","type":"assistant","uuid":"' + $u2 + '","message":{"role":"assistant","stop_reason":"end_turn","content":[{"type":"text","text":"two"}]}}'))
+(Get-Item "$wDir\$wCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-20)
+$wSidA = "local_$([guid]::NewGuid())"; $wSidB = "local_$([guid]::NewGuid())"
+record $A $wSidA $wCli $wt 'Worktree session to reconcile' $null; record $B $wSidB $wCli $wt 'Worktree session to reconcile' $null
+foreach ($pr in @(@($A, $wSidA, $u2), @($B, $wSidB, $u1))) { $f = "$($pr[0])\$($pr[1]).json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j | Add-Member lastAssistantUuid $pr[2] -Force; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline }
+run
+$rA = recsIn $A; $rB = recsIn $B
+check 'a session in two folders gets one record on seat B' (@($rB | Where-Object { $_.cliSessionId -eq $xCli }).Count -eq 1)
+check 'a session in two folders is not auto-archived by its old worktree copy' (@(($rA + $rB) | Where-Object { $_.cliSessionId -eq $xCli -and $_.isArchived }).Count -eq 0)
+$bp2 = @($rB | Where-Object { $_.cliSessionId -eq $p2Cli }); $bc2 = @($rB | Where-Object { $_.cliSessionId -eq $c2Cli })
+check 'a date-titled parent is fabricated on seat B and its worktree child carried' ($bp2.Count -eq 1 -and $bc2.Count -eq 1)
+check "the child links to seat B's fabricated parent id" ($bp2.Count -eq 1 -and $bc2.Count -eq 1 -and $bc2[0].spawnedFrom.sessionId -eq $bp2[0].sessionId)
+check "a worktree record behind the transcript tip is reconciled" (@($rB | Where-Object { $_.cliSessionId -eq $wCli -and $_.lastAssistantUuid -eq $u2 }).Count -eq 1)
+# the repo project folder missing: a substantive worktree session is still carried
+Remove-Item -LiteralPath $pDir -Recurse -Force
+$vCli = [guid]::NewGuid().ToString()
+transcript $wDir $vCli 7 'substantive worktree session'
+record $A "local_$([guid]::NewGuid())" $vCli $wt 'Substantive worktree session' $null
+run
+check 'with no repo project folder, a worktree session is still carried' (@(recsIn $B | Where-Object { $_.cliSessionId -eq $vCli }).Count -eq 1)
 
 if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
 Remove-Item -LiteralPath $sb -Recurse -Force
