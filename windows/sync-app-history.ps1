@@ -68,7 +68,7 @@
   (pass 1.5 covers cwd = -Cwd records only; issue #31). Every copy gets a new session id, as before: the same id on two
   seats would share state the app keys by session id for the whole machine (git-worktrees.json leases a worktree to one,
   side-session-notes\<id>, claude_desktop_config.json). A carried child's spawnedFrom and startChain name the parent id
-  its own seat holds instead.
+  its own seat holds, when that seat holds the parent or gets it this run; otherwise the link is copied as is.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES

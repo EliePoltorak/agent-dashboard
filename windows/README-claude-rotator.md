@@ -539,7 +539,7 @@ another account/seat — never appear in the app's history on their own.
 (last activity within `-MaxAgeDays`, **default 7**; `0` = no age limit) AND matches a keep category.
 A session pinned on any seat that belongs to the synced workspace (`-Cwd`), with its transcript on this
 machine, is copied too, whatever its age, and so is every session linked to a kept or pinned one by `spawnedFrom`
-(see *Side sessions and families* below). Pinning follows the records' `isStarred` flag, which the sync
+that has its transcript on this machine (see *Side sessions and families* below). Pinning follows the records' `isStarred` flag, which the sync
 spreads to every seat, not the sidebar's own pin list (see below).
 
 **Old sessions are archived (2026-11-16).** A `-Cwd` session whose transcript is on this machine
@@ -658,7 +658,7 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
 - Script: `C:\Users\User\.grok\bin\sync-app-history.ps1`
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
 - **Side sessions and families.** A kept (or pinned) session brings every session connected to it through `spawnedFrom.sessionId`
-  (its side sessions, what it was spawned from, their siblings and so on), whatever their length. Sessions whose transcript
+  (its side sessions, what it was spawned from, their siblings and so on) whose transcript is on this machine, whatever their length. Sessions whose transcript
   is only in an app worktree folder of `-Cwd` are classified and kept like any other, with or without a parent; they (transcripts only under `~/.claude/projects/<enc>--claude-worktrees-*`) are carried too, only from a worktree-cwd record (so
   they keep their worktree cwd), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted
   when some seat has a record of them). A session whose transcript is in
@@ -666,7 +666,7 @@ claude-sync-history -Cwd 'C:\Dev\other'  # a different workspace
   tip afterwards (issue #31).
   Every copy gets a new session id, as before: the same id on two seats would share state the app keys by session id for
   the whole machine (`git-worktrees.json` leases a worktree to one, `side-session-notes\<id>`, `claude_desktop_config.json`).
-  A carried child's `spawnedFrom` and `startChain` name the parent id its own seat holds instead. A record fabricated without a source also gets a different id on
+  A carried child's `spawnedFrom` and `startChain` name the parent id its own seat holds, when that seat holds the parent or gets it this run; otherwise the link is copied as is. A record fabricated without a source also gets a different id on
   each seat. A family member deleted on one seat comes back on the next run while its family is kept, as a kept session
   always has.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to

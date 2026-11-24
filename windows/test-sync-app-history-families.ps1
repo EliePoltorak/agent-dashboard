@@ -8,10 +8,10 @@
   holds; the child keeps its worktree cwd; the side session is carried although it is short (2 assistant turns,
   below -MinAssistant); a seat that already holds the parent under another id gets the child but no second parent,
   linked to that id; a second run adds nothing.
-  Seats with traces of the parent's id: seat D holds an unreadable file with the parent's id
-  as its name (left byte-identical), seat E a readable record named with the parent's id in another workspace folder
-  (left alone), seat F the parent's deletion tombstone: each gets the parent under a new id, the child linked to it.
-  A parent record deleted from seat B after the first run comes back under a new id.
+  Every copy gets a new id: seat D holds an unreadable file named with the parent's id (left byte-identical), seat E a
+  readable record named with the parent's id in another workspace folder (left alone), seat F the parent's deletion
+  tombstone; each gets the parent under a new id, the child linked to it.
+  The parent record seat B holds, deleted after the first run, comes back once under another new id.
   A worktree transcript no record names creates no record anywhere (it would point at the repo root).
   Second sandbox: a session with transcripts in the repo and a worktree folder (one record, not archived by its old
   copy; X, Q), a date-titled parent fabricated on the other seat (the child links to it; P2), a repo session copied from
@@ -109,11 +109,13 @@ $n = count
 run
 check 'a second run adds nothing' ((count) -eq $n)
 
-# a record deleted after it was written: its id is in the flag state, so the copy that comes back gets a new id
-Remove-Item "$B\$pSid.json" -ErrorAction SilentlyContinue
+# the parent record seat B holds, deleted after it was written: the family brings it back once, under another new id
+$bDel = [string]$bp[0].sessionId
+check 'seat B holds the parent record to delete' (Test-Path -LiteralPath "$B\$bDel.json")
+Remove-Item -LiteralPath "$B\$bDel.json"
 run
 $bp2 = @(recsIn $B | Where-Object { $_.cliSessionId -eq $pCli })
-check 'a previously known id is not reused: the parent returns to seat B under a new id' ($bp2.Count -eq 1 -and $bp2[0].sessionId -ne $pSid)
+check 'a deleted family member comes back once, under a new id' ($bp2.Count -eq 1 -and $bp2[0].sessionId -ne $pSid -and $bp2[0].sessionId -ne $bDel)
 if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
 Remove-Item -LiteralPath $sb -Recurse -Force
 
@@ -147,7 +149,7 @@ transcript $wDir $c2Cli 2 'child of a date-titled parent'
 record $A $p2Sid $p2Cli $repo 'Session 2026-11-01 10:00' $null
 record $A "local_$([guid]::NewGuid())" $c2Cli $wt 'Child of a date-titled parent' $p2Sid
 # R: transcript in the repo folder, a titled worktree-cwd record (named by a child's link) on A and a repo-cwd record on B:
-# seat C copies the repo-cwd record, as before worktrees were listed, never the worktree record's id or cwd
+# seat C copies the repo-cwd record, as before worktrees were listed, never the worktree record's cwd
 $rCli = [guid]::NewGuid().ToString(); $rwSid = "local_$([guid]::NewGuid())"; $rrSid = "local_$([guid]::NewGuid())"; $rkCli = [guid]::NewGuid().ToString()
 transcript $pDir $rCli 7 'repo session also opened in a worktree'
 transcript $wDir $rkCli 2 'side session of the worktree record'
@@ -179,7 +181,7 @@ $tCli = [guid]::NewGuid().ToString()
 transcript $wDir $tCli 7 'worktree session with a blank-titled record'
 record $A "local_$([guid]::NewGuid())" $tCli $wt '  ' $null
 # G->P->C: seat A holds P (linked to G, with a resume point); seat B holds a fabricated copy of P (no link) that B's C links to.
-# Seat C's copy of P takes its content from A's record, not the fabricated one (only the id may come from the link target)
+# Seat C's copy of P takes its content from A's record, not the fabricated one
 $gCli = [guid]::NewGuid().ToString(); $ppCli = [guid]::NewGuid().ToString(); $pcCli = [guid]::NewGuid().ToString()
 $gSid = "local_$([guid]::NewGuid())"; $ppSidA = "local_$([guid]::NewGuid())"; $ppSidB = "local_$([guid]::NewGuid())"
 transcript $pDir $gCli 7 'grandparent'; transcript $pDir $ppCli 7 'middle session'; transcript $wDir $pcCli 2 'child of a fabricated copy'
@@ -190,7 +192,7 @@ record $B "local_$([guid]::NewGuid())" $pcCli $wt 'Child of a fabricated copy' $
 # J: P2 used on seats A (jSidA, a child there) and B (jSidB, a child there); seat C already holds B's child but not P2:
 # seat C's new P2 gets a new id (every copy does); the existing child is not relinked (a known limit)
 $jCli = [guid]::NewGuid().ToString(); $jaCli = [guid]::NewGuid().ToString(); $jbCli = [guid]::NewGuid().ToString()
-$jSidA = "local_00000000-$(([guid]::NewGuid().ToString()).Substring(9))"; $jSidB = "local_ffffffff-$(([guid]::NewGuid().ToString()).Substring(9))";   # A sorts first: the ordinal fallback alone picks A
+$jSidA = "local_$([guid]::NewGuid())"; $jSidB = "local_$([guid]::NewGuid())"
  $jbSidC = "local_$([guid]::NewGuid())"
 transcript $pDir $jCli 3 'parent used on two seats'; transcript $wDir $jaCli 2 'child on seat A'; transcript $wDir $jbCli 7 'child on seat B'
 record $A $jSidA $jCli $repo 'Parent on two seats' $null; record $B $jSidB $jCli $repo 'Parent on two seats' $null
