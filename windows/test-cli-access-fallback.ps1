@@ -491,6 +491,10 @@ Check 'a Fable-claimed 429 with no Fable status is read as a Fable rejection' ($
 Check '... and the cached reading is a Fable cap for ranking and fallback' (Test-FableCapCached 'A')
 $otherOnly = Set-FableClaimInference ([pscustomobject]@{ label = 'A'; ok = $true; http = 429; status = 'rejected'; claim = 'five_hour'; oi7_util = '0.4'; oi7_stat = $null })
 Check '... while a five_hour-claimed one is not' (-not $otherOnly.oi7_stat -and -not $otherOnly.oi7_stat_inferred)
+$servedOnly = Set-FableClaimInference ([pscustomobject]@{ label = 'A'; ok = $true; http = 200; status = 'rejected'; claim = 'seven_day_overage_included'; oi7_util = '1.0'; oi7_stat = $null })
+Check '... nor a served 2xx' (-not $servedOnly.oi7_stat -and -not $servedOnly.oi7_stat_inferred)
+# The probe is mocked in this suite, so pin the live parser's call to the inference directly.
+Check 'Probe-Usage applies the Fable claim inference to the reading it returns' ((Get-Command Probe-Usage).Definition -match 'Set-FableClaimInference \$reading')
 Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 Reset-Case
 Clear-AppIdentity

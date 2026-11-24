@@ -413,11 +413,13 @@ function Probe-Usage {
   Set-FableClaimInference $reading
 }
 
-# The server named the Fable window as the one that refused but sent no 7d_oi-status: record that window as rejected
+# The server refused (not a 2xx) naming the Fable window, but sent no 7d_oi-status: record that window as rejected
 # (marked inferred), as the proxy's usage_record does, so every Fable-cap reader (ranking, fallback, the watcher) sees
-# one Fable cap. Returns the reading.
+# one Fable cap. A 2xx was served, so it is never read as a Fable cap this way. Returns the reading.
 function Set-FableClaimInference($Reading) {
-  if ($Reading.status -eq 'rejected' -and -not $Reading.oi7_stat -and $Reading.claim -eq 'seven_day_overage_included') {
+  $http = 0; $null = [int]::TryParse([string]$Reading.http, [ref]$http)
+  if ($Reading.status -eq 'rejected' -and -not $Reading.oi7_stat -and $Reading.claim -eq 'seven_day_overage_included' -and
+      -not ($http -ge 200 -and $http -lt 300)) {
     $Reading.oi7_stat = 'rejected'
     $Reading | Add-Member -NotePropertyName oi7_stat_inferred -NotePropertyValue $true -Force
   }
@@ -1037,6 +1039,8 @@ function Get-ProxySample {
     $c = Get-Content $cf -Raw | ConvertFrom-Json
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
+    # Readers key on oi7_stat; the parsers record a Fable-claimed refusal with no 7d_oi-status as oi7_stat rejected
+    # (inferred). The claim test in the nested arm below covers records written before they did.
     # A Fable-only proxy rejection is nested under the default reading (fable_cap), which keeps its own
     # timestamp and source, or, with no default reading to nest under, stored at the top level (below). Judge the nested reading on its own freshness (not future-dated): it is the
     # rejection that just happened, returned as its own sample, never feeding the session projection.

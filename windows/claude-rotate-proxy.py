@@ -124,9 +124,11 @@ def usage_record(label, status, model, headers):
     data = {"label": label, "ok": True, "http": status, "model": model, "note": "", "src": "proxy"}
     for key, h in FIELDS.items():
         data[key] = headers.get(h)
-    if data["status"] == "rejected" and not data["oi7_stat"] and data["claim"] == FABLE_CLAIM:
-        # The server named the Fable window as the one that refused but sent no 7d_oi-status: record that window as
+    if (data["status"] == "rejected" and not data["oi7_stat"] and data["claim"] == FABLE_CLAIM
+            and not (isinstance(status, int) and 200 <= status < 300)):
+        # The server refused (not a 2xx) naming the Fable window, but sent no 7d_oi-status: record that window as
         # rejected (marked inferred), so every Fable-cap reader (ranking, fallback, the watcher) sees one Fable cap.
+        # A 2xx was served, so it is never read as a Fable cap this way.
         data["oi7_stat"], data["oi7_stat_inferred"] = "rejected", True
     # A rejection is worth recording even with no utilisation numbers: it is what a --now check
     # must see (Grok review 2026-10-30).
@@ -672,6 +674,8 @@ def self_test():
     assert rec["oi7_stat"] is None and "oi7_stat_inferred" not in rec, "a five_hour claim was read as a Fable rejection"
     rec = usage_record("A", 429, "m", dict(sparse_fable, **{RL + "7d_oi-status": "allowed"}))
     assert rec["oi7_stat"] == "allowed" and "oi7_stat_inferred" not in rec, "an explicit Fable status was overridden"
+    rec = usage_record("A", 200, "m", sparse_fable)
+    assert rec["oi7_stat"] is None and "oi7_stat_inferred" not in rec, "a served 2xx was read as a Fable rejection"
     assert bearer({"authorization": "Bearer abc"}) == "abc" and bearer({}) is None
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "fixtures", "access-responses.json"), encoding="utf-8") as handle:
