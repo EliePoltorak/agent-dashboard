@@ -430,7 +430,7 @@ $accts = @(Get-ChildItem -LiteralPath $ccs -Directory)
 $subCounts = @{}   # acct -> (sub -> this-cwd record count)
 $guidVotes = @{}   # sub  -> total count across accounts (workspace guid vote)
 $recIndex  = @{}   # cliSessionId -> @{ raw = record json; good = has a real title (non-blank, not a date); rank = 2 real title, 1 blank, 0 date; sf = carries spawnedFrom.sessionId }
-$linkOf    = @{}   # cliSessionId -> @{ spawnedFrom; startChain } from a clone-source record that carries the link (grafted onto a linkless source)
+$linkOf    = @{}   # cliSessionId -> list of @{ to = parent id; sf; sc } from every record of this repo that carries spawnedFrom (grafted onto a linkless source)
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
@@ -450,7 +450,14 @@ foreach ($acct in $accts) {
       try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { continue }
       if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
-      if ($j.cliSessionId -and (Test-OfRepo $j)) { [void]$hasRec.Add([string]$j.cliSessionId) }
+      if ($j.cliSessionId -and (Test-OfRepo $j)) {
+        [void]$hasRec.Add([string]$j.cliSessionId)
+        if ($j.spawnedFrom.sessionId) {   # a link does not depend on the record's cwd: any record of this repo may lend it
+          $lkc = [string]$j.cliSessionId
+          if (-not $linkOf.ContainsKey($lkc)) { $linkOf[$lkc] = New-Object System.Collections.Generic.List[object] }
+          $linkOf[$lkc].Add(@{ to = [string]$j.spawnedFrom.sessionId; sf = ($j.spawnedFrom | ConvertTo-Json -Compress -Depth 20); sc = $(if ($j.startChain) { $j.startChain | ConvertTo-Json -Compress -Depth 20 } else { $null }) })
+        }
+      }
       if ($j.cwd -eq $Cwd) { $cnt++ }
       if (Test-CloneSrc $j) {
         $cli = [string]$j.cliSessionId
@@ -460,7 +467,6 @@ foreach ($acct in $accts) {
           $sf = [bool]$j.spawnedFrom.sessionId   # prefer a record that carries its family link (a fabricated one never does)
           $cur = $recIndex[$cli]
           if (-not $cur -or $rank -gt $cur.rank -or ($rank -eq $cur.rank -and $sf -and -not $cur.sf)) { $recIndex[$cli] = @{ raw = $rawRec; good = $good; rank = $rank; sf = $sf } }
-          if ($sf -and -not $linkOf.ContainsKey($cli)) { $linkOf[$cli] = @{ spawnedFrom = ($j.spawnedFrom | ConvertTo-Json -Compress -Depth 20); startChain = $(if ($j.startChain) { $j.startChain | ConvertTo-Json -Compress -Depth 20 } else { $null }) } }
         }
       }
     }
@@ -789,8 +795,8 @@ foreach ($cli in @($byCli.Keys)) {
   # (a blank-titled tip record too, when the current source is no better than blank: a real title first, then a linked record)
   $cloneSrc = @($rs | Where-Object { [string]$_.j.lastAssistantUuid -eq $tip -and -not ([string]$_.j.title -match $DateTitleRx) -and -not $changedOnDisk.Contains($_.file.FullName) } | Sort-Object -Stable { -not ([string]$_.j.title).Trim() }, { -not [bool]$_.j.spawnedFrom.sessionId }) | Select-Object -First 1
   $cRank = if ($cloneSrc -and ([string]$cloneSrc.j.title).Trim()) { 2 } else { 1 }
-  # (never trade a source that carries its spawnedFrom link for one that doesn't)
-  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].rank -ge 1 -and $cRank -ge $recIndex[$cli].rank -and -not ($recIndex[$cli].sf -and -not $cloneSrc.j.spawnedFrom.sessionId)) {
+  # (a linkless tip record is fine: pass 2 grafts the link another record of the session carries)
+  if (-not $DryRun -and $cloneSrc -and $recIndex.ContainsKey($cli) -and $recIndex[$cli].rank -ge 1 -and $cRank -ge $recIndex[$cli].rank) {
     try { $recIndex[$cli] = @{ raw = (Get-Content -LiteralPath $cloneSrc.file.FullName -Raw); good = ($cRank -eq 2); rank = $cRank; sf = [bool]$cloneSrc.j.spawnedFrom.sessionId } }
     catch { Write-Warning "could not re-read $($cloneSrc.file.FullName) for new copies ($($_.Exception.Message)); they start from the older copy" }
   }
@@ -911,9 +917,11 @@ foreach ($acct in $accts) {
         try {
           $cj = $src.raw | ConvertFrom-Json -DateKind String
           # The source was chosen for its title; a linkless one takes the family link another record of the session carries
+          # (a link whose parent id some seat holds first, so the remap below can resolve it; startChain from the same record)
           if (-not $cj.spawnedFrom.sessionId -and $linkOf.ContainsKey($m.BaseName)) {
-            $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($linkOf[$m.BaseName].spawnedFrom | ConvertFrom-Json -DateKind String) -Force
-            if ($linkOf[$m.BaseName].startChain -and -not $cj.startChain) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($linkOf[$m.BaseName].startChain | ConvertFrom-Json -DateKind String) -Force }
+            $lk = $null; foreach ($lkc2 in $linkOf[$m.BaseName]) { if ($null -eq $lk) { $lk = $lkc2 }; if ($sidCli.ContainsKey($lkc2.to)) { $lk = $lkc2; break } }
+            $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
+            if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
           }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
           $seatSid[$m.BaseName] = [string]$cj.sessionId
