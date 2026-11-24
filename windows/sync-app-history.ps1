@@ -72,8 +72,7 @@
   chain's first session id, that its own seat holds, when that seat holds it or gets it this run; otherwise copied as is.
   A clone source with no link, or whose link names a parent id no seat holds, first takes the link another record of the
   session in this repo carries whose parent some seat holds; a source with no link takes any link when none resolves, and
-  one whose own link is dead keeps it. startChain comes from the same record; when that record has none, the source's own
-  startChain is kept only if its first session id is one some seat holds.
+  one whose own link is dead keeps it. startChain comes from the same record (none when that record has none).
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -929,7 +928,7 @@ foreach ($acct in $accts) {
             if ($lk) {
               $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
               if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
-              elseif (-not ($cj.startChain.firstSessionId -and $sidCli.ContainsKey([string]$cj.startChain.firstSessionId))) { $cj.PSObject.Properties.Remove('startChain') }   # keep the source's own chain only if it resolves
+              else { $cj.PSObject.Properties.Remove('startChain') }   # never pair the new link with the source's own chain
             }
           }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)
