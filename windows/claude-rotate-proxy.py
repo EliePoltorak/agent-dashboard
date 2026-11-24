@@ -214,10 +214,7 @@ def observed_ms(entry):
 def fable_observed_ms(entry):
     reading = entry.get("fable_cap") or entry
     data = reading.get("data", {})
-    try:
-        status = int(data.get("http") or 0)
-    except (TypeError, ValueError, OverflowError):
-        status = 0   # malformed metadata must not block the write that repairs it
+    status = http_code(data.get("http"))   # read as every other status reader here; malformed metadata reads as 0
     if data.get("ok") and (data.get("oi7_stat") or data.get("oi7_util") is not None or 200 <= status < 300):
         return observed_ms(reading)
     try:

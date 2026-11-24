@@ -1042,14 +1042,14 @@ $ProxyFreshSec   = 120
 function Get-ProxySample {
   param([string]$Label, [bool]$RejectedOnly = $false)
   $cf = Join-Path (Join-Path $Root $Label) 'usage-cache.json'
-  if (-not (Test-Path $cf)) { return $null }
   try {
-    $c = Set-CacheClaimInference (Get-Content $cf -Raw | ConvertFrom-Json)
+    $c = Read-UsageCacheFile $cf      # the shared reader: shares delete with the proxy's replace, and infers as every reader does
+    if (-not $c) { return $null }
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
     # Readers key on oi7_stat; the parsers record a Fable-claimed refusal with no 7d_oi-status as oi7_stat rejected
     # (inferred) when the response was refused (not a 2xx), and records written before they did are inferred as they are
-    # read (Set-CacheClaimInference, at the top of this try). The nested arm's own claim test adds only the claimless and served-2xx
+    # read (Read-UsageCacheFile, at the top of this try). The nested arm's own claim test adds only the claimless and served-2xx
     # shapes (tracked in #24).
     # A Fable-only proxy rejection is nested under the default reading (fable_cap), which keeps its own
     # timestamp and source, or, with no default reading to nest under, stored at the top level (below). Judge the nested reading on its own freshness (not future-dated): it is the
@@ -1154,6 +1154,9 @@ function Invoke-CheckRotateCore {
       $fk = if ($null -ne $fp) { "; fable $fp%" } else { '' }
       $wk = if ($null -ne $wp) { "; weekly $wp%" } else { '' }
       $trigger = "FABLE window REJECTED by the server (claim $($u.claim)$fk$wk; Gate C cannot run)"; $capped = 'fable'
+      # Count this observation once, as the cached-cap check below does: a fresh clock is at or after it, so that check
+      # does not fire on the same rejection again, and the ladder stays armed at its floor if this rotation cannot move.
+      $st.fableTs = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); $st.fableBase = 100; $st.nextFable = $now + $FableMinSec
     }
     # An explicit 403 (oauth_org_not_allowed / subscription disabled) is not a blip. Do not probe
     # it twice and do not go blind: rotate. A timeout or any other non-403 is still retried once.
