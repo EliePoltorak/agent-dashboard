@@ -458,8 +458,10 @@ function Get-CacheObservationMs($Cache) {
 # The newer of the record's own proxy reading and the one nested under it wins.
 function Get-LegacyFableCap($Cache) {
   $nested = $Cache.fable_cap
-  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and ($Cache.data.oi7_stat -or $null -ne $Cache.data.oi7_util)) {
-    $own = @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
+  # A proxy before the claim inference saved a Fable-claimed refusal with no oi7_stat: infer it on read too, on a copy.
+  $data = if ($Cache.data -and -not $Cache.data.oi7_stat) { $copy = $Cache.data.PSObject.Copy(); $copy | Add-Member -NotePropertyName oi7_stat -NotePropertyValue $null -Force; Set-FableClaimInference $copy } else { $Cache.data }
+  if ($data.ok -and $data.src -eq 'proxy' -and ($data.oi7_stat -or $null -ne $data.oi7_util)) {
+    $own = @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $data }
     if (-not $nested -or (Get-CacheObservationMs $nested) -le $own.observed_ms) { return $own }
   }
   return $nested

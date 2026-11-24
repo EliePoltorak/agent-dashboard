@@ -554,6 +554,13 @@ $servedOnly = Set-FableClaimInference ([pscustomobject]@{ label = 'A'; ok = $tru
 Check '... nor a served 2xx' (-not $servedOnly.oi7_stat -and -not $servedOnly.oi7_stat_inferred)
 # The probe is mocked in this suite, so pin the live parser's call to the inference directly.
 Check 'Probe-Usage applies the Fable claim inference to the reading it returns' ((Get-Command Probe-Usage).Definition -match 'Set-FableClaimInference \$reading')
+$legacyNow = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+$legacyClaim = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"seven_day_overage_included","http":429}}' | ConvertFrom-Json
+$legacyRead = Get-LegacyFableCap $legacyClaim
+Check 'a Fable-claimed refusal an older proxy saved with no oi7_stat counts as a Fable cap on read' ($legacyRead -and $legacyRead.data.oi7_stat -eq 'rejected' -and (Test-FableReadingCap $legacyRead $legacyNow))
+Check 'inferring on read leaves the cached record itself unchanged' (-not $legacyClaim.data.oi7_stat)
+$legacyOther = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"five_hour","http":429}}' | ConvertFrom-Json
+Check 'an older proxy refusal claimed by another window is not read as a Fable observation' (-not (Get-LegacyFableCap $legacyOther))
 Remove-Item -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache-fable.json') -ErrorAction SilentlyContinue
 Reset-Case
 Clear-AppIdentity
