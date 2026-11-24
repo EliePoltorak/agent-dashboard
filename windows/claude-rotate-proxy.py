@@ -24,6 +24,7 @@ import http.client
 from contextlib import contextmanager
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -120,11 +121,10 @@ def bearer(headers):
 
 
 def http_code(status):
-    """The HTTP status as an int, parsed as PowerShell's TryParse does (a numeric string counts); 0 when it is not one."""
-    try:
-        return int(str(status).strip())
-    except (TypeError, ValueError):
-        return 0
+    """The HTTP status as an int, read as PowerShell's [int]::TryParse reads its string form: ASCII digits with an optional
+    sign and surrounding whitespace count (so "429" does); anything else, None included, is 0."""
+    m = re.fullmatch(r"\s*([+-]?[0-9]+)\s*", str(status), re.ASCII)
+    return int(m.group(1)) if m else 0
 
 
 def infer_fable_claim(data, status):
@@ -694,6 +694,10 @@ def self_test():
     assert rec["oi7_stat"] == "allowed" and "oi7_stat_inferred" not in rec, "an explicit Fable status was overridden"
     rec = usage_record("A", 200, "m", sparse_fable)
     assert rec["oi7_stat"] is None and "oi7_stat_inferred" not in rec, "a served 2xx was read as a Fable rejection"
+    # The status reads as PowerShell's [int]::TryParse reads a string: a numeric string counts, anything else is 0.
+    for raw, want in ((200, 200), ("429", 429), (" +200 ", 200), (None, 0), ("200.0", 0), ("2_00", 0), ("٢٠٠", 0)):
+        assert http_code(raw) == want, (raw, http_code(raw), want)
+    assert infer_fable_claim({"status": "rejected", "claim": FABLE_CLAIM}, "200").get("oi7_stat") is None, "a served 2xx as text read as a refusal"
     assert bearer({"authorization": "Bearer abc"}) == "abc" and bearer({}) is None
     here = os.path.dirname(os.path.abspath(__file__))
     with open(os.path.join(here, "fixtures", "access-responses.json"), encoding="utf-8") as handle:
