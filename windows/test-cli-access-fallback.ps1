@@ -562,7 +562,10 @@ $legacyRead = Read-FableUsageCache $legacySeat
 Check 'a Fable-claimed refusal an older proxy saved with no oi7_stat counts as a Fable cap on read' ($legacyRead -and $legacyRead.data.oi7_stat -eq 'rejected' -and (Test-FableReadingCap $legacyRead $legacyNow))
 Check 'inferring on read leaves the cache file itself unchanged' ((Get-Content -LiteralPath (Join-Path $legacySeat 'usage-cache.json') -Raw) -eq $legacyClaimText)
 $legacyDefault = Read-UsageCacheFile (Join-Path $legacySeat 'usage-cache.json')
-Check 'an older proxy Fable refusal is not read as a separate default cap' ($legacyDefault.data.oi7_stat -eq 'rejected')
+$capSeat = Join-Path $Root 'LGCY'; New-Item -ItemType Directory -Path $capSeat -Force | Out-Null
+Set-Content -LiteralPath (Join-Path $capSeat 'usage-cache.json') -Value $legacyClaimText -NoNewline
+Check 'an older proxy Fable refusal is not read as a separate default cap' ($legacyDefault.data.oi7_stat -eq 'rejected' -and -not (Test-CapCached 'LGCY' 'default') -and (Test-CapCached 'LGCY' 'fable'))
+Remove-Item -LiteralPath $capSeat -Recurse -Force
 Set-Content -LiteralPath (Join-Path $legacySeat 'usage-cache-fable.json') -Value $legacyClaimText
 Set-Content -LiteralPath (Join-Path $legacySeat 'usage-cache.json') -Value ('{"ts":' + ($legacyNow - 120) + ',"data":{"ok":true,"src":"proxy","status":"allowed","oi7_stat":"allowed","oi7_util":"0.4"}}')
 Check 'a claim-only Fable refusal in the Fable file outranks an older allowance' (Test-FableReadingCap (Read-FableUsageCache $legacySeat) $legacyNow)

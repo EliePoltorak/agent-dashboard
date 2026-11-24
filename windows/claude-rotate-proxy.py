@@ -119,13 +119,21 @@ def bearer(headers):
     return auth[7:].strip() if auth.lower().startswith("bearer ") else None
 
 
+def http_code(status):
+    """The HTTP status as an int, parsed as PowerShell's TryParse does (a numeric string counts); 0 when it is not one."""
+    try:
+        return int(str(status).strip())
+    except (TypeError, ValueError):
+        return 0
+
+
 def infer_fable_claim(data, status):
     """The server refused (not a 2xx) naming the Fable window, but sent no 7d_oi-status: record that window as rejected
     (marked inferred), so every Fable-cap reader (ranking, fallback, the watcher) sees one Fable cap. A 2xx was served, so
     it is never read as a Fable cap this way. Also run on cached records as they are read: an older proxy saved such a
     refusal without the inference."""
     if (data.get("status") == "rejected" and not data.get("oi7_stat") and data.get("claim") == FABLE_CLAIM
-            and not (isinstance(status, int) and 200 <= status < 300)):
+            and not 200 <= http_code(status) < 300):
         data["oi7_stat"], data["oi7_stat_inferred"] = "rejected", True
     return data
 
