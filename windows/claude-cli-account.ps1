@@ -420,10 +420,18 @@ function Set-FableClaimInference($Reading) {
   $http = 0; $null = [int]::TryParse([string]$Reading.http, [ref]$http)
   if ($Reading.status -eq 'rejected' -and -not $Reading.oi7_stat -and $Reading.claim -eq 'seven_day_overage_included' -and
       -not ($http -ge 200 -and $http -lt 300)) {
-    $Reading.oi7_stat = 'rejected'
+    $Reading | Add-Member -NotePropertyName oi7_stat -NotePropertyValue 'rejected' -Force   # an older proxy's record may lack the property
     $Reading | Add-Member -NotePropertyName oi7_stat_inferred -NotePropertyValue $true -Force
   }
   $Reading
+}
+
+# A proxy before the claim inference saved a Fable-claimed refusal with no oi7_stat. Infer it once, as the record is
+# read (in memory: the file is not rewritten), so every reader (ordering, the cap checks, carry-forward) sees one Fable cap.
+function Set-CacheClaimInference($Record) {
+  if ($Record.data -is [pscustomobject] -and -not $Record.data.oi7_stat) { $null = Set-FableClaimInference $Record.data }
+  if ($Record.fable_cap.data -is [pscustomobject] -and -not $Record.fable_cap.data.oi7_stat) { $null = Set-FableClaimInference $Record.fable_cap.data }
+  $Record
 }
 
 function Read-UsageCacheFile($Path, [switch]$ForUpdate) {
@@ -438,7 +446,7 @@ function Read-UsageCacheFile($Path, [switch]$ForUpdate) {
           ($record.fable_cap -and $record.fable_cap.data -isnot [pscustomobject]))) {
         throw [IO.InvalidDataException]::new('Incomplete usage cache')
       }
-      return $record
+      return (Set-CacheClaimInference $record)
     } finally { $reader.Dispose() }
   } catch [IO.FileNotFoundException] {} catch { if ($ForUpdate) { throw } }
 }
@@ -458,10 +466,8 @@ function Get-CacheObservationMs($Cache) {
 # The newer of the record's own proxy reading and the one nested under it wins.
 function Get-LegacyFableCap($Cache) {
   $nested = $Cache.fable_cap
-  # A proxy before the claim inference saved a Fable-claimed refusal with no oi7_stat: infer it on read too, on a copy.
-  $data = if ($Cache.data -and -not $Cache.data.oi7_stat) { $copy = $Cache.data.PSObject.Copy(); $copy | Add-Member -NotePropertyName oi7_stat -NotePropertyValue $null -Force; Set-FableClaimInference $copy } else { $Cache.data }
-  if ($data.ok -and $data.src -eq 'proxy' -and ($data.oi7_stat -or $null -ne $data.oi7_util)) {
-    $own = @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $data }
+  if ($Cache.data.ok -and $Cache.data.src -eq 'proxy' -and ($Cache.data.oi7_stat -or $null -ne $Cache.data.oi7_util)) {
+    $own = @{ ts = $Cache.ts; observed_ms = (Get-CacheObservationMs $Cache); data = $Cache.data }
     if (-not $nested -or (Get-CacheObservationMs $nested) -le $own.observed_ms) { return $own }
   }
   return $nested
@@ -492,11 +498,6 @@ function Read-FableUsageCache($Seat) {
     return $legacy
   }
   if ($future) { return $null }   # nor is it returned: its reset must not count as a cap in force
-  if ($reading -and $reading.data -and -not $reading.data.oi7_stat) {   # an older proxy's Fable-claimed refusal: infer on a copy, as Get-LegacyFableCap does
-    $copy = $reading.data.PSObject.Copy(); $copy | Add-Member -NotePropertyName oi7_stat -NotePropertyValue $null -Force
-    $copy = Set-FableClaimInference $copy
-    if ($copy.oi7_stat) { return @{ ts = $reading.ts; observed_ms = (Get-CacheObservationMs $reading); data = $copy } }
-  }
   return $reading
 }
 
@@ -640,7 +641,7 @@ function Prefetch-Usage {
     foreach ($l in $Labels) { foreach ($mm in $models) { $null = Get-UsageCached $l $Refresh $mm.m $mm.s $false $HonorAccessCooldown } }
     return
   }
-  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Set-FableClaimInference','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Write-RotateLog','Get-UsageCached' |
+  $fnText = ('Profile-TokenFile','ConvertTo-SanitizedNote','Test-SubscriptionDisabled','Get-AccessCode','Get-ErrorMessage','Get-AccessMarkerPath','Get-TokenFingerprint','Read-AccessDisabled','Write-AccessDisabled','Clear-AccessDisabled','New-AccessDisabledResult','New-ProbeUnknownResult','Set-FableClaimInference','Set-CacheClaimInference','Resolve-ProbeCatalogModel','Get-CliVersion','Probe-Usage','Read-UsageCacheFile','Get-CacheObservationMs','Get-LegacyFableCap','Get-FableObservationMs','Read-FableUsageCache','Get-UsableReset','Test-FableReadingCap','Write-UsageCacheFile','Test-CapCached','Test-FableCapCached','Write-RotateLog','Get-UsageCached' |
     ForEach-Object { "function $_ {" + (Get-Command $_ -CommandType Function).Definition + "}" }) -join "`n"
   $work = @(Get-PrefetchWork $Labels $models $HonorAccessCooldown)
   $cliVer = Get-CliVersion      # once, here: each clean runspace below would otherwise start its own `claude --version`
@@ -1043,7 +1044,7 @@ function Get-ProxySample {
   $cf = Join-Path (Join-Path $Root $Label) 'usage-cache.json'
   if (-not (Test-Path $cf)) { return $null }
   try {
-    $c = Get-Content $cf -Raw | ConvertFrom-Json
+    $c = Set-CacheClaimInference (Get-Content $cf -Raw | ConvertFrom-Json)
     $age = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds() - [int64]$c.ts
     $d = $c.data
     # Readers key on oi7_stat; the parsers record a Fable-claimed refusal with no 7d_oi-status as oi7_stat rejected

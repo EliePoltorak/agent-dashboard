@@ -555,11 +555,19 @@ Check '... nor a served 2xx' (-not $servedOnly.oi7_stat -and -not $servedOnly.oi
 # The probe is mocked in this suite, so pin the live parser's call to the inference directly.
 Check 'Probe-Usage applies the Fable claim inference to the reading it returns' ((Get-Command Probe-Usage).Definition -match 'Set-FableClaimInference \$reading')
 $legacyNow = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$legacyClaim = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"seven_day_overage_included","http":429}}' | ConvertFrom-Json
-$legacyRead = Get-LegacyFableCap $legacyClaim
+$legacySeat = Join-Path $env:TEMP ('pr22-legacy-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $legacySeat | Out-Null
+$legacyClaimText = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"seven_day_overage_included","http":429}}'
+Set-Content -LiteralPath (Join-Path $legacySeat 'usage-cache.json') -Value $legacyClaimText -NoNewline
+$legacyRead = Read-FableUsageCache $legacySeat
 Check 'a Fable-claimed refusal an older proxy saved with no oi7_stat counts as a Fable cap on read' ($legacyRead -and $legacyRead.data.oi7_stat -eq 'rejected' -and (Test-FableReadingCap $legacyRead $legacyNow))
-Check 'inferring on read leaves the cached record itself unchanged' (-not $legacyClaim.data.oi7_stat)
-$legacyOther = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"five_hour","http":429}}' | ConvertFrom-Json
+Check 'inferring on read leaves the cache file itself unchanged' ((Get-Content -LiteralPath (Join-Path $legacySeat 'usage-cache.json') -Raw) -eq $legacyClaimText)
+$legacyDefault = Read-UsageCacheFile (Join-Path $legacySeat 'usage-cache.json')
+Check 'an older proxy Fable refusal is not read as a separate default cap' ($legacyDefault.data.oi7_stat -eq 'rejected')
+Set-Content -LiteralPath (Join-Path $legacySeat 'usage-cache-fable.json') -Value $legacyClaimText
+Set-Content -LiteralPath (Join-Path $legacySeat 'usage-cache.json') -Value ('{"ts":' + ($legacyNow - 120) + ',"data":{"ok":true,"src":"proxy","status":"allowed","oi7_stat":"allowed","oi7_util":"0.4"}}')
+Check 'a claim-only Fable refusal in the Fable file outranks an older allowance' (Test-FableReadingCap (Read-FableUsageCache $legacySeat) $legacyNow)
+Remove-Item -LiteralPath $legacySeat -Recurse -Force
+$legacyOther = Set-CacheClaimInference ('{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"five_hour","http":429}}' | ConvertFrom-Json)
 Check 'an older proxy refusal claimed by another window is not read as a Fable observation' (-not (Get-LegacyFableCap $legacyOther))
 $utilSeat = Join-Path $env:TEMP ('pr22-legacy-util-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Path $utilSeat | Out-Null
 $utilRec = '{"ts":' + ($legacyNow - 60) + ',"data":{"ok":true,"src":"proxy","status":"rejected","claim":"seven_day_overage_included","http":429,"oi7_util":"1.0"}}'

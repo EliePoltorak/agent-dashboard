@@ -119,17 +119,23 @@ def bearer(headers):
     return auth[7:].strip() if auth.lower().startswith("bearer ") else None
 
 
+def infer_fable_claim(data, status):
+    """The server refused (not a 2xx) naming the Fable window, but sent no 7d_oi-status: record that window as rejected
+    (marked inferred), so every Fable-cap reader (ranking, fallback, the watcher) sees one Fable cap. A 2xx was served, so
+    it is never read as a Fable cap this way. Also run on cached records as they are read: an older proxy saved such a
+    refusal without the inference."""
+    if (data.get("status") == "rejected" and not data.get("oi7_stat") and data.get("claim") == FABLE_CLAIM
+            and not (isinstance(status, int) and 200 <= status < 300)):
+        data["oi7_stat"], data["oi7_stat_inferred"] = "rejected", True
+    return data
+
+
 def usage_record(label, status, model, headers):
     """The usage-cache 'data' object for one response, or None when it carried no usage."""
     data = {"label": label, "ok": True, "http": status, "model": model, "note": "", "src": "proxy"}
     for key, h in FIELDS.items():
         data[key] = headers.get(h)
-    if (data["status"] == "rejected" and not data["oi7_stat"] and data["claim"] == FABLE_CLAIM
-            and not (isinstance(status, int) and 200 <= status < 300)):
-        # The server refused (not a 2xx) naming the Fable window, but sent no 7d_oi-status: record that window as
-        # rejected (marked inferred), so every Fable-cap reader (ranking, fallback, the watcher) sees one Fable cap.
-        # A 2xx was served, so it is never read as a Fable cap this way.
-        data["oi7_stat"], data["oi7_stat_inferred"] = "rejected", True
+    infer_fable_claim(data, status)
     # A rejection is worth recording even with no utilisation numbers: it is what a --now check
     # must see (Grok review 2026-10-30).
     rejected = any(data[k] == "rejected" for k in ("status", "s5_stat", "w7_stat", "oi7_stat"))
@@ -177,6 +183,9 @@ def read_cache_for_update(path):
             if isinstance(entry, dict) and isinstance(entry.get("data"), dict):
                 extra = entry.get("fable_cap")
                 if not extra or (isinstance(extra, dict) and isinstance(extra.get("data"), dict)):
+                    for rec in (entry, extra or {}):   # an older proxy's Fable-claimed refusal: infer as it is read
+                        if isinstance(rec.get("data"), dict):
+                            infer_fable_claim(rec["data"], rec["data"].get("http"))
                     return entry
         except FileNotFoundError:
             return {}
@@ -705,6 +714,12 @@ def cache_self_test():
         fable = os.path.join(ROOT, "S", "usage-cache-fable.json")
         default = os.path.join(ROOT, "S", "usage-cache.json")
         load = lambda path: json.load(open(path, encoding="utf-8"))
+        legacy = {"ts": 1, "observed_ms": 1000, "data": {"ok": True, "src": "proxy", "http": 429, "status": "rejected", "claim": FABLE_CLAIM}}
+        with open(default, "w", encoding="utf-8") as f:
+            json.dump(legacy, f)
+        carried = default_fable_observation(read_cache_for_update(default))
+        assert carried and carried["data"]["oi7_stat"] == "rejected", "an older proxy's Fable-claimed refusal was not carried forward"
+        os.remove(default)
         with open(fable, "w", encoding="utf-8") as f:
             json.dump({"ts": 1, "data": {"ok": True, "http": "x", "oi7_stat": "rejected"}}, f)
         write_cache("S", {"ok": True, "http": 200, "src": "proxy", "oi7_stat": "allowed"})
