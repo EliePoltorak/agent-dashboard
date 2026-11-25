@@ -90,13 +90,13 @@
   better title can be derived.
 
   USAGE
-    pwsh -File sync-app-history.ps1                 # sync C:\Dev\hameishiv (copy recent 7d + substantive; archive older)
+    pwsh -File sync-app-history.ps1                 # sync the workspace in ~/.claude/history-sync-workspace.txt
     pwsh -File sync-app-history.ps1 -DryRun         # report what WOULD change (incl., with the app closed, how many sessions it would archive)
     pwsh -File sync-app-history.ps1 -MaxAgeDays 14  # widen/narrow the window (0 = copy all ages, never auto-archive); it is also the archive age:
                                                     # a smaller value archives the sessions older than it on every seat; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
     pwsh -File sync-app-history.ps1 -KeepResumable  # also keep interrupted / died-pre-merge runs
     pwsh -File sync-app-history.ps1 -MinAssistant 10
-    pwsh -File sync-app-history.ps1 -Cwd 'C:\Dev\other'
+    pwsh -File sync-app-history.ps1 -Cwd 'C:\path\to\project'
     -NoPrune is still accepted and does nothing (records are never removed now)
     pwsh -File sync-app-history.ps1 -Quiet          # for the launcher hook / scheduled task
     pwsh -File sync-app-history.ps1 -AssumeAppRunning   # testing: act as if the app were open (flags not synced)
@@ -123,7 +123,7 @@
 #>
 [CmdletBinding()]
 param(
-  [string]$Cwd = 'C:\Dev\hameishiv',
+  [string]$Cwd,
   [int]$MinAssistant = 6,
   [int]$MaxAgeDays = 7,       # copy only sessions newer than this; archive older ones (0 = no age limit, no auto-archive). A smaller value archives the sessions older than it; later runs with the default do not un-archive them (unless its transcript is written again: then it is revived)
   [switch]$KeepResumable,     # also keep interrupted / died-pre-merge runs (off by default: recent+substantive only)
@@ -134,18 +134,88 @@ param(
   [switch]$AssumeAppClosed    # for the test: skip the app-running check (the test's sandbox index); -AssumeAppRunning wins if both are given
 )
 $ErrorActionPreference = 'Stop'
+# Keep configuration and lock setup at Idle too, even when invoked in the caller's shell.
+$selfProc = Get-Process -Id $PID
+$prevPriority = $selfProc.PriorityClass
+$runLock = $null
+try { $selfProc.PriorityClass = 'Idle' } catch { }
+try {
+
+if (-not $PSBoundParameters.ContainsKey('Cwd')) {
+  $workspaceFile = Join-Path $env:USERPROFILE '.claude\history-sync-workspace.txt'
+  if (Test-Path -LiteralPath $workspaceFile -PathType Leaf) {
+    try {
+      $utf8 = [Text.UTF8Encoding]::new($false, $true)
+      $Cwd = $utf8.GetString([IO.File]::ReadAllBytes($workspaceFile)).TrimStart([char]0xFEFF).TrimEnd([char[]](13, 10))
+    } catch [Text.DecoderFallbackException] {
+      throw 'Save ~/.claude/history-sync-workspace.txt as UTF-8.'
+    }
+  } else {
+    throw 'No history sync workspace is configured. Save its absolute path in ~/.claude/history-sync-workspace.txt (README-claude-rotator.md, "Desktop app session history") or pass -Cwd.'
+  }
+}
+# Check syntax without touching the workspace. An offline share can still have local transcripts.
+$inputPath = [string]$Cwd
+$verbatim = $inputPath.StartsWith('\\?\', [StringComparison]::Ordinal)
+$path = if ($verbatim) { $inputPath } else { $inputPath.Replace('/', '\') }
+$device = $path -match '^\\\\[?.]\\'
+$extendedUnc = $path -match '^\\\\[?.]\\UNC(?:\\|$)'
+$unc = $extendedUnc -or (-not $device -and $path.StartsWith('\\', [StringComparison]::Ordinal))
+$pathNames = if ($extendedUnc) {
+  $path -replace '^\\\\[?.]\\UNC(?:\\|$)', '\\'
+} else {
+  $path -replace '^\\\\[?.]\\', '' -replace '^[A-Z]:(?=\\)', ''
+}
+$uncRoot = if ($unc) { [regex]::Match($pathNames, '^\\\\[^\\]*[^\\ ]\\(?!\.{1,2}(?:\\|$))[^\\]+').Value }
+$directoryNames = if ($unc) { $pathNames -replace '^\\\\[^\\]+\\', '' } else { $pathNames }
+if ([string]::IsNullOrWhiteSpace($Cwd) -or -not [IO.Path]::IsPathFullyQualified($path) -or
+    ($unc -and -not $uncRoot) -or
+    # \\server\pipe\..., \\server\mailslot\... and \\server\IPC$\... are never a file share
+    # (Windows drops trailing dots and spaces).
+    ($unc -and $uncRoot -match '^\\\\[^\\]+\\(?:pipe|mailslot|IPC\$)[. ]*$') -or
+    # A device path must name a drive or a UNC share (not \\.\pipe\..., a volume GUID or another device).
+    ($device -and -not $extendedUnc -and $path -notmatch '^\\\\[?.]\\[A-Z]:\\') -or
+    (-not $verbatim -and $directoryNames -match '(^|\\)(?!\.{1,2}(?:\\|$))[^\\]*[. ](?:\\|$)') -or
+    ($path.StartsWith('\\?\', [StringComparison]::Ordinal) -and $inputPath.Contains('/')) -or
+    ($verbatim -and ($inputPath.Substring(3).Contains('\\') -or $directoryNames -match '(^|\\)\.{1,2}(?:\\|$)')) -or
+    (-not $verbatim -and -not $unc -and $directoryNames -match '(^|\\)NUL(?:\\|$)') -or
+    -not $pathNames -or $pathNames -match '[\x00-\x1F"<>|:*?]') {
+  throw 'Use a valid absolute Windows workspace path with -Cwd or in ~/.claude/history-sync-workspace.txt. Check for quotes, trailing spaces or unsupported characters.'
+}
+$root = if ($unc) {
+  # Keep the original prefix spelling and use the same share boundary as validation.
+  $path.Substring(0, $path.Length - $pathNames.Length + $uncRoot.Length)
+} else {
+  [IO.Path]::GetPathRoot($path)
+}
+$components = [Collections.Generic.List[string]]::new()
+foreach ($component in ($path.Substring($root.Length) -split '\\')) {
+  if ([string]::Equals($component, '..', [StringComparison]::Ordinal)) {
+    if ($components.Count) { $components.RemoveAt($components.Count - 1) }
+  } elseif ($component -and -not [string]::Equals($component, '.', [StringComparison]::Ordinal)) {
+    $components.Add($component)
+  }
+}
+$Cwd = [IO.Path]::Combine($root, ($components -join '\'))
+# Share roots with a final separator already have a distinct transcript key.
+if ($unc -and -not $components.Count -and $path.EndsWith('\', [StringComparison]::Ordinal)) {
+  $Cwd = $Cwd.TrimEnd('\') + '\'
+}
 
 $ccs = Join-Path $env:APPDATA 'Claude\claude-code-sessions'
 if (-not (Test-Path -LiteralPath $ccs)) { throw "App session index not found: $ccs (is the desktop app installed?)" }
 
 
 $cwdJson = $Cwd -replace '\\', '\\'
+# A record belongs to this workspace when its cwd is a string equal to -Cwd ignoring case only. Not -eq: that
+# compares by culture, so 'é' and 'e' + combining accent match although they are two NTFS directories.
+function Test-IsWorkspace($recCwd) { $recCwd -is [string] -and [string]::Equals($recCwd, $Cwd, [StringComparison]::OrdinalIgnoreCase) }
 # One run at a time: two runs share temp-file names and the flag baseline. Held until the script ends.
 $lockDir = Join-Path $env:USERPROFILE '.claude-app-seats'
 $null = New-Item -ItemType Directory -Path $lockDir -Force
 # Interactive runs (a seat switch, claude-sync-history) wait up to 3 min for a run already in progress, so the
 # user isn't told to reopen the app while it is still writing; -Quiet (the scheduled task) skips at once.
-$runLock = $null; $lockUntil = [DateTime]::UtcNow.AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
+$lockUntil = [DateTime]::UtcNow.AddMinutes($(if ($Quiet) { 0 } else { 3 })); $lockSaid = $false
 while (-not $runLock) {
   try { $runLock = [IO.File]::Open((Join-Path $lockDir '.sync-history.lock'), 'OpenOrCreate', 'ReadWrite', 'None') }
   catch [IO.IOException] {
@@ -155,12 +225,7 @@ while (-not $runLock) {
     Start-Sleep -Seconds 2
   }
 }
-# Run at Idle CPU priority so a long scan yields to anything else; the rotator runs this in its own process,
-# so the caller's priority is put back when the run ends.
-$selfProc = Get-Process -Id $PID; $prevPriority = $selfProc.PriorityClass
-try { $selfProc.PriorityClass = 'Idle' } catch { }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'   # after the lock; local time, so the repeated hour at a DST fall-back can reuse a name
-try {
 # transcripts are listed after the lock, so a run that waited sees what was written meanwhile
 # The CLI's project-folder name: every character other than A-Z, a-z, 0-9 becomes '-' (case-sensitive match, as
 # the CLI's regex is); a name over 200 characters is cut to 200 plus '-' and a hash, so look that one up by prefix.
@@ -172,7 +237,7 @@ if ($enc.Length -gt 200) {
   # more than one the run cannot tell them apart and stops. Case-insensitive, as the filesystem is.
   $cand = @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($enc.Substring(0, 200) + '-', [StringComparison]::OrdinalIgnoreCase) })
   if ($cand.Count -eq 1) { $projDir = $cand[0].FullName }
-  elseif ($cand.Count -gt 1) { if (-not $Quiet) { "no transcripts for ${Cwd}: $($cand.Count) project folders share its 200-character prefix; can't tell which is this one" }; return }
+  elseif ($cand.Count -gt 1) { if (-not $Quiet) { "no transcripts for $($Cwd): $($cand.Count) project folders share its 200-character prefix; can't tell which is this one" }; return }
 }
 $byName = [ordered]@{}   # basename -> its transcript: one per session id, so every lookup keyed by id sees one file
 if (Test-Path -LiteralPath $projDir) { foreach ($f in @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')) { $byName[$f.BaseName] = $f } }
@@ -438,12 +503,14 @@ $linkOf    = @{}   # cliSessionId -> list of @{ to = parent id; sf; sc } from ev
 # A record of this repo: made in -Cwd itself, or in one of its app worktrees (their cwd differs, originCwd stays the repo).
 # A clone source: a session whose transcript is in the repo folder clones only from cwd = -Cwd records, as before; a
 # worktree-only session (transcript only in a worktree folder) clones only from a worktree-cwd record (a repo-cwd copy would
-# look for its transcript in the repo folder). The workspace vote, auto-archive and pass 1.5 still use cwd -eq $Cwd, and
+# look for its transcript in the repo folder). The workspace vote, auto-archive and pass 1.5 still count only cwd = -Cwd records (Test-IsWorkspace), and
 # pass 1.5 leaves worktree-only sessions alone (worktree records in pass 1.5: issue #31).
-function Test-OfRepo($j) { $j.cwd -eq $Cwd -or $j.originCwd -eq $Cwd }
-function Test-CloneSrc($j) { if ($wtCli.Contains([string]$j.cliSessionId)) { $j.cwd -ne $Cwd -and $j.originCwd -eq $Cwd } else { $j.cwd -eq $Cwd } }
+function Test-OfRepo($j) { (Test-IsWorkspace $j.cwd) -or (Test-IsWorkspace $j.originCwd) }
+function Test-CloneSrc($j) { if ($wtCli.Contains([string]$j.cliSessionId)) { $j.cwd -is [string] -and -not (Test-IsWorkspace $j.cwd) -and (Test-IsWorkspace $j.originCwd) } else { Test-IsWorkspace $j.cwd } }
 $hasRec = New-Object 'System.Collections.Generic.HashSet[string]'   # cliSessionIds with any record of this repo on some seat
 $bucketRecs = @{}  # "acct|sub" -> list of @{ file; j }
+$unreadableRecs = 0   # records skipped below because they could not be read or parsed
+$cwdSpelling = @{}    # sub and "acct|sub" -> the app's own spelling of this workspace (the match below ignores case)
 foreach ($acct in $accts) {
   $subCounts[$acct.Name] = @{}
   foreach ($sub in @(Get-ChildItem -LiteralPath $acct.FullName -Directory)) {
@@ -451,8 +518,8 @@ foreach ($acct in $accts) {
     $list = New-Object System.Collections.Generic.List[object]
     foreach ($f in Get-ChildItem -LiteralPath $sub.FullName -File -Filter '*.json') {
       $rawRec = $null; $j = $null
-      try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { continue }
-      if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
+      try { $rawRec = Get-Content -LiteralPath $f.FullName -Raw; $j = $rawRec | ConvertFrom-Json -DateKind String } catch { $unreadableRecs++; continue }
+      if ($null -eq $j -or $j -isnot [System.Management.Automation.PSCustomObject]) { $unreadableRecs++; continue }   # empty or "null" (e.g. truncated): unreadable, like a parse error
       $list.Add(@{ file = $f; j = $j })
       if ($j.cliSessionId -and (Test-OfRepo $j)) {
         [void]$hasRec.Add([string]$j.cliSessionId)
@@ -462,7 +529,11 @@ foreach ($acct in $accts) {
           $linkOf[$lkc].Add(@{ to = [string]$j.spawnedFrom.sessionId; sf = ($j.spawnedFrom | ConvertTo-Json -Compress -Depth 20); sc = $(if ($j.startChain) { $j.startChain | ConvertTo-Json -Compress -Depth 20 } else { $null }) })
         }
       }
-      if ($j.cwd -eq $Cwd) { $cnt++ }
+      if (Test-IsWorkspace $j.cwd) {
+        $cnt++
+        if (-not $cwdSpelling.ContainsKey($sub.Name)) { $cwdSpelling[$sub.Name] = $j.cwd }
+        if (-not $cwdSpelling.ContainsKey("$($acct.Name)|$($sub.Name)")) { $cwdSpelling["$($acct.Name)|$($sub.Name)"] = $j.cwd }
+      }
       if (Test-CloneSrc $j) {
         $cli = [string]$j.cliSessionId
         if ($cli) {
@@ -480,6 +551,20 @@ foreach ($acct in $accts) {
   }
 }
 $wsGuid = ($guidVotes.GetEnumerator() | Sort-Object -Property Value -Descending | Select-Object -First 1).Key
+# New records carry the app's spelling of the workspace, not the setting's (which may differ in case): the
+# destination folder's own spelling when it has one (pass 2), else this shared one.
+if ($wsGuid) { $cwdJson = $cwdSpelling[$wsGuid] -replace '\\', '\\' }
+$sharedCwdJson = $cwdJson
+# Without an app record for this exact workspace there is no workspace ID to file new records under,
+# so pass 2 adds no record on any seat (flag sync below still runs). Say so, rather than reporting a plain zero.
+if (-not $wsGuid -and -not $Quiet) {
+  if ($unreadableRecs) {
+    # A locked or half-written record may be the one that matches, so don't blame the path alone.
+    "no readable app record on any seat has workspace $($Cwd) ($unreadableRecs record(s) could not be read): retry after the desktop app closes; if it still says this, save one session for it in the desktop app, or check the path matches the app's spelling"
+  } else {
+    "no app record on any seat has workspace $($Cwd): save one session for it in the desktop app, or check the path matches the app's spelling"
+  }
+}
 
 # ---- pass 1.4: archive and pin flags follow you across seats -------------------
 # isArchived and isStarred (the record's pin flag) live in each seat's own record, with no time of change.
@@ -635,7 +720,7 @@ if (-not $flagSkip) {
       $autoUserOff = $flag -eq 'isArchived' -and ($userOffChange -or [bool]($rs | Where-Object { $_.j.autoArchiveExempt -eq $true }))
       # in scope: a session of -Cwd whose transcript is here, with auto-archive on and no flag state in doubt
       # (a worktree-only transcript does not bring a session into scope: on main it had no transcript here)
-      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and -not $wtCli.Contains($cli) -and @($rs | Where-Object { $_.j.cwd -eq $Cwd }).Count
+      $inScope = $flag -eq 'isArchived' -and $MaxAgeDays -gt 0 -and -not $flagFail -and $allT.Contains($cli) -and -not $wtCli.Contains($cli) -and @($rs | Where-Object { Test-IsWorkspace $_.j.cwd }).Count
       # An un-archive seen this run is remembered at ANY age, and in ANY run (also with -MaxAgeDays 0, another -Cwd, or no
       # transcript here: the baseline is saved for it either way, so a later run could not see it as a change), or the
       # session would be archived once it grows old. (A plain-date entry the user un-archived becomes a kept entry.)
@@ -740,7 +825,7 @@ $byCli = @{}
 foreach ($kv in $bucketRecs.GetEnumerator()) {
   foreach ($r in $kv.Value) {
     $cli = [string]$r.j.cliSessionId
-    if ($r.j.cwd -eq $Cwd -and $cli -and $r.j.lastAssistantUuid -and -not $wtCli.Contains($cli)) {
+    if ((Test-IsWorkspace $r.j.cwd) -and $cli -and $r.j.lastAssistantUuid -and -not $wtCli.Contains($cli)) {
       if (-not $byCli.ContainsKey($cli)) { $byCli[$cli] = New-Object System.Collections.Generic.List[object] }
       $byCli[$cli].Add($r)
     }
@@ -871,6 +956,8 @@ foreach ($acct in $accts) {
     }
   }
   $bestSub = Join-Path $acct.FullName $bestSubName
+  $destSpelling = $cwdSpelling["$($acct.Name)|$bestSubName"]
+  $cwdJson = if ($destSpelling) { $destSpelling -replace '\\', '\\' } else { $sharedCwdJson }   # read by Write-Record
 
   # Retitle datestamp-titled records; index what's present.
   # Walks EVERY sub of the account, not just the primary one (records for this cwd can sit in a secondary
@@ -940,6 +1027,13 @@ foreach ($acct in $accts) {
             $lo = $lk[0]; $lpn = $lk[1]; if ($null -eq $lo) { continue }
             $lv = [string]$lo.$lpn; $lc2 = if ($lv) { $sidCli[$lv] } else { $null }
             if ($lc2 -and $seatSid.ContainsKey($lc2) -and $seatSid[$lc2] -ne $lv) { $lo.$lpn = $seatSid[$lc2] }
+          }
+          # the destination folder's spelling of the workspace (else the shared one), not the source seat's: cwd only when it is the
+          # workspace itself (a worktree copy keeps its worktree folder, where its transcript is), originCwd whenever it names the workspace
+          $cloneSpelling = if ($destSpelling) { $destSpelling } else { $cwdSpelling[$wsGuid] }
+          if ($cloneSpelling) {
+            if (Test-IsWorkspace $cj.originCwd) { $cj.originCwd = $cloneSpelling }
+            if (Test-IsWorkspace $cj.cwd) { $cj.cwd = $cloneSpelling }
           }
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
@@ -1065,4 +1159,7 @@ if (-not $Quiet) {
   if ($wtSkip.Count) { "$($wtSkip.Count) worktree session(s) not carried: no well-titled worktree record on any seat to copy from" }
   if ($DryRun) { "(dry run -- nothing changed. Re-run without -DryRun to apply.)" }
 }
-} finally { $runLock.Dispose(); try { $selfProc.PriorityClass = $prevPriority } catch { } }
+} finally {
+  try { if ($runLock) { $runLock.Dispose() } }
+  finally { try { $selfProc.PriorityClass = $prevPriority } catch { } }
+}
