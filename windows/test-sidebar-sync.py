@@ -182,9 +182,14 @@ def test_ldb(tmp):
     lp = os.path.join(d, '000003.log')
     open(lp, 'ab').write(b'\x01\x02\x03')    # torn tail
     check('writer refuses a torn tail and writes nothing', raises(lambda: L.append_batch(d, [(b'k', b'v')]), L.LdbError) and open(lp, 'rb').read().endswith(b'\x01\x02\x03'))
-    d = os.path.join(tmp, 'db7')
-    make_db(d, logs={5: [batch(1, [(b'a', b'1')])]}, log_number=3)      # the one log is newer than the manifest's current log
-    check('writer refuses when the recovery log is not the manifest\'s current log', raises(lambda: L.append_batch(d, [(b'k', b'v')]), L.LdbError))
+    d = os.path.join(tmp, 'db7')            # Chromium's reuse_logs: the one replayed log may be NEWER than the manifest's log number (even 0)
+    make_db(d, logs={5: [batch(1, [(b'a', b'1')])]}, log_number=0, last_seq=1)
+    L.append_batch(d, [(b'k', b'v')])
+    check('writer accepts the single recovery log when it is newer than the manifest log number (reuse_logs)', L.read_db(d) == {b'a': b'1', b'k': b'v'})
+    d = os.path.join(tmp, 'db7b')           # an obsolete older log beside the one recovery log is not a second recovery log
+    make_db(d, logs={2: [batch(1, [(b'old', b'x')])], 5: [batch(2, [(b'a', b'1')])]}, log_number=5, last_seq=2)
+    L.append_batch(d, [(b'k', b'v')])
+    check('writer: an obsolete older log is neither read nor appended to', L.read_db(d) == {b'a': b'1', b'k': b'v'} and open(os.path.join(d, '000002.log'), 'rb').read() == frame([batch(1, [(b'old', b'x')])]))
     d = os.path.join(tmp, 'db8')
     make_db(d, logs={3: []}, log_number=9)                                # no recovery log at all
     check('writer refuses with no recovery log', raises(lambda: L.append_batch(d, [(b'k', b'v')]), L.LdbError))
@@ -350,7 +355,7 @@ def test_logic(tmp):
     w.set_pins('C', ['local_c1'])
     w.checkpoint('C', b)
     g = w.stage('C', 'D')
-    check('departure pin reaches the target (staged, both stores agree)', g.rc == 0 and g.staged and g.pins() == ['local_d1'] and g.result['status'] == 'synced' and g.result['n'] == 1 and 'Sidebar: synced 1 pin.' in g.out, g.out + str(g.result))
+    check('departure pin reaches the target (staged, both stores agree)', g.rc == 0 and g.staged and g.pins() == ['local_d1'] and g.result['status'] == 'synced' and g.result['n'] == 1 and 'Sidebar: synced 1 pins.' in g.out, g.out + str(g.result))
     check('stage: state publishes the pin, baseline carries the gen and the new list', g.f('state.json')['pins'] == {'cli1': True} and g.f('baseline.json')['pins'] == ['local_d1'] and g.f('baseline.json')['gen'] == 'g1')
     check('stage: the stash is untouched (byte for byte)', seat_pins(w, 'D') == [])
     check('stage: consumed lists the checkpoint with its hash', g.f('consumed.txt').split('\t')[0] == 'C')

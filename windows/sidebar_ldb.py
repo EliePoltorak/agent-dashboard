@@ -388,7 +388,7 @@ def read_db(d):
 
 def append_batch(d, puts):
     """Append ONE write batch of `puts` [(key, value)] to the only recovery log of leveldb directory `d` (a staging copy) and return its
-    sequence number. Refuses (LdbError, nothing written) unless exactly one recovery log exists, it is the manifest's current log, and it has
+    sequence number. Refuses (LdbError, nothing written) unless exactly one recovery log exists (the only log leveldb replays) and it has
     no torn tail. Sequence = max(manifest last sequence, highest live entry) + 1; one write, fsync, then CRCs and the keys are re-read."""
     if not puts:
         raise LdbError('nothing to write')
@@ -397,8 +397,10 @@ def append_batch(d, puts):
     if len(snap.logs) != 1:
         raise LdbError('expected exactly one recovery log, found %d' % len(snap.logs))
     n, path = snap.logs[0]
-    if n != mf.log_number or mf.prev_log_number not in (0, n):
-        raise LdbError('the recovery log is not the manifest\'s current log')
+    # Chromium opens its databases with reuse_logs, so the single log leveldb replays can be NEWER than the manifest's log number (a database that
+    # has not rotated its log since it was created has log number 0 and one log). What matters is that it is the only log leveldb replays.
+    if mf.prev_log_number not in (0, n):
+        raise LdbError('the manifest names a previous log that is not the recovery log')
     if not snap.clean:
         raise LdbError('the recovery log has a torn tail')
     seq = max(mf.last_sequence, snap.max_seq) + 1

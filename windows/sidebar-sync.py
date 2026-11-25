@@ -304,9 +304,9 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
                         new = [x for x in new if x != r.sid]
                         plan.removes.append((r.sid, r.title))
         else:
-            plan.unknown += 1                                        # unknown: the target keeps its own value; a pin is recorded as observed intent (S65)
-            if {r.sid for r in copies} & curset:
+            if {r.sid for r in copies} & curset:                     # unknown: the target keeps its own value; a pin is recorded as observed intent (S65)
                 pins[cli] = True
+                plan.unknown += 1
     plan.no_copy = sum(1 for cli, want in pins.items() if want and cli not in tview.by_cli)
     plan.old_list, plan.new_list = cur, new
     plan.state = {'version': STATE_VERSION, 'gen': gen, 'pins': pins}
@@ -425,7 +425,7 @@ def report_text(plan, target, leaving, dry=False):
         out.append('pin changes for %s: %d add, %d remove' % (target, len(plan.adds), len(plan.removes)))
         out += _title_lines('pin', plan.adds) + _title_lines('unpin', plan.removes)
         out.append('no copy on %s (pinned at the seat\'s next activation): %d' % (target, plan.no_copy))
-        out.append('unknown (kept as %s has them, recorded): %d' % (target, plan.unknown))
+        out.append('pinned on %s, unknown elsewhere (kept, recorded): %d' % (target, plan.unknown))
     for s in plan.skips:
         out.append('skipped: ' + s)
     for s in plan.not_synced:
@@ -536,7 +536,7 @@ def run_stage(a):
 
 def summary_line(res, report):
     if res['status'] == 'synced':
-        return 'Sidebar: synced %d pin%s.' % (res['n'], '' if res['n'] == 1 else 's')
+        return 'Sidebar: synced %d pins.' % res['n']
     if res['status'] == 'nothing':
         return 'Sidebar: nothing to sync.'
     return 'Sidebar: skipped (%s) - see %s' % (res['reason'], report)
@@ -714,6 +714,50 @@ def run_forget(a):
     return 0
 
 
+# ---- journey helpers (test-sidebar-sync-journey.ps1; read-only) --------------------------------------------------------------------
+
+def run_journey(a):
+    """--journey pick --leaving C --target D: JSON {pick, nocopy}: a session with a copy on both seats, unpinned on both (pick), and one pinned on
+    the leaving seat with no copy on the target (nocopy). --journey stores --target SEAT --cli CLI: JSON, per pin store of the LIVE app (read from a
+    snapshot copy), whether that session is pinned there."""
+    seats = list_seats(a.seats)
+    tmp = tempfile.mkdtemp(prefix='sidebar-journey-')
+    try:
+        if a.journey == 'pick':
+            def seat_view(s, live):
+                v = read_view(a.app, seats[s])
+                ls, idb = snapshot_live(a.app, tmp) if live else seat_dirs(os.path.join(a.seats, s))
+                return v, read_pins(ls, idb)
+            lv, lp = seat_view(a.leaving, True)
+            tv, tp = seat_view(a.target, False)
+            out = {'pick': None, 'nocopy': None}
+            if lp.ok and tp.ok:
+                lset, tset = set(lp.pins), set(tp.pins)
+                for cli, copies in sorted(lv.by_cli.items(), key=lambda kv: -max(r.last for r in kv[1])):
+                    pinned_l = bool(lv.sids(cli) & lset)
+                    if cli in tv.by_cli and not pinned_l and not (tv.sids(cli) & tset) and out['pick'] is None:
+                        out['pick'] = {'cli': cli, 'title': copies[0].title}
+                    if cli not in tv.by_cli and pinned_l and out['nocopy'] is None:
+                        out['nocopy'] = {'cli': cli, 'title': copies[0].title}
+            print(json.dumps(out))
+            return 0
+        seat = next((s for s, u in seats.items() if u == live_account(a.app)), '')
+        v = read_view(a.app, seats[seat]) if seat else View({})
+        ls, idb = snapshot_live(a.app, tmp)
+        sids = v.sids(a.cli)
+        res = {'seat': seat}
+        for name, fn in (('Local Storage', lambda: read_ls_pins(ls)[0]['value']), ('IndexedDB', lambda: read_idb_pins(idb)[0]['state']['starredIds']),
+                         ('config', lambda: jread(os.path.join(a.app, 'claude_desktop_config.json'))['preferences']['epitaxyPrefs'][CFG_PIN])):
+            try:
+                res[name] = bool(sids & set(fn()))
+            except (L.LdbError, OSError, ValueError, KeyError, TypeError):
+                res[name] = None
+        print(json.dumps(res))
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 # ---- main -------------------------------------------------------------------------------------------------------------------------
 
 def main(argv=None):
@@ -723,6 +767,7 @@ def main(argv=None):
     g.add_argument('--verify', action='store_true')
     g.add_argument('--dry-run', action='store_true')
     g.add_argument('--forget', metavar='SEAT')
+    g.add_argument('--journey', choices=('pick', 'stores'), help='read-only helpers for test-sidebar-sync-journey.ps1')
     p.add_argument('--leaving', default='')
     p.add_argument('--target', default='')
     p.add_argument('--gen', default='')
@@ -731,6 +776,7 @@ def main(argv=None):
     p.add_argument('--app', help='app data folder (default %%APPDATA%%\\Claude)')
     p.add_argument('--settle', type=int, default=75, help='verify: seconds after the app starts')
     p.add_argument('--wait', type=int, default=1800, help='verify: seconds to wait for the app to start')
+    p.add_argument('--cli', default='')
     p.add_argument('--leaving-stash', action='store_true', help='dry run: read the leaving seat from its stash, not a live snapshot')
     a = p.parse_args(argv)
     for st in (sys.stdout, sys.stderr):
@@ -755,6 +801,8 @@ def main(argv=None):
             return run_verify(a)
         if a.dry_run:
             return run_dry(a)
+        if a.journey:
+            return run_journey(a)
         return run_forget(a)
     except Exception as e:  # shortcut: the rotator treats any nonzero exit as "ran without a result"; the cause goes to stderr
         sys.stderr.write('sidebar-sync: %s: %s\n' % (type(e).__name__, e))
