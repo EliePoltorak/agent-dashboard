@@ -47,14 +47,19 @@ function quotaWeight(a, esc) {
   return '<span class="bdg wt" role="img" title="' + esc(tip) + '" aria-label="' + esc(tip) + '">×' + esc(quotaNum(a.w)) + '</span>';
 }
 // Codex only: the measured capacity ratio (tokens per 1 % of weekly use against the weight-1 seats) as a muted line; amber when it is more than 30 % away from the weight.
+// A seat that was too quiet for the last 21 days is measured on all its samples on its current plan (r.wide, with r.from / r.to, epoch s): the line then says how old they are.
+function quotaSpan(from, to) {
+  const f = new Date(from * 1000), t = new Date(to * 1000), md = d => d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  return f.toDateString() === t.toDateString() ? md(f) : f.getMonth() === t.getMonth() && f.getFullYear() === t.getFullYear() ? md(f) + '–' + t.getDate() : md(f) + ' – ' + md(t);
+}
 function quotaMeasure(a, esc) {
   const r = a.ratio;
   if (!r) return '';
-  if (r.x == null) return '<small class="ms" title="' + esc('Needs 5 token measurements from the last 21 days; ' + r.n + ' so far') + '">measured: not enough data</small>';
+  if (r.x == null) return '<small class="ms" title="' + esc("Needs 5 token measurements on this seat's current plan; " + r.n + ' so far') + '">Measured: not enough data</small>';
   const w = a.w == null ? 1 : a.w, off = w > 0 && Math.max(r.x / w, w / r.x) > 1.3;
-  const tip = 'Tokens per 1 % of weekly use over the last 21 days (input minus cached plus output), relative to the regular seats' +
-    (off ? '. It differs from the configured weight (×' + quotaNum(w) + ') by more than 30 %: check the weight.' : '');
-  return '<small class="ms' + (off ? ' warn' : '') + '" title="' + esc(tip) + '">measured ≈ ×' + String(+r.x.toFixed(1)) + ' (' + r.n + ' samples)</small>';
+  const tip = 'Tokens per 1 % of weekly use ' + (r.wide ? "over all this seat's measurements on its current plan (too few in the last 21 days)" : 'over the last 21 days') +
+    ' (input minus cached plus output), relative to the regular seats' + (off ? '. It differs from the configured weight (×' + quotaNum(w) + ') by more than 30 %: check the weight.' : '');
+  return '<small class="ms' + (off ? ' warn' : '') + '" title="' + esc(tip) + '">Measured ≈ ×' + String(+r.x.toFixed(1)) + ' (' + r.n + ' samples' + (r.wide ? ', ' + quotaSpan(r.from, r.to) : '') + ')</small>';
 }
 // Codex only: the weight the measurements suggest (a.suggest, set by the builder when the ratio is steady and far from the weight) and a button that copies the
 // settings fragment for it. Nothing applies it.
@@ -64,8 +69,11 @@ function quotaSuggest(a, esc) {
   if (!s) return '';
   return '<small class="sg">Suggested weight ×' + quotaNum(s.w) + ' (' + s.n + ' samples) <button class="cp" data-a="copyw" data-v="' + esc(quotaFragment(a)) + '">Copy setting</button></small>';
 }
+// A provider with one login of its own keeps its history under a program-ish label ("antigravity"): the page names it by the program, or by the address when emails are shown.
+const QUOTA_OWN = { antigravity: 'Antigravity', grok: 'Grok', muse: 'Muse', kimi: 'Kimi' };
 function quotaSeat(a, emails, esc) {
-  return esc(a.label) + quotaWeight(a, esc) + (a.badges || []).map(b => quotaBadge(b, '', esc)).join('') + (emails && a.email ? '<small>' + esc(a.email) + '</small>' : '') +
+  const own = QUOTA_OWN[a.label], showMail = emails && a.email;
+  return esc(own ? (showMail ? a.email : own) : a.label) + quotaWeight(a, esc) + (a.badges || []).map(b => quotaBadge(b, '', esc)).join('') + (showMail && !own ? '<small>' + esc(a.email) + '</small>' : '') +
     (a.plan ? '<small class="pl">Plan: ' + esc(a.plan.replace(/_/g, ' ')) + '</small>' : '') + quotaMeasure(a, esc) + quotaSuggest(a, esc);
 }
 // A provider header's badges with their seat letter ("CLI D", "App B") as HTML, or '' when no seat is known to be in use.
@@ -112,9 +120,9 @@ const QUOTA_RESET_KINDS = {
 // holds); the header button only when the provider's rotator is there (p.best). Codex's header button runs the rotator's --rotate, which takes the NEXT
 // saved seat, so it is not called "Best". `busy` disables every one while an action runs.
 const QUOTA_SWITCH = {
-  claude: { cli: ['Use for CLI', 'Switch the Claude CLI to this seat'], app: ['Use for App', 'Switch the Claude desktop app to this seat'],
+  claude: { cli: ['Use for CLI', 'Switch the Claude CLI to this seat'], app: ['Use for app', 'Switch the Claude desktop app to this seat'],
     best: ['Best seat', 'Switch the Claude CLI to the seat with the most headroom'] },
-  codex: { both: ['Use for CLI + App', 'Switch Codex (CLI and app, one shared login) to this seat'],
+  codex: { both: ['Use for CLI + app', 'Switch Codex (CLI and app, one shared login) to this seat'],
     best: ['Next seat', 'Switch Codex to the next saved seat in order (it does not rank seats by headroom)'] },
 };
 // Which actions ask first: the ones that close an app. The Claude CLI switch and its Best seat run on one click.
@@ -132,6 +140,20 @@ function quotaBankedTotal(p) {
   const s = p.accounts.filter(a => a.banked != null);
   return s.length ? s.reduce((n, a) => n + a.banked, 0) : null;
 }
+// The header chip for a provider's banked resets: Claude's split by kind from the credit titles ("2 full resets · 3 Fable resets", a kind with none left out; a count the lists do
+// not account for is plain "reset"s); Codex's one total ("5 banked resets"). '' when no seat reports any.
+const QUOTA_CREDIT_ORDER = ['Full reset', 'Fable reset', 'Weekly reset', '5-hour reset'];
+function quotaBankedChip(p) {
+  const total = quotaBankedTotal(p);
+  if (total == null) return '';
+  const by = {};
+  let listed = 0;
+  if (p.id === 'claude') p.accounts.forEach(a => (a.bankedList || []).forEach(c => { const n = c.n || 1; by[c.title] = (by[c.title] || 0) + n; listed += n; }));
+  if (!listed) return total + ' banked reset' + (total === 1 ? '' : 's');
+  if (total > listed) by.Reset = (by.Reset || 0) + total - listed;
+  const rank = k => QUOTA_CREDIT_ORDER.includes(k) ? QUOTA_CREDIT_ORDER.indexOf(k) : QUOTA_CREDIT_ORDER.length;
+  return Object.keys(by).sort((x, y) => rank(x) - rank(y) || (x < y ? -1 : 1)).map(k => by[k] + ' ' + (k === 'Fable reset' ? k : k.toLowerCase()) + (by[k] === 1 ? '' : 's')).join(' · ');
+}
 // Why a provider has no pooled chart when every seat is weighted 0 (weight 0 leaves a seat out of the pool only): '' otherwise.
 const quotaNoPool = p => p.accounts.length && p.accounts.every(a => a.w === 0) ? 'No seats counted in the pool (all weights are 0).' : '';
-if (typeof module !== 'undefined') module.exports = { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn, quotaNoPool };
+if (typeof module !== 'undefined') module.exports = { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, quotaBankedChip, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn, quotaNoPool };

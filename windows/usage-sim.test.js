@@ -1,5 +1,5 @@
 const assert = require('assert');
-const { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn } = require('./usage-sim.js');
+const { quotaProject, quotaWeight, quotaMeasure, quotaFragment, quotaSuggest, quotaSeat, quotaInUse, quotaShare, quotaPointShare, quotaLevel, quotaIn, quotaBankedCell, quotaBankedTotal, quotaBankedChip, QUOTA_RESET_KINDS, QUOTA_SWITCH, quotaSwitchAsks, quotaSwitchBtn, quotaSwitchBtns, quotaBestBtn } = require('./usage-sim.js');
 const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
 
 // two seats at 50% used, far resets, 50 %/h: 100% left, drains empty after 2 h
@@ -105,9 +105,9 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
 {
   const esc = s => String(s).replace(/</g, '&lt;');
   assert.strictEqual(quotaMeasure({ label: 'A' }, esc), '');
-  assert.strictEqual(quotaMeasure({ label: 'A', ratio: { n: 3 } }, esc), '<small class="ms" title="Needs 5 token measurements from the last 21 days; 3 so far">measured: not enough data</small>');
+  assert.strictEqual(quotaMeasure({ label: 'A', ratio: { n: 3 } }, esc), `<small class="ms" title="Needs 5 token measurements on this seat's current plan; 3 so far">Measured: not enough data</small>`);
   const line = a => quotaMeasure(a, esc);
-  assert.ok(line({ w: 5, ratio: { x: 4.6, n: 12 } }).includes('>measured ≈ ×4.6 (12 samples)</small>'));
+  assert.ok(line({ w: 5, ratio: { x: 4.6, n: 12 } }).includes('>Measured ≈ ×4.6 (12 samples)</small>'));
   assert.ok(!line({ w: 5, ratio: { x: 4.6, n: 12 } }).includes('warn'));                   // 5 / 4.6 = 1.09
   assert.ok(!line({ ratio: { x: 1.29, n: 6 } }).includes('warn'));                          // weight 1: 1.29 is within 30 %
   assert.ok(line({ ratio: { x: 1.31, n: 6 } }).includes('class="ms warn"'));
@@ -117,6 +117,11 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   assert.ok(off.includes('class="ms warn"') && off.includes('differs from the configured weight (×5) by more than 30 %') && off.includes('×2.9 (14 samples)'));
   assert.ok(!line({ w: 0, ratio: { x: 3, n: 9 } }).includes('warn'));                       // weight 0: nothing to compare
   assert.ok(line({ ratio: { x: 1, n: 8 } }).includes('×1 (8 samples)'));
+  // too quiet for 21 days: the samples' age shows (same month: "Nov 1–3"; across months: "Oct 30 – Nov 2"; one day: "Nov 1"), and the tip says all samples were used
+  const at = (y, m, d) => new Date(y, m - 1, d, 12).getTime() / 1000, wide = (f, t) => line({ ratio: { x: 2.9, n: 8, wide: true, from: f, to: t } });
+  assert.ok(wide(at(2026, 11, 1), at(2026, 11, 3)).includes('>Measured ≈ ×2.9 (8 samples, Nov 1–3)</small>') && wide(at(2026, 11, 1), at(2026, 11, 3)).includes('over all this seat'));
+  assert.ok(wide(at(2026, 10, 30), at(2026, 11, 2)).includes('(8 samples, Oct 30 – Nov 2)') && wide(at(2026, 11, 1), at(2026, 11, 1)).includes('(8 samples, Nov 1)'));
+  assert.ok(!line({ ratio: { x: 2.9, n: 8 } }).includes('Nov') && line({ ratio: { x: 2.9, n: 8 } }).includes('over the last 21 days'));
   // under the seat name: email, then plan (underscores read as spaces), then the measured line
   assert.strictEqual(quotaSeat({ label: 'B', email: 'b@x.org', plan: 'self_serve_business_prolite', ratio: { n: 0 } }, true, esc),
     'B<small>b@x.org</small><small class="pl">Plan: self serve business prolite</small>' + quotaMeasure({ ratio: { n: 0 } }, esc));
@@ -133,7 +138,7 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   // under the seat: after the measured line, which stays as it is (amber included)
   const seat = { label: 'B', w: 1, ratio: { x: 3.1, n: 24 }, suggest: { w: 3, n: 24 } };
   assert.strictEqual(quotaSeat(seat, false, esc), 'B' + quotaMeasure(seat, esc) + quotaSuggest(seat, esc));
-  assert.ok(quotaSeat(seat, false, esc).includes('class="ms warn"') && quotaSeat(seat, false, esc).indexOf('measured') < quotaSeat(seat, false, esc).indexOf('Suggested'));
+  assert.ok(quotaSeat(seat, false, esc).includes('class="ms warn"') && quotaSeat(seat, false, esc).indexOf('Measured') < quotaSeat(seat, false, esc).indexOf('Suggested'));
 }
 // seat name: the letter always, the email under it only when shown and known
 {
@@ -141,6 +146,11 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   assert.strictEqual(quotaSeat({ label: 'A', email: 'a@x.org' }, false, esc), 'A');
   assert.strictEqual(quotaSeat({ label: 'A', email: 'a@x.org' }, true, esc), 'A<small>a@x.org</small>');
   assert.strictEqual(quotaSeat({ label: 'B', email: null }, true, esc), 'B');
+  // a provider's own single login is named by its program, or by the address when emails are shown; a seat letter is left as it is
+  assert.strictEqual(quotaSeat({ label: 'antigravity', email: 'g@x.org' }, false, esc), 'Antigravity');
+  assert.strictEqual(quotaSeat({ label: 'antigravity', email: 'g@x.org' }, true, esc), 'g@x.org');
+  assert.strictEqual(quotaSeat({ label: 'antigravity', email: null }, true, esc), 'Antigravity');
+  assert.strictEqual(quotaSeat({ label: 'kimi' }, false, esc) + quotaSeat({ label: 'grok' }, false, esc) + quotaSeat({ label: 'muse' }, false, esc), 'KimiGrokMuse');
   assert.strictEqual(quotaSeat({ label: '<', email: '<e>' }, true, esc), '&lt;<small>&lt;e></small>');
   const cli = '<span class="bdg cli" role="img" title="Claude Code CLI is on this seat" aria-label="Claude Code CLI is on this seat">CLI</span>';
   const app = '<span class="bdg app" role="img" title="Desktop app is on this seat" aria-label="Desktop app is on this seat">App</span>';
@@ -173,6 +183,18 @@ const now = 1000000, far = now + 30 * 86400, W = 7 * 86400;
   assert.strictEqual(quotaBankedCell({ bankedNote: 'sign-in needed' }, now, fmt, id), '<small>sign-in needed</small>');     // why there is no count is shown, not only in a tooltip
   assert.strictEqual(quotaBankedTotal({ accounts: [two, { banked: 1 }, {}] }), 3);
   assert.strictEqual(quotaBankedTotal({ accounts: [{}, {}] }), null);
+  // the header chip: Claude's split by kind (a kind with none left out, a single kind short, a count above the lists as plain resets), Codex's one total, nothing when unreported
+  const cl = accounts => ({ id: 'claude', accounts });
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 5, bankedList: [{ title: 'Fable reset', n: 3 }, { title: 'Full reset', n: 2 }] }])), '2 full resets · 3 Fable resets');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 3, bankedList: [{ title: 'Fable reset', n: 3 }] }])), '3 Fable resets');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 1, bankedList: [{ title: 'Fable reset' }] }])), '1 Fable reset');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 1, bankedList: [{ title: 'Full reset' }] }, { banked: 2, bankedList: [{ title: 'Fable reset' }, { title: 'Full reset' }] }, { banked: 0, bankedList: [] }])), '2 full resets · 1 Fable reset');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 4, bankedList: [{ title: 'Weekly reset' }, { title: '5-hour reset' }, { title: 'Full reset' }] }])), '1 full reset · 1 weekly reset · 1 5-hour reset · 1 reset');
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 2 }, { banked: 1 }])), '3 banked resets');       // counts without a credit list: the plain total
+  assert.strictEqual(quotaBankedChip(cl([{ banked: 0, bankedList: [] }])), '0 banked resets');
+  assert.strictEqual(quotaBankedChip(cl([{}, {}])), '');
+  assert.strictEqual(quotaBankedChip({ id: 'codex', accounts: [{ banked: 2, bankedList: [{ title: 'Fable reset' }] }, { banked: 1 }] }), '3 banked resets');   // Codex's titles are its own: one total
+  assert.strictEqual(quotaBankedChip({ id: 'codex', accounts: [{ banked: 1 }] }), '1 banked reset');
 }
 // Claude's Apply kinds: the four the server accepts (usage-history.py RESET_KINDS), the owner's wording for Fable and full, a window each
 {
@@ -202,10 +224,10 @@ assert.strictEqual(quotaShare(600, 600), 100);
   const cl = { id: 'claude', best: true }, cx = { id: 'codex' };
   assert.strictEqual(quotaSwitchBtns(cl, { label: 'B', switch: ['cli', 'app'] }, false, e),
     '<button class="sw" data-a="sw" data-p="claude" data-r="cli" data-v="B" title="Switch the Claude CLI to this seat">Use for CLI</button>' +
-    '<button class="sw" data-a="sw" data-p="claude" data-r="app" data-v="B" title="Switch the Claude desktop app to this seat">Use for App</button>');
+    '<button class="sw" data-a="sw" data-p="claude" data-r="app" data-v="B" title="Switch the Claude desktop app to this seat">Use for app</button>');
   assert.strictEqual(quotaSwitchBtns(cl, { label: 'B' }, false, e), '');
   assert.strictEqual(quotaSwitchBtns(cx, { label: 'A', switch: ['both', 'cli'] }, true, e),
-    '<button class="sw" data-a="sw" data-p="codex" data-r="both" data-v="A" title="Another action is running" disabled>Use for CLI + App</button>');   // an unknown role draws nothing
+    '<button class="sw" data-a="sw" data-p="codex" data-r="both" data-v="A" title="Another action is running" disabled>Use for CLI + app</button>');   // an unknown role draws nothing
   assert.strictEqual(quotaBestBtn(cl, false, e), '<button class="sw" data-a="sw" data-p="claude" data-r="best" title="Switch the Claude CLI to the seat with the most headroom">Best seat</button>');
   assert.strictEqual(quotaBestBtn(cx, false, e), '');
   assert.ok(quotaBestBtn({ id: 'codex', best: true }, false, e).includes('>Next seat<'));
@@ -221,11 +243,19 @@ assert.strictEqual(quotaShare(600, 600), 100);
   assert.strictEqual(quotaNoPool({ accounts: [] }), '');
   const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
   const src = tpl.slice(tpl.indexOf('function panel(p, W) {'), tpl.indexOf('\nfunction render('));
-  const deps = { ui: { lim: {} }, D: { app: true }, esc: s => String(s), sh: x => x, quotaBankedTotal: () => null, quotaInUse: () => '', quotaBestBtn: () => '',
+  const nsrc = tpl.slice(tpl.indexOf('const nacc = '), tpl.indexOf('\n', tpl.indexOf('const nacc = ')));
+  const nacc = new Function(nsrc + '\nreturn nacc;')();
+  const deps = { nacc, ui: { lim: {} }, D: { app: true }, esc: s => String(s), sh: x => x, quotaBankedChip: () => '', quotaInUse: () => '', quotaBestBtn: () => '',
     swBusy: () => false, rateFor: () => ({}), seatsTxt: () => '', fr: x => x, chart: () => '', nm: a => a.label, accounts: () => '<ACCOUNTS>', quotaNoPool };
   const panel = new Function(...Object.keys(deps), src + '\nreturn panel;')(...Object.values(deps));
   const zero = panel({ id: 'claude', name: 'Claude', total: 2, limits: [], accounts: [{ label: 'A', w: 0, note: '' }, { label: 'B', w: 0, note: '' }] }, 600);
   assert.ok(zero.includes('<ACCOUNTS>') && zero.includes('No seats counted in the pool (all weights are 0).') && !zero.includes('No usage data yet.'), zero);
+  // a signed-out program (Kimi, Muse) is 0 accounts, not its placeholder row; a blob without `signed` falls back to total
+  assert.strictEqual(nacc({ total: 1, signed: 0 }), 0);
+  assert.strictEqual(nacc({ total: 3, signed: 2 }), 2);
+  assert.strictEqual(nacc({ total: 3 }), 3);
+  assert.ok(panel({ id: 'kimi', name: 'Kimi', total: 1, signed: 0, limits: [], accounts: [{ label: 'kimi', note: 'x' }] }, 600).includes('0 accounts'));
+  assert.ok(panel({ id: 'grok', name: 'xAI', total: 1, signed: 1, limits: [], accounts: [{ label: 'grok', note: '' }] }, 600).includes('1 account<'));
   const none = panel({ id: 'grok', name: 'xAI', total: 1, limits: [], accounts: [{ label: 'grok', note: '' }] }, 600);
   assert.ok(none.includes('<ACCOUNTS>') && none.includes('No usage data yet.'), none);
 }
@@ -363,15 +393,91 @@ assert.strictEqual(quotaShare(600, 600), 100);
   g.openClear('A', 'claude', 'full');
   g.doReset().then(() => assert.deepStrictEqual(toasts, [['usage-cache.json cannot be read. Check the seats limits first.', 'error']])).catch(e => { console.error(e); process.exit(1); });
 }
-// the update notice speaks to an end user: what is out of date and the one command that fixes it; no --push
+// the update notice says what is happening and offers the one button; no command to type, no --push
 {
   const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
-  const src = tpl.slice(tpl.indexOf('function driftRow(d) {'), tpl.indexOf('\nfunction applyTheme('));
+  const src = tpl.slice(tpl.indexOf('function driftRow(d, up, ctx) {'), tpl.indexOf('\nfunction applyTheme('));
   const driftRow = new Function('closed', 'ico', 'esc', 'ago', src + '\nreturn driftRow;')({}, () => '', s => String(s), String);
-  const two = driftRow({ n: 2, names: ['a.ps1', 'b.py'], checked: 5 });
-  assert.ok(two.includes('Update available from GitHub (2 files differ)') && two.includes('<code>rotator-sync --pull</code>') && two.includes('<li>a.ps1</li>'), two);
-  assert.ok(driftRow({ n: 1, names: ['a.ps1'] }).includes('(1 file differs)'));
-  assert.ok(!/--push|--check/.test(tpl.slice(tpl.indexOf('function driftRow(d) {'), tpl.indexOf('\nfunction applyTheme('))));
+  const d2 = { n: 2, names: ['a.ps1', 'b.py'], checked: 5 };
+  // files differ, automatic updates on: says so, lists the files, offers Update now; nothing about a terminal
+  const two = driftRow(d2, { auto: true, state: 'idle' }, { app: true, now: 100 });
+  assert.ok(two.includes('Update available from GitHub (2 files differ)') && two.includes('<li>a.ps1</li>') && two.includes('data-a="update"') && two.includes('Update now')
+    && two.includes('installs by itself when nothing else is running') && !/rotator-sync|terminal/.test(two), two);
+  assert.ok(driftRow({ n: 1, names: ['a.ps1'] }, null, { app: true }).includes('(1 file differs)'));
+  assert.ok(driftRow(d2, { auto: false }, { app: true }).includes('Automatic updates are off.'));
+  assert.ok(!driftRow(d2, { auto: true }, { app: false }).includes('data-a="update"'));                           // the page opened from its file has no server to ask
+  // installing: no button, the dashboard says it restarts and reloads by itself
+  const run = driftRow(d2, { state: 'running' }, { app: true });
+  assert.ok(run.includes('Updating…') && run.includes('reloads by itself') && !run.includes('<button'), run);
+  assert.ok(driftRow(d2, { state: 'idle' }, { app: true, updating: true }).includes('Updating…'));
+  // a failed one says why and offers it again
+  const bad = driftRow(d2, { state: 'failed', text: 'another update is running' }, { app: true });
+  assert.ok(bad.includes('The last update did not install: another update is running') && bad.includes('data-a="update"'), bad);
+  assert.ok(driftRow(null, { state: 'failed', text: 'x' }, { app: true }).includes('did not install'));
+  // done: "Updated to <sha>" for ten minutes, until dismissed
+  const dn = { done: { at: 1000, sha: 'abc1234' } };
+  const ok = driftRow(null, dn, { app: true, now: 1100, dismissed: '' });
+  assert.ok(ok.includes('Updated to abc1234.') && ok.includes('data-a="updone"'), ok);
+  assert.strictEqual(driftRow(null, dn, { app: true, now: 1700, dismissed: '' }), '');
+  assert.strictEqual(driftRow(null, dn, { app: true, now: 1100, dismissed: '1000' }), '');
+  assert.strictEqual(driftRow(null, {}, { app: true, now: 1100 }), '');
+  assert.ok(!/--push|--check/.test(tpl.slice(tpl.indexOf('function driftRow('), tpl.indexOf('\nfunction applyTheme('))));
+}
+// one Refresh button for everything; no Reload data icon, no meta refresh; the app polls /api/data quietly every minute and reloads itself on a new build
+{
+  const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
+  assert.ok(!tpl.includes('Reload data') && !tpl.includes('data-a="reload"') && !tpl.includes('http-equiv="refresh"') && (tpl.match(/data-a="refresh"/g) || []).length === 1, 'the extra reload control is back');
+  assert.ok(/setInterval\(\(\) => \{ if \(!busy && !updating\) loadData\(true\); \}, 60000\)/.test(tpl) && /else setInterval\(\(\) => location\.reload\(\), 300000\)/.test(tpl));
+  // the quiet poll: unchanged data is not redrawn, a failed poll says nothing, a different build reloads the page
+  const src = tpl.slice(tpl.indexOf('async function loadData(silent) {'), tpl.indexOf('\nasync function refreshOne('));
+  const calls = { render: 0, reload: 0 }, texts = [];
+  const env = { D: { app: true }, BUILD: 'b1', lastText: '', msg: 'keep', render: () => calls.render++, location: { reload: () => calls.reload++ },
+    fetch: async () => { const t = texts.shift(); if (t instanceof Error) throw t; return { ok: true, text: async () => t }; } };
+  const mk = () => new Function('D', 'BUILD', 'render', 'location', 'fetch', 'let lastText = "", msg = "keep";\n' + src + '\nreturn { loadData, msg: () => msg, D: () => D };')(env.D, env.BUILD, env.render, env.location, env.fetch);
+  (async () => {
+    let s = mk();
+    texts.push(JSON.stringify({ app: true, build: 'b1', n: 1 })); await s.loadData(true);
+    assert.deepStrictEqual([calls.render, s.D().n], [1, 1]);                                       // new data: drawn
+    texts.push(JSON.stringify({ app: true, build: 'b1', n: 1 })); await s.loadData(true);
+    assert.strictEqual(calls.render, 1);                                                            // the same again: not redrawn
+    texts.push(new Error('offline')); await s.loadData(true);
+    assert.ok(calls.render === 1 && s.msg() === 'keep');                                            // a failed poll is silent
+    texts.push(new Error('offline')); await s.loadData(false);
+    assert.ok(calls.render === 2 && s.msg() === 'Could not reload data.');                          // a failed click says so
+    texts.push(JSON.stringify({ app: true, build: 'b2' })); await s.loadData(true);
+    assert.ok(calls.reload === 1 && calls.render === 2);                                            // the dashboard was updated: the page reloads itself
+  })().catch(e => { console.error(e); process.exit(1); });
+}
+// each provider tab has its own small refresh icon (not in the file page), spinning while that provider refreshes; Gemini's groups and Kimi are on the page
+{
+  const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
+  assert.ok(tpl.includes('data-a="prefresh"') && tpl.includes("if (a === 'prefresh') return refreshOne(v);") && /@keyframes spin/.test(tpl) && /prefers-reduced-motion/.test(tpl));
+  assert.ok(/body: JSON\.stringify\(\{ provider: pid \}\)/.test(tpl) && tpl.includes("--c-kimi:#f472b6") && tpl.includes("--c-kimi:#be185d"));
+  const src = tpl.slice(tpl.indexOf('async function refreshOne(pid) {'), tpl.indexOf('\n// Update now:'));
+  const calls = [], prb = {};
+  const sent = [];
+  const refreshOne = new Function('prb', 'busy', 'D', 'msg', 'render', 'fetch', 'let M = msg;\n' + src.replace(/\bmsg\b/g, 'M') + '\nreturn refreshOne;')(
+    prb, false, { app: true }, '', () => calls.push(Object.assign({}, prb)), async (u, o) => (sent.push([u, JSON.parse(o.body)]), { status: 200, ok: true, json: async () => ({ providers: [] }) }));
+  refreshOne('gemini').then(() => {
+    assert.deepStrictEqual(sent, [['/api/refresh', { provider: 'gemini' }]]);
+    assert.deepStrictEqual(calls, [{ gemini: true }, {}]);                                          // a spinner while it runs, gone after
+  }).catch(e => { console.error(e); process.exit(1); });
+}
+// Gemini's quota groups: windows named "<group> · <kind>" share one column with one bar each; other providers keep one column per window
+{
+  const tpl = require('fs').readFileSync(require('path').join(__dirname, 'usage-dashboard.template.html'), 'utf8');
+  const tblSrc = tpl.slice(tpl.indexOf('const resetBtn = '), tpl.indexOf('\nfunction panel('));
+  const accounts = new Function('D', 'esc', 'QUOTA_RESET_KINDS', 'quotaBankedTotal', 'quotaBankedCell', 'quotaLevel', 'quotaSwitchBtns', 'swBusy', 'nm', 'bkTitle',
+    'readAge', 'ago', 'fmtRS', 'closed', 'fmtDT', 'winAge', tblSrc + '\nreturn accounts;')({ app: true, now: 1000 }, s => String(s), QUOTA_RESET_KINDS, quotaBankedTotal, () => '–',
+    quotaLevel, () => '', () => false, a => a.label, () => '', () => '', String, String, {}, String, () => '');
+  const w = (id, label, used) => ({ id, label, used, reset: 2000 });
+  const gem = accounts({ id: 'gemini', limits: [], accounts: [{ label: 'antigravity', note: '', windows: [w('pool-1', 'Gemini Models · Weekly', 0.41), w('pool-2', 'Gemini Models · 5-hour', 1), w('pool-3', 'Claude and GPT models · Weekly', 0), w('pool-4', 'Gemini 4 Argon · Weekly', 0.2)] }] });
+  assert.ok(gem.includes('<th>Gemini Models</th><th>Claude and GPT models</th><th>Gemini 4 Argon</th>') && !gem.includes('<th>Gemini Models · Weekly</th>'), gem);
+  const cell = gem.slice(gem.indexOf('<td><div class="gw'), gem.indexOf('</td>', gem.indexOf('<td><div class="gw')));
+  assert.ok(cell.includes('<span class="gl">Weekly</span>') && cell.includes('<span class="gl">5-hour</span>') && cell.includes('41%') && cell.includes('capped') && cell.includes('gw lv-bad') && cell.includes('gw lv-ok'), cell);
+  assert.strictEqual((gem.match(/class="bar"/g) || []).length, 4);                                   // one bar per window
+  const plain = accounts({ id: 'kimi', limits: [], accounts: [{ label: 'kimi', note: '', windows: [w('s', '5-hour', 0.1), w('w', 'Weekly', 0.2), w('c', 'Monthly (coding)', 0.3), w('m', 'Monthly', 0.4)] }] });
+  assert.ok(plain.includes('<th>5-hour</th><th>Weekly</th><th>Monthly</th><th>Monthly (coding)</th>') && !plain.includes('class="gw'), plain);       // Kimi's windows in their own order
 }
 // the emails button names what a click does: Show while hidden, Hide while shown
 {

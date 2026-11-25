@@ -25,6 +25,7 @@ steps hide real burn.
 import bisect
 import contextlib
 import glob
+import hashlib
 import http.client
 import json
 import math
@@ -40,8 +41,14 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zlib
+
+try:
+    import dashboard_settings          # the Settings panel (dashboard_settings.py + settings.js); the page works without it
+except ImportError:
+    dashboard_settings = None
 
 HOME = os.path.expanduser("~")
 ROOT = os.path.join(HOME, ".claude-cli-accounts")
@@ -73,6 +80,7 @@ CARRY_MAX = 3600            # a failed read keeps a seat's last good reading in 
 PY = ["py", "-3"]
 IDLE_PRIORITY_CLASS = 0x40
 CHILD_FLAGS = 0x08000000 | IDLE_PRIORITY_CLASS if os.name == "nt" else 0     # every child: no console window, Idle CPU priority
+DETACH_FLAGS = (CHILD_FLAGS | 0x00000008 | 0x00000200) if os.name == "nt" else 0     # the restarted server: CHILD_FLAGS plus DETACHED_PROCESS and CREATE_NEW_PROCESS_GROUP, so it outlives the process (and the scheduled task run) that started it
 BOUND_GRACE = 1.0           # run_bounded: how long output still held by a grandchild's copy of the pipe is waited for once the child itself is done
 
 
@@ -154,6 +162,9 @@ def lower_priority():
 BUCKET5 = 300               # imported history keeps one point per 5 minutes
 GROK_EVERY, SAMPLE_EVERY = 900, 300
 
+# the usage payload's quotas -> (window id, label, default period s); used_ratio is read as a 0-1 fraction, as Kimi Code's own /usage does
+KIMI_WINDOWS = (("limit_5h", "s", "5-hour", 18000), ("limit_7d", "w", "Weekly", WEEK), ("limit_month_total", "m", "Monthly", 30 * DAY), ("limit_month_code", "c", "Monthly (coding)", 30 * DAY))
+
 # provider id -> (name, [(window id, window label, default period s)], [(limit window id, limit label)])
 PROVIDERS = {
     "claude": ("Claude", [("s", "5-hour", 18000), ("w", "Weekly", WEEK), ("f", "Fable weekly", WEEK)],
@@ -161,6 +172,8 @@ PROVIDERS = {
     "codex": ("Codex", [("s", "5-hour", 18000), ("w", "Weekly", WEEK)], [("w", "Weekly")]),
     "grok": ("xAI", [("w", "Weekly", WEEK)], [("w", "Weekly credits")]),
     "gemini": ("Gemini", None, None),      # its windows are whatever the language server reports
+    "muse": ("Muse (Meta)", [("s", "5-hour", 18000), ("w", "Weekly", WEEK)], [("s", "5-hour"), ("w", "Weekly")]),     # Muse Code, the muse terminal CLI (not the muse.ai agent)
+    "kimi": ("Kimi", [(w, lbl, per) for _, w, lbl, per in KIMI_WINDOWS], [(w, lbl) for _, w, lbl, _ in KIMI_WINDOWS]),     # Kimi Code (the kimi terminal CLI): 5-hour and weekly, plus the monthly caps when the plan has them
 }
 BADGE = {"cli": "CLI", "app": "App"}     # which seat is in use: the key under a provider's "inUse" -> the pill on the seat
 PROVIDER_NOTE = {"grok": "Cursor's Grok usage counts against this same xAI quota."}
@@ -430,6 +443,154 @@ def fetch_grok(now):
     return seat, email
 
 
+MUSE_SCRIPT, MUSE_OUT, MUSE_EVERY = os.path.join(HERE, "muse_usage_for_dashboard.py"), os.path.join(STATE, ".muse_usage.json"), 300
+
+
+def muse_reset_at(text, now):
+    """A relative reset ("in 4h 51m", "in 2d 3h") -> epoch seconds, else None (an absolute date stays free text in the note)."""
+    m = re.fullmatch(r"\s*in\s+(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?\s*", text or "") if isinstance(text, str) else None
+    if not m or not any(m.groups()):
+        return None
+    d, h, mi = (int(x or 0) for x in m.groups())
+    return int(now) + d * 86400 + h * 3600 + mi * 60
+
+
+def muse_seat(j, now):
+    """muse_usage_for_dashboard.py's JSON -> seat dict. A field the script could not find is left out, never guessed; the reset text it found is free text,
+    so it goes in the note rather than into a timestamp."""
+    if not isinstance(j, dict):
+        return {"ok": False, "note": "Muse usage unavailable (no readable result)"}
+    if not j.get("ok"):
+        return {"ok": False, "note": str(j.get("error") or "Muse usage unavailable")[:300]}
+    seat = {"ts": int(now)}
+    for key, field in (("s", "five_hour_used_percent"), ("w", "weekly_used_percent")):
+        v = _f(j.get(field))
+        if v is not None:
+            seat[key] = v / 100
+    if "s" not in seat and "w" not in seat:
+        return {"ok": False, "note": "Muse usage not recognised: " + " ".join(str(x) for x in j.get("parse_notes") or [])[:300]}
+    if isinstance(j.get("tier"), str) and j["tier"]:
+        seat["plan"] = j["tier"][:60]
+    for key, field, period in (("s", "five_hour_resets_at", 18000), ("w", "weekly_resets_at", WEEK)):
+        at = muse_reset_at(j.get(field), now)
+        if key in seat and at:
+            seat[key + "r"], seat[key + "p"] = at, period
+    resets = ["%s resets %s" % (n, j[f]) for n, f in (("5-hour", "five_hour_resets_at"), ("Weekly", "weekly_resets_at"))
+              if isinstance(j.get(f), str) and j[f] and not muse_reset_at(j[f], now)]
+    if resets or j.get("parse_notes"):
+        seat["note"] = " · ".join(resets + [str(x) for x in j.get("parse_notes") or []])[:400]
+    return seat
+
+
+def fetch_muse(now):
+    """-> (seat, None): runs muse_usage_for_dashboard.py (plain `muse usage` text, no network, no credentials read) with --out, and reads its JSON.
+    python.exe, not pythonw: the child needs working std streams, and CHILD_FLAGS keeps its console hidden."""
+    if not shutil.which("muse"):
+        return None, None       # Muse Code is not installed: no account, so no tab and no count (the script's own "not found" error is for a run that was meant to work)
+    if not os.path.isfile(MUSE_SCRIPT):
+        return {"ok": False, "note": "muse_usage_for_dashboard.py is missing next to usage-history.py"}, None
+    exe = shutil.which("python") or sys.executable
+    try:
+        run_bounded([exe, MUSE_SCRIPT, "--out", MUSE_OUT, "--timeout", "30"], timeout=60, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+        with open(MUSE_OUT, encoding="utf-8") as fh:
+            j = json.load(fh)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"ok": False, "note": "Muse usage unavailable (could not run the script)"}, None
+    return muse_seat(j, now), None
+
+
+KIMI_EVERY = 300
+KIMI_SIGNED_OUT = "Kimi isn't signed in — open Kimi and log in"
+KIMI_EXPIRED = "Kimi sign-in has expired — open Kimi to refresh it"
+KIMI_BASES = {"mainland-cn": "https://api.kimi.com/coding/v1", "global": "https://api.kimi.ai/coding/v1"}      # what Kimi Code itself uses per region (its `region` file)
+
+
+def kimi_home():
+    return os.environ.get("KIMI_CODE_HOME") or os.path.join(HOME, ".kimi-code")
+
+
+def kimi_installed(home=None, which=None):
+    """Kimi Code is installed: `kimi` on PATH, or its own bin folder in the Kimi home (the installer does not always touch PATH)."""
+    return bool((which or shutil.which)("kimi")) or os.path.isfile(os.path.join(home or kimi_home(), "bin", "kimi.exe" if os.name == "nt" else "kimi"))
+
+
+def kimi_token(now, home=None):
+    """-> ("ok", access token) | ("expired", None) | ("none", None): the newest saved login under <home>/credentials/*.json (Kimi Code's file token store: access_token,
+    refresh_token, expires_at in epoch seconds). An empty access token is a revoked login. Never logged.
+    shortcut: an expired token is NOT refreshed here. Kimi's refresh replaces the refresh token, so refreshing without writing the file back would sign the CLI out and
+    writing the CLI's credential is not this dashboard's job; Kimi Code refreshes it itself the next time it runs. Upgrade only if a stale login turns out common."""
+    rows = []
+    for f in glob.glob(os.path.join(home or kimi_home(), "credentials", "*.json")):
+        try:
+            with open(f, encoding="utf-8-sig") as fh:
+                t = json.load(fh)
+            rows.append((os.path.getmtime(f), t))
+        except (OSError, ValueError):
+            continue
+    expired = False
+    for _, t in sorted(rows, key=lambda r: r[0], reverse=True):
+        a, exp = (t.get("access_token") if isinstance(t, dict) else None), _f(t.get("expires_at")) if isinstance(t, dict) else None
+        if not isinstance(a, str) or not a:
+            continue
+        if exp is None or exp > now + 30:
+            return "ok", a
+        expired = True
+    return ("expired", None) if expired else ("none", None)
+
+
+def kimi_base(home=None):
+    """Kimi Code's API base: KIMI_CODE_BASE_URL, else by the region file (global -> api.kimi.ai, anything else -> api.kimi.com).
+    shortcut: a login made against a custom host (a scoped token) is treated like the default one."""
+    env = os.environ.get("KIMI_CODE_BASE_URL")
+    if env:
+        return env.rstrip("/")
+    try:
+        with open(os.path.join(home or kimi_home(), "region"), encoding="utf-8") as fh:
+            return KIMI_BASES.get(fh.read().strip(), KIMI_BASES["mainland-cn"])
+    except OSError:
+        return KIMI_BASES["mainland-cn"]
+
+
+def kimi_seat(j, now):
+    """GET {base}/usages -> seat dict with one window per quota that has a usable used_ratio, or None when the shape is not the expected one.
+    A reset_time that is not an ISO timestamp is left out (the window has no reset shown), never guessed."""
+    try:
+        q = j["usages"]
+        seat = {"ts": int(now)}
+        for key, wid, _, period in KIMI_WINDOWS:
+            e = q.get(key)
+            u = _f(e.get("used_ratio")) if isinstance(e, dict) else None
+            if u is None:
+                continue
+            seat[wid], seat[wid + "p"] = round(min(max(u, 0.0), 1.0), 4), period
+            if isinstance(e.get("reset_time"), str):
+                try:
+                    seat[wid + "r"] = int(_fromiso(e["reset_time"]).timestamp())
+                except ValueError:
+                    pass
+    except (AttributeError, KeyError, TypeError):
+        return None
+    return seat if any(wid in seat for _, wid, _, _ in KIMI_WINDOWS) else None
+
+
+def fetch_kimi(now, home=None, post=http_json):
+    """-> (seat, None) like fetch_muse: no seat at all (so no tab) when Kimi Code is not installed; installed but with no usable login, a note that says to log in."""
+    if not kimi_installed(home):
+        return None, None
+    state, tok = kimi_token(now, home)
+    if state == "none":
+        return {"ok": False, "note": KIMI_SIGNED_OUT}, None
+    if state == "expired":
+        return {"ok": False, "note": KIMI_EXPIRED}, None
+    code, j = post(urllib.request.Request(kimi_base(home) + "/usages", headers={"Authorization": "Bearer " + tok, "Accept": "application/json"}), 10)
+    if code in (401, 403):
+        return {"ok": False, "note": KIMI_EXPIRED}, None
+    seat = kimi_seat(j, now) if code == 200 else None
+    if not seat:
+        return {"ok": False, "note": "Kimi usage unavailable (%s)" % (_bad(code, j) if code != 200 else "unexpected response")}, None
+    return seat, None
+
+
 LS_PATH = "/exa.language_server_pb.LanguageServerService/GetUserStatus"
 LS_BODY = json.dumps({"metadata": {"ideName": "antigravity", "extensionName": "antigravity", "locale": "en"}}).encode()
 LS_PS = ("$ErrorActionPreference='SilentlyContinue';"       # the IDE's language server, or the CLI (agy.exe), which embeds one
@@ -563,6 +724,202 @@ def read_gemini(now, probe=ls_probe, query=query_ls):
     return None, LS_ADMIN if hidden else LS_AGY if bare else LS_OFF
 
 
+GEMINI_CRED = "gemini:antigravity"          # Antigravity's login in the Windows Credential Manager (a generic credential)
+GEMINI_API = "https://daily-cloudcode-pa.googleapis.com/v1internal"     # not cloudcode-pa: that host answered stale 100 % values
+GEMINI_VER = "2.34.0"                       # shortcut: used when the installed app's version cannot be read; nothing else depends on it, bump it with the app
+GEMINI_NO_LOGIN = "Sign in to Antigravity once"
+GEMINI_EXPIRED = "Antigravity sign-in expired — open Antigravity"
+GEMINI_PERIOD = {"weekly": WEEK, "5h": 18000}       # the quota summary's bucket windows -> seconds
+GEMINI_WLABEL = {"weekly": "Weekly", "5h": "5-hour"}
+GEMINI_TOKEN = {}                           # a refreshed access token, in memory only: the credential is never written back
+GEMINI_PAIRS = []                           # the OAuth client id/secret pairs found in the installed app, once per process
+GEMINI_PROJECT = {}                         # email -> Cloud Code companion project
+
+
+def cred_read(target):
+    """The bytes of one Windows Credential Manager generic credential, or None (not there, not Windows). Never logged."""
+    if os.name != "nt":
+        return None
+    import ctypes
+    from ctypes import wintypes
+
+    class CRED(ctypes.Structure):
+        _fields_ = [("Flags", wintypes.DWORD), ("Type", wintypes.DWORD), ("TargetName", wintypes.LPWSTR), ("Comment", wintypes.LPWSTR),
+                    ("LastWritten", wintypes.FILETIME), ("CredentialBlobSize", wintypes.DWORD), ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                    ("Persist", wintypes.DWORD), ("AttributeCount", wintypes.DWORD), ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", wintypes.LPWSTR), ("UserName", wintypes.LPWSTR)]
+    adv = ctypes.WinDLL("advapi32")
+    adv.CredReadW.argtypes, adv.CredReadW.restype = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.POINTER(ctypes.POINTER(CRED))), wintypes.BOOL
+    adv.CredFree.argtypes = (ctypes.c_void_p,)
+    p = ctypes.POINTER(CRED)()
+    if not adv.CredReadW(target, 1, 0, ctypes.byref(p)):
+        return None
+    try:
+        return ctypes.string_at(p.contents.CredentialBlob, p.contents.CredentialBlobSize)
+    finally:
+        adv.CredFree(p)
+
+
+def gemini_login(blob):
+    """The credential's JSON -> {"access", "refresh", "exp" (epoch s), "email"}, or None when it is not the expected shape."""
+    try:
+        j = json.loads(blob.decode("utf-8-sig"))
+        t = j["token"]
+        access, refresh = t["access_token"], t.get("refresh_token")
+        if not isinstance(access, str) or not access:
+            return None
+        exp = int(_fromiso(t["expiry"]).timestamp()) if t.get("expiry") else 0
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return None
+    email = j.get("id_token_email")
+    return {"access": access, "refresh": refresh if isinstance(refresh, str) and refresh else None, "exp": exp, "email": email if isinstance(email, str) and email else None}
+
+
+def gemini_version(path=None):
+    """The installed Antigravity app's version (its exe's file version), else GEMINI_VER."""
+    exe = path or os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Antigravity", "Antigravity.exe")
+    if os.name != "nt" or not os.path.isfile(exe):
+        return GEMINI_VER
+    try:
+        import ctypes
+        from ctypes import wintypes
+        v = ctypes.WinDLL("version")
+        v.GetFileVersionInfoSizeW.argtypes, v.GetFileVersionInfoSizeW.restype = (wintypes.LPCWSTR, ctypes.c_void_p), wintypes.DWORD
+        v.GetFileVersionInfoW.argtypes, v.GetFileVersionInfoW.restype = (wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p), wintypes.BOOL
+        v.VerQueryValueW.argtypes, v.VerQueryValueW.restype = (ctypes.c_void_p, wintypes.LPCWSTR, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)), wintypes.BOOL
+        n = v.GetFileVersionInfoSizeW(exe, None)
+        buf = ctypes.create_string_buffer(n)
+        pv, ln = ctypes.c_void_p(), wintypes.UINT()
+        if not n or not v.GetFileVersionInfoW(exe, 0, n, buf) or not v.VerQueryValueW(buf, "\\", ctypes.byref(pv), ctypes.byref(ln)):
+            return GEMINI_VER
+        ms, ls = struct.unpack("<II", ctypes.string_at(pv.value + 8, 8))       # VS_FIXEDFILEINFO.dwFileVersionMS / LS
+        return "%d.%d.%d" % (ms >> 16, ms & 0xFFFF, ls >> 16) if ms >> 16 else GEMINI_VER
+    except (OSError, ValueError, struct.error):
+        return GEMINI_VER
+
+
+def gemini_oauth_pairs(path=None):
+    """[(client id, client secret)] found inside the installed language server (every id with every secret), or [].
+    Read at run time on purpose: no client secret is kept in this repo. The file is ~200 MB, so this runs once per process, and only when a token has to be refreshed."""
+    exe = path or os.path.join(os.environ.get("LOCALAPPDATA") or "", "Programs", "Antigravity", "resources", "bin", "language_server.exe")
+    idr, sr = re.compile(rb"\d{6,}-[a-z0-9]{20,}\.apps\.googleusercontent\.com"), re.compile(rb"GOCSPX-[A-Za-z0-9_-]{28}")
+    ids, secs, tail = [], [], b""
+    try:
+        with open(exe, "rb") as fh:
+            while True:
+                chunk = fh.read(8 << 20)
+                if not chunk:
+                    break
+                data = tail + chunk
+                ids += [m.group().decode() for m in idr.finditer(data)]
+                secs += [m.group().decode() for m in sr.finditer(data)]
+                tail = data[-200:]              # a match cut by the chunk edge is whole in the next scan (and found twice: de-duplicated below)
+    except OSError:
+        return []
+    return [(i, s) for i in dict.fromkeys(ids) for s in dict.fromkeys(secs)]
+
+
+def gemini_refresh(refresh_token, post=http_json, pairs=None):
+    """A new access token for the saved refresh token -> (token, exp) | ("expired", 0) when Google refuses it | (None, 0) when it could not be asked.
+    Tries each client pair found in the installed app until one is accepted; the working pair goes first the next time."""
+    if pairs is None:
+        if not GEMINI_PAIRS:
+            GEMINI_PAIRS.extend(gemini_oauth_pairs())
+        pairs = GEMINI_PAIRS
+    refused = False
+    for i, (cid, sec) in enumerate(list(pairs)):
+        body = urllib.parse.urlencode({"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": cid, "client_secret": sec}).encode()
+        code, j = post(urllib.request.Request("https://oauth2.googleapis.com/token", data=body, method="POST",
+                                              headers={"Content-Type": "application/x-www-form-urlencoded"}), 15)
+        if code == 200 and isinstance(j, dict) and isinstance(j.get("access_token"), str):
+            if i:
+                pairs.insert(0, pairs.pop(i))
+            return j["access_token"], int(time.time()) + int(_f(j.get("expires_in")) or 3000)
+        if code == 0:
+            return None, 0
+        refused = refused or code in (400, 401)     # invalid_grant (a revoked login) and invalid_client (the wrong pair) look alike: expired only once every pair refused
+    return ("expired", 0) if refused else (None, 0)
+
+
+def parse_gemini_quota(j, now):
+    """retrieveUserQuotaSummary -> seat dict with one window per (group, bucket), or None when the shape is not the expected one.
+    The window id is a stable hash of the group's name and the bucket's window; the label is "<group> · Weekly" or "<group> · 5-hour". A bucket with no
+    remainingFraction is 0 left (the API leaves a zero out). A bucket whose window is neither weekly nor 5h is skipped, never guessed at."""
+    try:
+        seat = {"ts": int(now), "n": {}}
+        for g in j["groups"]:
+            name = str(g["displayName"]).strip()
+            for b in g.get("buckets") or []:
+                period = GEMINI_PERIOD.get(b.get("window"))
+                frac = _f(b.get("remainingFraction") or 0)
+                if period is None or frac is None or not name:
+                    continue
+                wid = gemini_pool_id([name, b["window"]])
+                seat["n"][wid] = "%s · %s" % (name, GEMINI_WLABEL[b["window"]])
+                seat[wid], seat[wid + "p"] = round(1 - min(max(frac, 0.0), 1.0), 4), period
+                if b.get("resetTime"):
+                    seat[wid + "r"] = int(_fromiso(b["resetTime"]).timestamp())
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return None
+    return seat if seat["n"] else None
+
+
+def read_gemini_api(now, cred=cred_read, post=http_json, version=None, refresh=gemini_refresh):
+    """(seat, note) from Antigravity's own login and Google's Cloud Code quota API, no running app needed; (None, None) when there is no credential at all
+    (the caller then tries the running language server). The access token lasts an hour: an expired one is refreshed IN MEMORY (GEMINI_TOKEN), the
+    credential is never written back. No token and no address is logged."""
+    login = gemini_login(cred(GEMINI_CRED) or b"")
+    if not login:
+        return None, None
+    tok, exp = login["access"], login["exp"]
+    if GEMINI_TOKEN.get("for") == login["refresh"] and GEMINI_TOKEN.get("exp", 0) > exp:
+        tok, exp = GEMINI_TOKEN["access"], GEMINI_TOKEN["exp"]
+    ua = "antigravity/hub/%s windows/amd64" % (version or gemini_version())      # the user agent decides which quota groups come back: this one has all three
+    for attempt in (0, 1):
+        if exp <= now + 60 or attempt:             # expired (or the API just refused the token): ask for a new one
+            if not login["refresh"]:
+                return None, GEMINI_EXPIRED
+            new, nexp = refresh(login["refresh"], post)
+            if new == "expired":
+                return None, GEMINI_EXPIRED
+            if new is None:
+                return None, "Antigravity usage unavailable (could not refresh the sign-in)"
+            GEMINI_TOKEN.update({"for": login["refresh"], "access": new, "exp": nexp})
+            tok, exp = new, nexp
+        hdr = {"Authorization": "Bearer " + tok, "Content-Type": "application/json", "User-Agent": ua}
+        proj = GEMINI_PROJECT.get(login["email"] or "")
+        if not proj:
+            code, j = post(urllib.request.Request(GEMINI_API + ":loadCodeAssist", data=b'{"metadata":{"ideType":"ANTIGRAVITY"}}', method="POST", headers=hdr), 15)
+            p = j.get("cloudaicompanionProject") if isinstance(j, dict) else None
+            proj = p if isinstance(p, str) and p else p.get("id") if isinstance(p, dict) else None
+            if code in (401, 403) and not attempt:
+                continue
+            if code != 200 or not proj:
+                return None, "Antigravity usage unavailable (%s)" % (_bad(code, j) if code != 200 else "no Cloud Code project on this account")
+            GEMINI_PROJECT[login["email"] or ""] = proj
+        code, j = post(urllib.request.Request(GEMINI_API + ":retrieveUserQuotaSummary", data=json.dumps({"project": proj}).encode(), method="POST", headers=hdr), 15)
+        if code in (401, 403) and not attempt:
+            continue
+        if code != 200:
+            return None, "Antigravity usage unavailable (%s)" % _bad(code, j)
+        seat = parse_gemini_quota(j, now)
+        if not seat:
+            return None, "Antigravity usage unavailable (unexpected response)"
+        if login["email"]:
+            seat["email"] = login["email"]      # sample() takes it out again: it is the provider cache's, never the history's
+        return seat, ""
+    return None, GEMINI_EXPIRED
+
+
+def read_gemini_any(now, api=None, ls=None):
+    """The Gemini seat: Antigravity's own login first; only a PC with no such credential falls back to the running language server (the older IDE)."""
+    seat, why = (api or read_gemini_api)(now)
+    if seat or why is not None:
+        return seat, why
+    seat, why = (ls or read_gemini)(now)
+    return (seat, "") if seat else (None, GEMINI_NO_LOGIN if why == LS_OFF else why)       # "not running" says nothing useful once we know there is no login; an admin or agy note still does
+
+
 class PcacheError(Exception):
     """The provider cache exists but cannot be read as a JSON object: a read-modify-write must not carry on from an empty one and replace it."""
 
@@ -681,6 +1038,105 @@ def credits_enabled(cfg=None):
             return json.load(fh).get("claudeResetCredits") is not False
     except (OSError, ValueError, AttributeError):
         return True
+
+
+def autoupdate_enabled(cfg=None):
+    """`autoUpdate` in rotator.local.json (next to this script): false stops the dashboard installing updates by itself (it then offers an Update now button). Default on."""
+    try:
+        with open(cfg or os.path.join(HERE, "rotator.local.json"), encoding="utf-8-sig") as fh:
+            return json.load(fh).get("autoUpdate") is not False
+    except (OSError, ValueError, AttributeError):
+        return True
+
+
+UPDATE_RETRY = 6 * 3600     # an update that failed is not tried again by itself for the same set of files before this
+UPDATE = {"state": "idle", "text": ""}     # in memory: "running" while an update installs, "failed" (with why) after one that did not; the last good one is in the provider cache ("updated")
+
+
+def update_decision(names, auto, busy, tried, now):
+    """What the dashboard does about the files that differ from GitHub (`names`): "none" (nothing differs), "manual" (autoUpdate is off: the page offers Update now),
+    "wait" (a refresh, switch or reset is running: not while anything else is), "backoff" (the same files failed to install less than UPDATE_RETRY ago) or "apply"."""
+    if not names:
+        return "none"
+    if not auto:
+        return "manual"
+    if busy:
+        return "wait"
+    if isinstance(tried, dict) and not tried.get("ok") and tried.get("sig") == "|".join(sorted(names)) and now - (_f(tried.get("at")) or 0) < UPDATE_RETRY:
+        return "backoff"
+    return "apply"
+
+
+def in_checkout(here=None):
+    """This script sits in a git checkout (its own folder or the one above holds a .git: a clone, or a worktree of one) -> True. Such a copy is updated with git, never with
+    rotator-sync: rotator-sync only refuses its own clone, so a developer's other worktree would have its working files replaced with GitHub's."""
+    here = here or HERE
+    return any(os.path.exists(os.path.join(d, ".git")) for d in (here, os.path.dirname(os.path.abspath(here))))
+
+
+UPDATE_CHECKOUT = "This copy of the dashboard is a git checkout: update it with git pull there."
+
+
+def update_outcome(rc, out):
+    """rotator-sync --pull's exit code and output -> (ok, text for the page, the server's own file was replaced, so the server has to restart). Its output lists
+    "replaced <file>" / "added <file>" per file; its last line is its error when it failed."""
+    lines = [x.strip() for x in (out or "").splitlines() if x.strip()]
+    if rc:
+        why = lines[-1] if lines else "it gave no reason"
+        return False, "The update did not install (%s). Nothing was changed." % why[:200], False
+    done = [x.split(None, 1)[1] for x in lines if x.startswith(("replaced ", "added   ", "added "))]
+    return True, "Updated %d file%s." % (len(done), "" if len(done) == 1 else "s") if done else "Already up to date.", SERVER_FILE in done
+
+
+SERVER_FILE = "usage-history.py"                    # rotator-sync's name for this script: a running server keeps the old code until it restarts
+
+
+def build_id(here=None):
+    """What the page compares to decide it is out of date: a short hash of the server code this process started with and of the page files as they are now
+    (the page is read again on every request, so a replaced page changes it at once; a replaced server changes it when the new server is up)."""
+    h = hashlib.sha1(SERVER_SIG)
+    for name in ("usage-dashboard.template.html", "usage-sim.js"):
+        try:
+            with open(os.path.join(here or HERE, name), "rb") as fh:
+                h.update(fh.read())
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
+
+def read_server_sig():
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            return fh.read()
+    except OSError:
+        return b""
+
+
+SERVER_SIG = read_server_sig()
+
+
+def new_server_argv(argv=None, exe=None, wait=40):
+    """The command that starts this same server again: the same interpreter, the script by its full path, every argument as it was (port, state folder), plus
+    --wait-port so it can take the port over from this one."""
+    argv = list(sys.argv if argv is None else argv)
+    keep, skip = [], False
+    for a in argv[1:]:
+        if skip:
+            skip = False
+        elif a == "--wait-port":
+            skip = True
+        else:
+            keep.append(a)
+    return [exe or sys.executable, os.path.abspath(argv[0])] + keep + ["--wait-port", str(wait)]
+
+
+def read_drift():
+    try:
+        with open(os.path.join(STATE, ".rotator-drift.json"), encoding="utf-8-sig") as fh:
+            d = json.load(fh)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
 
 
 def claude_version(now, run=run_bounded, which=shutil.which, home=None):
@@ -1025,19 +1481,10 @@ def lift_awaits(codex, seen):
     return cleared
 
 
-def sample(now, force=False):
-    rec = {"t": int(now), "s": read_claude()}
-    cache = load_pcache()
-    before = json.loads(json.dumps(cache))      # the provider reads below are slow: only what they change is merged back, under the lock
-    codex, cemails = read_codex()
-    for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
-        if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
-            codex[label] = fresh
-    lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
-    if codex or codex_homes_gone():     # recorded even when empty once the last saved home is removed: that snapshot must win in latest_of over the older seats
-        rec["codex"] = codex
-    if codex:
-        cache.setdefault("emails", {})["codex"] = cemails
+GEMINI_EVERY = 240          # s: under SAMPLE_EVERY, so the sampler always reads again, but a Refresh moments before a sample is not asked twice
+
+
+def _live_grok(rec, cache, now, force):
     try:
         seat = read_live("grok", "grok", fetch_grok, GROK_EVERY, now, force, cache)
     except Exception as e:              # one provider's surprise must not cost the whole sample: it becomes that provider's note (not cached, so the next sample retries)
@@ -1045,11 +1492,42 @@ def sample(now, force=False):
         seat = {"ok": False, "note": "Grok usage unavailable (%s)" % type(e).__name__}
     if seat:
         rec["grok"] = {"grok": seat}
+
+
+def _live_muse(rec, cache, now, force):
     try:
-        seat, why = read_gemini(now)        # local call: read on every sample
+        seat = read_live("muse", "muse", fetch_muse, MUSE_EVERY, now, force, cache)
     except Exception as e:
-        applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
-        seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
+        applog("sample: muse read failed: %s: %s" % (type(e).__name__, e))
+        seat = {"ok": False, "note": "Muse usage unavailable (%s)" % type(e).__name__}
+    if seat:
+        rec["muse"] = {"muse": seat}
+        if seat.get("plan"):
+            cache.setdefault("pnote", {})["muse"] = "Plan: " + seat["plan"]
+
+
+def _live_kimi(rec, cache, now, force):
+    try:
+        seat = read_live("kimi", "kimi", fetch_kimi, KIMI_EVERY, now, force, cache)
+    except Exception as e:
+        applog("sample: kimi read failed: %s: %s" % (type(e).__name__, e))
+        seat = {"ok": False, "note": "Kimi usage unavailable (%s)" % type(e).__name__}
+    if seat:
+        rec["kimi"] = {"kimi": seat}
+
+
+def _live_gemini(rec, cache, now, force):
+    c = cache.get("gemini_read") or {}
+    if not force and c.get("at") and now - c["at"] < GEMINI_EVERY:
+        seat, why = c.get("seat"), c.get("why") or ""
+    else:
+        try:
+            seat, why = read_gemini_any(now)    # one short call to Google (the app's own login)
+        except Exception as e:
+            applog("sample: gemini read failed: %s: %s" % (type(e).__name__, e))
+            seat, why = None, "Antigravity usage unavailable (%s)" % type(e).__name__
+        cache["gemini_read"] = json.loads(json.dumps({"at": int(now), "seat": seat, "why": why}))      # the address stays in the provider cache, as the cache's own emails do
+    seat = json.loads(json.dumps(seat)) if seat else seat       # a copy: the email is taken out of it below, and must stay in the cached one
     if seat:
         email = seat.pop("email", None)             # before the seat is recorded: no address lands in the usage history
         if isinstance(email, str) and email:
@@ -1063,6 +1541,51 @@ def sample(now, force=False):
     else:                               # not readable: recorded as a failed read, so the history marks the outage (carry_good, the rates and the profile need the failure
         cache.setdefault("notes", {})["gemini"] = {"antigravity": why}      # records to bridge a short one and break at a long one); the last good reading stays on show (latest_of), its age the Read column
         rec["gemini"] = {"antigravity": {"ok": False, "note": why}}
+
+
+LIVE = {"grok": _live_grok, "muse": _live_muse, "kimi": _live_kimi, "gemini": _live_gemini}      # the providers read over the network or a child process, in the order the page lists them
+
+
+def run_live(pids, rec, cache, now, force):
+    """The live providers' reads, one thread each (every one bounded by its own timeouts): the wall clock is the slowest, not the sum. Each writes its own keys of `rec`
+    and `cache` (`setdefault` on the shared parents is atomic), so no lock is needed."""
+    def one(pid):
+        try:
+            LIVE[pid](rec, cache, now, force)
+        except Exception as e:   # shortcut: each reader catches its own; this is only the last net, so one thread's surprise never loses the others' readings
+            applog("sample: %s read crashed: %s: %s" % (pid, type(e).__name__, e))
+    ts = [threading.Thread(target=one, args=(p,), daemon=True) for p in pids]
+    for t in ts:
+        t.start()
+    for t in ts:
+        t.join()
+
+
+def refresh_live(pid, now):
+    """One live provider read, forced, into the provider cache (the slow part of refreshing that provider); sample() then finds it fresh and does not read it again."""
+    before = load_pcache()
+    cache = json.loads(json.dumps(before))
+    LIVE[pid]({}, cache, now, True)
+    try:
+        pcache_merge(before, cache)
+    except PcacheError as e:
+        applog("refresh: provider cache not updated: %s" % e)
+
+
+def sample(now, force=False):
+    rec = {"t": int(now), "s": read_claude()}
+    cache = load_pcache()
+    before = json.loads(json.dumps(cache))      # the provider reads below are slow: only what they change is merged back, under the lock
+    codex, cemails = read_codex()
+    for label, fresh in (cache.get("codex_fresh") or {}).items():     # a reading taken after an applied reset, until the cache catches up
+        if label in codex and (fresh.get("ts") or 0) > (codex[label].get("ts") or 0):
+            codex[label] = fresh
+    lift_awaits(codex, cache.get("codex_pending"))      # its own transaction: `cache` is left as read, so the merge below neither re-adds nor drops a mark
+    if codex or codex_homes_gone():     # recorded even when empty once the last saved home is removed: that snapshot must win in latest_of over the older seats
+        rec["codex"] = codex
+    if codex:
+        cache.setdefault("emails", {})["codex"] = cemails
+    run_live(LIVE, rec, cache, now, force)
     try:
         pcache_merge(before, cache)
     except PcacheError as e:                    # the provider cache is unreadable and was left alone: this sample's Claude reading is still worth recording
@@ -1346,6 +1869,12 @@ def build_limit(hist, latest, pid, wid, label, now, dflt):
     return lim
 
 
+def cap_note(s):
+    """A note as a sentence: its first word capitalised when it is a plain lowercase word ("sign-in needed" -> "Sign-in needed"). The stored notes keep their wording
+    (some are compared with each other, and an older cache holds the lowercase ones), so the page's text is capitalised here. A file name or a code word is left alone."""
+    return s[:1].upper() + s[1:] if isinstance(s, str) and re.match(r"[a-z][a-z-]*(?=[\s:;,]|$)", s) else s
+
+
 def build_provider(hist, pid, emails, now, extra):
     latest = latest_of(hist, pid)
     seats = seats_of(latest, pid)
@@ -1358,7 +1887,7 @@ def build_provider(hist, pid, emails, now, extra):
     for label in sorted(seats):
         s = seats[label]
         a = {"label": label, "email": (emails.get(pid) or {}).get(label), "ok": s.get("ok") is not False,
-             "note": s.get("note") or ((extra.get("notes") or {}).get(pid) or {}).get(label) or "", "readAt": int(s["ts"]) if s.get("ts") else None, "windows": []}
+             "note": cap_note(s.get("note") or ((extra.get("notes") or {}).get(pid) or {}).get(label) or ""), "readAt": int(s["ts"]) if s.get("ts") else None, "windows": []}
         for wid, wlabel, dp in wins:
             u = util_at(s, wid, now)
             if u is None:
@@ -1392,7 +1921,7 @@ def build_provider(hist, pid, emails, now, extra):
                 a["banked"] = sum(g["left"] for g in gs)
                 a["bankedList"] = [dict({"title": CREDIT_KINDS.get(g["kind"], "Reset"), "expiresAt": g["endsAt"]}, **({"n": g["left"]} if g["left"] > 1 else {})) for g in gs]
         if cr.get("note"):
-            a["bankedNote"] = cr["note"]
+            a["bankedNote"] = cap_note(cr["note"])
         acts = [r for r in sw if r != "best" and label in sw[r] and use.get("app" if r == "both" else r) != label]
         if pid == "codex" and label in (extra.get("codexPending") or ()):
             a["resetPending"] = True        # its last reset is unconfirmed: no Apply reset until a reading settles it
@@ -1413,14 +1942,15 @@ def build_provider(hist, pid, emails, now, extra):
         meas = measured_ratios((extra.get("codex") or {}).get("pairs") or {}, now)
         sug = weight_suggestions((extra.get("codex") or {}).get("pairs") or {}, now)
         for a in accounts:
-            x, n = meas.get(a["label"], (None, 0))
-            a["ratio"] = dict({"n": n}, **({"x": round(x, 2)} if x is not None else {}))
+            x, n, wide = meas.get(a["label"], (None, 0, {}))
+            a["ratio"] = dict({"n": n}, **({"x": round(x, 2)} if x is not None else {}), **wide)
             if a["label"] in sug:
                 a["suggest"] = {"w": sug[a["label"]][0], "n": sug[a["label"]][1]}
     dflt = {w: p for w, _, p in wins}
     ch = carry_good(hist, pid)                 # a failed read keeps the seat in the pool, as the headline (latest_of) already has it
     limits = [x for x in (build_limit(ch, latest, pid, wid, lbl, now, dflt) for wid, lbl in lims) if x]
     out = {"id": pid, "name": name, "total": len(accounts), "loaded": sum(a["ok"] for a in accounts),
+           "signed": sum(1 for a in accounts if a["ok"] or a["windows"] or a["email"]),        # what the tabs count: a placeholder row for a signed-out program (no reading, no address) is not an account
            "accounts": accounts, "limits": limits}
     if use:
         out["inUse"] = use
@@ -1447,6 +1977,8 @@ def build(hist, now, emails=None, app=False, extra=None):
     set_weights(extra.get("weights"))
     provs = [p for p in (build_provider(hist, pid, emails or {}, now, extra) for pid in PROVIDERS) if p]
     out = {"now": int(now), "app": app, "first": hist[0]["t"] if hist else None, "providers": provs}
+    if extra.get("build"):
+        out["build"], out["update"] = extra["build"], extra.get("update")       # the page reloads itself when `build` changes; `update` says what the banner shows
     d = extra.get("drift")
     if d and d.get("differing"):
         out["drift"] = {"n": len(d["differing"]), "names": [str(x) for x in d["differing"]], "checked": int(_f(d.get("checked")) or 0) or None}
@@ -1574,7 +2106,8 @@ def load_extra():
     return {"notes": c.get("notes"), "pnote": c.get("pnote"), "credits": c.get("credits") if credits_enabled() else None, "claims": pending_claims(c), "claudeReset": credits_enabled(), "drift": drift if isinstance(drift, dict) else None, "canReset": redeem_script() is not None, "inUse": in_use(), "switch": switch_targets(),
             "weights": dict(read_weights_cfg(), plans={"codex": plans}), "codex": {"pairs": pairs},
             "codexPending": {s: (v.get("id") or "") if isinstance(v, dict) else "" for s, v in sorted((c.get("codex_pending") or {}).items())},
-            "codexAwait": sorted(s for s, v in (c.get("codex_pending") or {}).items() if isinstance(v, dict) and v.get("await")), "codexRefresh": codex_usage_argv() is not None, "pcacheError": perr}
+            "codexAwait": sorted(s for s, v in (c.get("codex_pending") or {}).items() if isinstance(v, dict) and v.get("await")), "codexRefresh": codex_usage_argv() is not None, "pcacheError": perr,
+            "build": build_id(), "update": {"auto": autoupdate_enabled(), "state": UPDATE["state"], "text": UPDATE["text"], "done": c.get("updated") if isinstance(c.get("updated"), dict) else None}}
 
 
 LOCK_WAIT = 30                      # s: how long a writer waits for the history or provider-cache lock
@@ -1979,19 +2512,56 @@ def token_pairs(events):
     return out
 
 
+def merged_events(chunks):
+    """[(t, None, weekly used %, weekly reset, tokens so far)] for ONE seat from all its chunks (each a list of one log's, or one active-login run's, events).
+    A weekly % is one meter per seat, but a seat often runs several Codex sessions at once, each with its own cumulative token counter: measured per log, a log's
+    tokens between two ticks are only its share of what moved the meter. So each event contributes the tokens its own log added since that log's previous event (0 for a
+    log's first event and when its counter goes back), the events of every chunk are put in time order, and the tokens are summed across them. Weekly used is the running
+    maximum within a window (a log that lags behind another reads lower), and an event of a window older than the newest seen is dropped. token_pairs then runs on that."""
+    ev = []
+    for c in chunks:
+        prev = None
+        for t, _, used, reset, tok in c:
+            if tok is None:
+                continue
+            ev.append((t, used, reset, 0 if prev is None or tok < prev else tok - prev))
+            prev = tok
+    out, cum, win, top = [], 0, None, 0
+    for t, used, reset, d in sorted(ev, key=lambda e: e[0]):
+        cum += d
+        if used is None or reset is None:
+            continue
+        if win is None or reset > win + SLOP:
+            win, top = reset, 0
+        elif reset < win - SLOP:
+            continue
+        top = max(top, used)
+        out.append((t, None, top, win, cum))
+    return out
+
+
 def measured_ratios(pairs, now, days=21, minn=5):
-    """{seat: (ratio or None, samples)} from codex_measure's pairs: a seat's median tokens per 1 % over the last `days` days (at least `minn` pairs, else no ratio),
-    divided by the median of that figure over the weight-1 seats that have one. A sanity check on the configured weights, not an input to them."""
-    recent, med, base = _measured(pairs, now, days, minn)
-    return {s: (med[s] / base if s in med and base else None, len(v)) for s, v in recent.items()}
+    """{seat: (ratio or None, samples, info)} from codex_measure's pairs: a seat's median tokens per 1 % over the last `days` days, divided by that figure for
+    the smallest weight-1 seat that has one (the unit the weights count in). With fewer than `minn` pairs in the window (a rarely used seat) it falls back to ALL the seat's current-plan pairs, and info says
+    so ({"wide": True, "from": oldest t, "to": newest t}) so the page can show how old they are; fewer than `minn` pairs altogether: no ratio.
+    A sanity check on the configured weights, not an input to them."""
+    recent, med, base = _measured(pairs, now, days, minn, True)
+    out = {}
+    for s, v in recent.items():
+        wide = bool(v) and sum(t >= now - days * DAY for t, _ in pairs[s]) < minn
+        out[s] = (med[s] / base if s in med and base else None, len(v), {"wide": True, "from": min(t for t, _ in v), "to": max(t for t, _ in v)} if wide and s in med and base else {})
+    return out
 
 
-def _measured(pairs, now, days, minn):
-    """(recent {seat: [(t, tokens per 1 %)]}, median {seat: tokens per 1 %} of the seats with `minn`, reference: the median over the weight-1 seats among them or None)."""
+def _measured(pairs, now, days, minn, wide=False):
+    """(recent {seat: [(t, tokens per 1 %)]}, median {seat: tokens per 1 %} of the seats with `minn`, reference: the tokens per 1 % of the smallest weight-1 seat among them, or None).
+    `wide`: a seat with fewer than `minn` pairs in the last `days` days is measured on all of its pairs instead."""
     recent = {s: [(t, v) for t, v in p if t >= now - days * DAY] for s, p in pairs.items()}
+    if wide:
+        recent = {s: r if len(r) >= minn else list(pairs[s]) for s, r in recent.items()}
     med = {s: statistics.median(v for _, v in r) for s, r in recent.items() if len(r) >= minn}
     ref = [m for s, m in med.items() if wt("codex", s)[0] == 1]
-    return recent, med, statistics.median(ref) if ref else None
+    return recent, med, min(ref) if ref else None     # the smallest weight-1 seat is the unit the weights count in; a median would let a bigger seat left at 1 by mistake drag it up
 
 
 def nice_weight(x):
@@ -2054,13 +2624,14 @@ def codex_measure(cdir=None, now=None):
     for f, seat in files:
         if not seat:
             chunks += seat_runs(rollout_cached(f), known)
-    plans, newest, pairs = {}, {}, {}
+    plans, newest, by = {}, {}, {}
     for seat, ev in chunks:
         for t, plan, *_ in ev:
             if plan and t >= newest.get(seat, 0):
                 plans[seat], newest[seat] = plan, t
-        pairs.setdefault(seat, []).extend(token_pairs(ev))
-    return plans, pairs
+    for seat, ev in chunks:             # only the seat's current plan is measured: an older plan's tokens per 1 % are another figure
+        by.setdefault(seat, []).append([e for e in ev if e[1] == plans.get(seat)])
+    return plans, {seat: token_pairs(merged_events(cs)) for seat, cs in by.items()}
 
 
 # ---------------------------------------------------------------- backfill from .rotate-log.txt
@@ -2444,8 +3015,70 @@ class Store:
     def __init__(self):
         self.lock = threading.RLock()
         self.hist = load()
-        self.refreshing = threading.Lock()
+        self.refreshing = threading.Lock()      # the exclusive actions (a switch, a reset): one at a time, and never while a provider is refreshing (refresh_running)
+        self.plocks = {pid: threading.Lock() for pid in PROVIDERS}      # one per provider: a refresh holds only the providers it reads
         self.blob = build(self.hist, time.time(), load_emails(), True, load_extra())
+
+    def plock(self, pid):
+        """The refresh lock of one provider (a Store built without __init__, the selftest's, makes its locks here)."""
+        return self.__dict__.setdefault("plocks", {}).setdefault(pid, threading.Lock())
+
+    def refresh_running(self):
+        return any(l.locked() for l in self.__dict__.get("plocks", {}).values())
+
+    def refresh_one(self, pid, now):
+        """The live part of refreshing one provider -> (what it did, for the log; a Codex usage command still running, else None). The providers do not wait for each other."""
+        if pid == "claude":
+            try:
+                return "probe %s" % probe_claude(), None
+            except (OSError, subprocess.SubprocessError) as e:
+                return type(e).__name__, None
+        if pid == "codex":
+            cmd = codex_usage_argv()
+            err, p = run_codex_usage(cmd) if cmd else (None, None)     # first, so this refresh's sample reads its caches
+            if err:
+                applog("refresh: %s" % err)
+            return "still running" if p else err or ("updated" if cmd else "not set up"), p
+        refresh_live(pid, now)
+        return "read", None
+
+    def refresh(self, pids):
+        """Refresh the named providers AT ONCE, one thread and one lock each, then rebuild from what they wrote -> (blob, note, handed), or None when nothing could start
+        (a switch or reset is running, or every named provider is already refreshing). A provider already refreshing is left to that run. A Codex usage command that outlives its
+        wait is never killed: `handed` is then True, and its waiter keeps the Codex lock until it ends, the request included (codex_usage_wait)."""
+        if self.refreshing.locked():
+            return None
+        got = [pid for pid in pids if self.plock(pid).acquire(blocking=False)]
+        handed, mine, res = False, threading.Event(), {}
+        try:
+            if not got or self.refreshing.locked():     # the second look (the finally gives the locks back): a switch that took its lock after the first look has seen these held, or this stops
+                return None
+            now, procs = time.time(), {}
+
+            def one(pid):
+                try:
+                    res[pid], procs[pid] = self.refresh_one(pid, now)
+                except Exception as e:   # shortcut: one provider's failure is its own note in the log; the others and the rebuild still happen
+                    applog("refresh: %s failed: %s: %s" % (pid, type(e).__name__, e))
+                    res[pid], procs[pid] = "failed (%s)" % type(e).__name__, None
+            ts = [threading.Thread(target=one, args=(pid,), daemon=True) for pid in got]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            p = procs.get("codex")
+            if p is not None:               # never killed: from here its waiter owns the Codex lock, whatever happens below, until it and this request end
+                handed = True
+                threading.Thread(target=self.codex_usage_wait, args=(p, mine, self.plock("codex")), daemon=True).start()
+            blob = self.take()
+            applog("refresh: %s, %d providers" % (", ".join("%s %s" % kv for kv in res.items()), len(blob["providers"])))
+            note = res.get("codex") if "codex" in res and res["codex"] not in ("updated", "not set up", "still running") else None     # a Codex command that could not run or failed is shown, not only logged
+            return blob, note, handed
+        finally:
+            mine.set()
+            for pid in got:
+                if not (handed and pid == "codex"):
+                    self.plock(pid).release()
 
     def import_codex(self, now, cdir=None):
         """Recorded points from the rollout logs modified since the last import (the mtime watermark lives in the provider cache)."""
@@ -2498,11 +3131,11 @@ class Store:
                 append_lines(new)
                 self.hist = _read_hist()[0] if stale else sorted(self.hist + new, key=lambda h: h["t"])
 
-    def drift_check(self, now, here=None, py=None):
+    def drift_check(self, now, here=None, py=None, force=False):
         """rotator-sync.py --check --quiet at most every DRIFT_EVERY, when the script sits next to this one. It writes .rotator-drift.json under STATE (--state, so QUOTA_STATE_DIR redirects it with everything else; the update journal belongs to the live folder, not to STATE); its exit code and output are ignored."""
         script = os.path.join(here or HERE, "rotator-sync.py")
         with self.lock, pcache_txn() as cache:
-            if not os.path.isfile(script) or now - (cache.get("drift_run") or 0) < DRIFT_EVERY:
+            if not os.path.isfile(script) or (not force and now - (cache.get("drift_run") or 0) < DRIFT_EVERY):
                 return False
             cache["drift_run"] = int(now)           # first, so a hang or crash is not retried every sample
         try:
@@ -2510,6 +3143,98 @@ class Store:
         except (OSError, subprocess.SubprocessError):
             pass
         return True
+
+    def update_info(self):
+        """What the Settings page's Updates section shows: autoUpdate, the installer's state, when GitHub was last compared, what differs, and the installed commit
+        (a git checkout's HEAD; otherwise the commit the files match, else the last one an update installed)."""
+        d, c = read_drift(), load_pcache()
+        names = [str(x) for x in d.get("differing") or []]
+        done = c.get("updated") if isinstance(c.get("updated"), dict) else None
+        ref = str(d.get("ref") or "")
+        checkout = in_checkout()
+        sha = ""
+        if checkout:
+            try:
+                r = run_bounded(["git", "-C", HERE, "rev-parse", "--short", "HEAD"], 5, text=True, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+                sha = (r.stdout or "").strip() if r.returncode == 0 else ""
+            except (OSError, subprocess.SubprocessError):
+                pass
+        elif not names and ref:
+            sha = ref.split(" ")[-1]
+        elif done and done.get("sha"):
+            sha = str(done["sha"])
+        return {"auto": autoupdate_enabled(), "state": UPDATE["state"], "text": UPDATE["text"], "checkout": checkout, "installed": sha, "differing": names,
+                "checked": int(_f(d.get("checked")) or 0) or None, "done": done}
+
+    restart = None      # serve() sets it: a callable that swaps this server for a new one; the selftest's fakes have none
+
+    def update(self, auto=False, run=run_bounded, delay=0.0, now=None):
+        """Install what GitHub has: rotator-sync --pull (all or nothing, with its journal and backups: it is not reimplemented here), then, when the server's own file was replaced,
+        restart the server `delay` s later (so a request's answer is out first). One at a time and never beside a refresh, switch or reset -> {"outcome": "ok" | "error" | "busy" | "none",
+        "text", "restart"}. The exclusive lock is kept while a restart is on its way; the restart gives it back only when it could not happen."""
+        now = time.time() if now is None else now
+        script = os.path.join(HERE, "rotator-sync.py")
+        if in_checkout():
+            return {"outcome": "error", "text": UPDATE_CHECKOUT, "restart": False}
+        if not os.path.isfile(script):
+            return {"outcome": "error", "text": "rotator-sync.py is missing next to the dashboard.", "restart": False}
+        if not self.refreshing.acquire(blocking=False):
+            return {"outcome": "busy", "text": "Another action is running; try again in a minute.", "restart": False}
+        if self.refresh_running():
+            self.refreshing.release()
+            return {"outcome": "busy", "text": "A refresh is running; try again in a minute.", "restart": False}
+        UPDATE.update(state="running", text="")
+        restarting, names = False, [str(x) for x in read_drift().get("differing") or []]
+        try:
+            try:
+                r = run(PY + [script, "--pull", "--state", os.path.join(STATE, ".rotator-drift.json")], 300, text=True, stdin=subprocess.DEVNULL, creationflags=CHILD_FLAGS)
+                ok, text, restarting = update_outcome(r.returncode, (r.stdout or "") + "\n" + (r.stderr or ""))
+            except (OSError, subprocess.SubprocessError) as e:
+                ok, text = False, "The update did not run: %s. Nothing was changed." % type(e).__name__
+            applog("update%s: %s" % (" (automatic)" if auto else "", text))
+            try:
+                with pcache_txn() as c:
+                    c["update_try"] = {"at": int(now), "ok": ok, "sig": "|".join(sorted(names))}
+                    if ok and text != "Already up to date.":
+                        c["updated"] = {"at": int(now), "sha": (read_drift().get("ref") or "").split(" ")[-1][:12], "restart": restarting}
+            except (PcacheError, OSError, TimeoutError) as e:
+                applog("update: not recorded: %s" % e)
+            UPDATE.update(state="idle" if ok else "failed", text="" if ok else text)
+            if restarting:
+                threading.Thread(target=self.restart_job, args=(delay,), daemon=True).start()
+            else:
+                try:
+                    with self.lock:
+                        self.rebuild(time.time())       # the drift banner goes, the page files are new already
+                except Exception as e:   # shortcut: the update is done; a page that cannot be rebuilt now is rebuilt at the next sample
+                    applog("update: page rebuild failed: %s: %s" % (type(e).__name__, e))
+            return {"outcome": "ok" if ok else "error", "text": text, "restart": restarting}
+        finally:
+            if not restarting:
+                self.refreshing.release()
+
+    def restart_job(self, delay):
+        """The restart after an update. Never returns when it works (the process is replaced); when it cannot, the old server carries on and says so."""
+        time.sleep(delay)
+        try:
+            ok = bool(self.restart and self.restart())
+        except Exception as e:   # shortcut: whatever goes wrong, the old server must stay up and the lock must come back
+            applog("update: restart failed: %s: %s" % (type(e).__name__, e))
+            ok = False
+        if not ok:
+            UPDATE.update(state="failed", text="Updated, but the dashboard could not restart itself. Restart it from Task Scheduler (Claude usage dashboard).")
+            self.refreshing.release()
+
+    def auto_update(self, now, cfg=None):
+        """The sampler's share: install what GitHub has once the drift check has found something, unless autoUpdate is off, anything else is running, or the same files
+        failed less than UPDATE_RETRY ago. -> what update_decision said."""
+        if in_checkout():
+            return "checkout"
+        names = [str(x) for x in read_drift().get("differing") or []]
+        act = update_decision(names, autoupdate_enabled(cfg), self.refreshing.locked() or self.refresh_running(), load_pcache().get("update_try"), now)
+        if act == "apply":
+            self.update(auto=True, now=now)
+        return act
 
     def credits_read(self, label, now, fetch=http_json, force=False, ver=None, login=app_login):
         """Read one Claude seat's reset credits into the provider cache (`credits`: {seat: {ts, eligible, grants, next, hold, sig, note}}; `sig` only with a scope hold). `next` is claimed before the
@@ -2733,9 +3458,10 @@ class Store:
         finally:
             self.refreshing.release()
 
-    def codex_usage_wait(self, p, handler=None):
+    def codex_usage_wait(self, p, handler=None, lock=None):
         """The waiter for a Codex usage command that outlived SWITCH_TIMEOUT: wait for it with no upper bound (and for the refresh `handler` event,
-        so the lock outlives the request's own work too), sample again so its caches are read, then `refreshing` back, whatever happens."""
+        so the lock outlives the request's own work too), sample again so its caches are read, then the lock back (the Codex refresh lock; `refreshing` by default),
+        whatever happens."""
         try:
             try:
                 p.wait()
@@ -2748,7 +3474,7 @@ class Store:
         except Exception as e:   # shortcut: same broad catch as the handlers
             applog("refresh error: %s: %s" % (type(e).__name__, e))
         finally:
-            self.refreshing.release()
+            (lock or self.refreshing).release()
 
     def switch_done(self, what, res):
         applog("switch: %s -> %s" % (what, res["text"]))
@@ -2899,6 +3625,8 @@ def make_handler(store, port):
             if not host_ok(self.headers.get("Host"), port):
                 return self.send(403, "forbidden")
             path = self.path.split("?")[0]
+            if dashboard_settings and dashboard_settings.owns(path):
+                return dashboard_settings.serve(self, "GET", store)
             if path == "/":
                 return self.send(200, page_html(store.blob), "text/html; charset=utf-8")
             if path == "/api/data":
@@ -2912,6 +3640,15 @@ def make_handler(store, port):
                 except OSError:
                     pass
             self.send(404, "not found")
+
+        def grab(self):
+            """The exclusive actions' lock: refused while a provider is being refreshed too (refresh() looks at this lock after taking its own)."""
+            if not store.refreshing.acquire(blocking=False):
+                return False
+            if store.refresh_running():
+                store.refreshing.release()
+                return False
+            return True
 
         def refuse(self, code, msg):
             """Read a small request body before refusing: replying unread lets Windows abort the connection before the client sees the code."""
@@ -2927,7 +3664,9 @@ def make_handler(store, port):
             if not host_ok(self.headers.get("Host"), port):
                 return self.refuse(403, "forbidden")
             path = self.path.split("?")[0]
-            if path not in ("/api/refresh", "/api/codex-reset", "/api/codex-reset-clear", "/api/claude-reset", "/api/claude-reset-clear", "/api/switch"):
+            if dashboard_settings and dashboard_settings.owns(path):
+                return dashboard_settings.serve(self, "POST", store)
+            if path not in ("/api/refresh", "/api/codex-reset", "/api/codex-reset-clear", "/api/claude-reset", "/api/claude-reset-clear", "/api/switch", "/api/update"):
                 return self.refuse(404, "not found")
             if self.headers.get("X-Quota-App") != "1":
                 return self.refuse(403, "forbidden")
@@ -2941,34 +3680,46 @@ def make_handler(store, port):
                 return self.claude_reset_clear()
             if path == "/api/switch":
                 return self.switch()
-            if not store.refreshing.acquire(blocking=False):
-                return self.send(409, "a refresh is already running")
-            handed, mine = False, threading.Event()
+            if path == "/api/update":
+                return self.update()
             try:
-                cmd = codex_usage_argv()
-                err, p = run_codex_usage(cmd) if cmd else (None, None)     # first, so this refresh's sample reads its caches
-                if err:
-                    applog("refresh: %s" % err)
-                if p is not None:               # never killed: from here its waiter owns the lock, whatever happens below, until it and this request end
-                    handed = True
-                    threading.Thread(target=store.codex_usage_wait, args=(p, mine), daemon=True).start()
-                try:
-                    rc = probe_claude()
-                except (OSError, subprocess.SubprocessError) as e:
-                    rc = type(e).__name__
-                blob = store.take(force=True)
-                applog("refresh: claude probe -> %s, codex -> %s, %d providers" % (rc, "still running" if p else err or ("updated" if cmd else "not set up"),
-                                                                                  len(blob["providers"])))
+                n = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(n)) if 0 < n <= 1024 else {}
+                pid = body.get("provider") if isinstance(body, dict) else None
+            except (ValueError, AttributeError):
+                return self.js(400, {"error": "bad request"})
+            if pid is not None and pid not in PROVIDERS:        # {"provider": "<id>"} refreshes that one provider; no body refreshes every one
+                return self.js(400, {"error": "unknown provider"})
+            try:
+                r = store.refresh([pid] if pid else list(PROVIDERS))
+                if r is None:
+                    return self.send(409, "a refresh is already running")
+                blob, note, handed = r
                 if handed:
                     return self.js(202, dict(blob, refreshNote=CODEX_STILL))
-                self.js(200, dict(blob, refreshNote=err) if err else blob)     # a Codex command that could not run or failed is shown, not only logged
+                self.js(200, dict(blob, refreshNote=note) if note else blob)
             except Exception as e:   # shortcut: broad catch so one bad request never kills the server thread
                 applog("refresh error: %s: %s" % (type(e).__name__, e))
                 self.js(500, {"error": type(e).__name__})
-            finally:
-                mine.set()
-                if not handed:
-                    store.refreshing.release()
+
+        def update(self):
+            """Install what GitHub has now, then restart: the answer is sent first, and the page reloads itself when the new server's build id arrives."""
+            self.refuse_body()
+            try:
+                res = store.update(delay=1.0)
+                self.js({"ok": 200, "none": 200, "busy": 409}.get(res["outcome"], 500), res)
+            except Exception as e:   # shortcut: same broad catch as refresh
+                applog("update error: %s: %s" % (type(e).__name__, e))
+                self.js(500, {"outcome": "error", "text": "The update did not run: %s." % type(e).__name__, "restart": False})
+
+        def refuse_body(self):
+            """Read (and drop) a small request body, so the connection is not reset under the client."""
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+                if 0 < n <= 1024:
+                    self.rfile.read(n)
+            except (ValueError, OSError):
+                pass
 
         def codex_reset(self):
             try:
@@ -2981,7 +3732,7 @@ def make_handler(store, port):
                 return self.js(404, {"outcome": "error", "text": "The reset script was not found on this PC."})
             if not valid_seat(seat, codex_homes()):
                 return self.js(400, {"outcome": "error", "text": "Unknown Codex seat."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "A refresh is running; try again in a minute."})
             handed = False
             try:
@@ -3007,7 +3758,7 @@ def make_handler(store, port):
                 seat = rid = None
             if not valid_seat(seat, codex_homes()) or not (rid is None or isinstance(rid, str)):
                 return self.js(400, {"outcome": "error", "text": "Unknown Codex seat."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
             try:
                 self.js(200, store.codex_reset_clear(seat, rid))
@@ -3031,7 +3782,7 @@ def make_handler(store, port):
                 return self.js(404, {"outcome": "error", "text": "Claude resets are switched off on this PC (claudeResetCredits in rotator.local.json)."})
             if not valid_claude_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or (b.get("resend") is True and not isinstance(rid, str)):
                 return self.js(400, {"outcome": "error", "text": "Unknown Claude seat or reset kind."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "A refresh or another reset is running; try again in a minute."})
             try:
                 self.js(200, store.claude_reset(seat, kind, resend_rid=rid) if rid is not None else store.claude_reset(seat, kind))
@@ -3053,7 +3804,7 @@ def make_handler(store, port):
                 seat = kind = rid = None
             if not valid_claude_seat(seat, token_seats()) or not isinstance(kind, str) or kind not in RESET_KINDS or not isinstance(rid, str):
                 return self.js(400, {"outcome": "error", "text": "Unknown Claude seat or reset kind."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
             try:
                 self.js(200, store.claude_reset_clear(seat, kind, rid))
@@ -3075,7 +3826,7 @@ def make_handler(store, port):
             ok = switch_check(b, switch_targets())
             if not ok:
                 return self.js(400, {"outcome": "error", "text": "Unknown provider, role or seat."})
-            if not store.refreshing.acquire(blocking=False):
+            if not self.grab():
                 return self.js(409, {"outcome": "error", "text": "Another action is running; try again in a minute."})
             handed = False
             try:
@@ -3092,14 +3843,15 @@ def make_handler(store, port):
     return H
 
 
-def serve(port):
+def serve(port, wait=0):
+    """The app. `wait` (--wait-port): keep trying for the port that many seconds, for a server started to take over from the one that is shutting down."""
     from http.server import ThreadingHTTPServer
     store = Store()
     H = make_handler(store, port)
 
     def sampler():
         while True:
-            for step in (store.drift_check, store.credits_tick, lambda now: store.take()):      # each on its own: one failing (a provider cache that cannot be read) must not stop the others
+            for step in (store.drift_check, store.auto_update, store.credits_tick, lambda now: store.take()):      # each on its own: one failing (a provider cache that cannot be read) must not stop the others
                 try:
                     step(time.time())
                 except Exception as e:   # shortcut: same, the loop must keep sampling
@@ -3108,11 +3860,40 @@ def serve(port):
 
     if not os.path.isfile(os.path.join(ICONS, "icon-512.png")):
         make_icons()
-    try:
-        srv = ThreadingHTTPServer(("127.0.0.1", port), H)
-    except OSError as e:
-        applog("cannot listen on 127.0.0.1:%d (%s)" % (port, e))
-        return 1
+    end = time.time() + wait
+    while True:
+        try:
+            srv = ThreadingHTTPServer(("127.0.0.1", port), H)
+            break
+        except OSError as e:
+            if time.time() >= end:
+                applog("cannot listen on 127.0.0.1:%d (%s)" % (port, e))
+                return 1
+            time.sleep(0.5)
+
+    def restart():
+        """Swap this server for a new one running the files now on disk -> False when it cannot (this server then carries on). The new one is started FIRST and given a few seconds: if
+        it dies at once (an update that does not even load) this server stays up; only then does this one let go of the port and exit, and the new one takes it over (--wait-port).
+        It is detached from this process, so the Task Scheduler task that started this one ending does not end it.
+        shortcut: the replacement is not a child of the scheduled task, so Task Scheduler's own Stop does not stop it; Task Manager does, and so does the next logon."""
+        with store.lock:                # the sampler is not in the middle of a save
+            argv = new_server_argv()
+            try:
+                kid = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                                       creationflags=DETACH_FLAGS, start_new_session=os.name != "nt")
+            except OSError as e:
+                applog("update: could not start the new server: %s" % e)
+                return False
+            for _ in range(24):
+                if kid.poll() is not None:
+                    applog("update: the new server stopped at once (exit %s); keeping this one" % kid.returncode)
+                    return False
+                time.sleep(0.25)
+            applog("update: restarting (new server pid %s)" % kid.pid)
+            srv.shutdown()
+            srv.server_close()
+            os._exit(0)
+    store.restart = restart
     threading.Thread(target=sampler, daemon=True).start()
     applog("serving on 127.0.0.1:%d" % port)
     try:
@@ -3305,6 +4086,158 @@ def selftest():
     assert g["w"] == 0.22 and g["wp"] == WEEK and g["wr"] - 1_700_000_000 > 0, g
     assert parse_grok({"error": 1}) is None and parse_grok(None) is None
     assert "cursor" not in PROVIDERS and not any(n in globals() for n in ("fetch_cursor", "parse_cursor"))     # A: Cursor is gone
+    # Muse Code: unknown fields stay unknown, a failed read is a note, never a zero
+    ms = muse_seat({"ok": True, "tier": "Power Usage", "five_hour_used_percent": 12.0, "five_hour_resets_at": "11 PM", "weekly_used_percent": None, "weekly_resets_at": None, "parse_notes": ["Weekly usage % not found in text."]}, 50)
+    assert ms["s"] == 0.12 and "w" not in ms and ms["ts"] == 50 and ms["plan"] == "Power Usage" and "5-hour resets 11 PM" in ms["note"], ms
+    assert muse_seat({"ok": False, "error": "`muse` was not found on PATH."}, 1) == {"ok": False, "note": "`muse` was not found on PATH."}
+    assert muse_seat({"ok": True, "parse_notes": ["x"]}, 1)["ok"] is False and muse_seat(None, 1)["ok"] is False
+    ms = muse_seat({"ok": True, "tier": "T", "five_hour_used_percent": 5, "weekly_used_percent": 1, "five_hour_resets_at": "in 4h 51m", "weekly_resets_at": "in 10h 27m"}, 1000)
+    assert (ms["sr"], ms["sp"], ms["wr"], ms["wp"], "note" in ms) == (1000 + 4 * 3600 + 51 * 60, 18000, 1000 + 10 * 3600 + 27 * 60, WEEK, False), ms
+    assert muse_reset_at("Nov 24 at 2:00 PM", 0) is None and muse_reset_at("in 2d 3h", 0) == 2 * 86400 + 3 * 3600 and muse_reset_at("in ", 0) is None
+    assert fetch_muse.__doc__ and (shutil.which("muse") or fetch_muse(1) == (None, None))      # no muse CLI: no seat is recorded, so the provider has no account
+    mb = build([{"t": 1000, "muse": {"muse": muse_seat({"ok": True, "five_hour_used_percent": 25.0, "weekly_used_percent": 50.0}, 1000)}}], 1100)["providers"][0]
+    assert mb["id"] == "muse" and mb["name"] == "Muse (Meta)" and [x["label"] for x in mb["limits"]] == ["5-hour", "Weekly"], mb
+    # Gemini through Google's Cloud Code quota API (the response shape of retrieveUserQuotaSummary, as observed 2026-11-22)
+    GQ_ = {"groups": [
+        {"displayName": "Gemini Models", "description": "d", "buckets": [
+            {"bucketId": "a", "displayName": "Weekly", "window": "weekly", "resetTime": "2026-11-29T10:00:00Z", "remainingFraction": 0.41},
+            {"bucketId": "b", "displayName": "5 hour", "window": "5h", "resetTime": "2026-11-22T15:00:00Z"}]},                    # no remainingFraction: 0 left
+        {"displayName": "Claude and GPT models", "buckets": [
+            {"window": "weekly", "resetTime": "2026-11-29T10:00:00Z", "remainingFraction": 1}, {"window": "5h", "resetTime": "2026-11-22T15:00:00Z", "remainingFraction": 1}]},
+        {"displayName": "Gemini 4 Argon", "buckets": [{"window": "weekly", "resetTime": "2026-11-29T10:00:00.1234567Z", "remainingFraction": 1}, {"window": "monthly", "remainingFraction": 0.5}]}]}
+    gq = parse_gemini_quota(GQ_, 1000)
+    gw = lambda g, w: gemini_pool_id([g, w])
+    assert [gq["n"][k] for k in gq["n"]] == ["Gemini Models · Weekly", "Gemini Models · 5-hour", "Claude and GPT models · Weekly", "Claude and GPT models · 5-hour", "Gemini 4 Argon · Weekly"], gq["n"]
+    assert gq[gw("Gemini Models", "weekly")] == 0.59 and gq[gw("Gemini Models", "weekly") + "p"] == WEEK and gq[gw("Gemini Models", "5h")] == 1.0 and gq[gw("Gemini Models", "5h") + "p"] == 18000
+    assert gq[gw("Gemini 4 Argon", "weekly")] == 0.0 and gq[gw("Gemini Models", "weekly") + "r"] > 1_700_000_000 and gq["ts"] == 1000       # the unknown "monthly" bucket is skipped
+    assert parse_gemini_quota({"groups": []}, 1) is None and parse_gemini_quota({}, 1) is None and parse_gemini_quota(None, 1) is None and parse_gemini_quota({"groups": [{"buckets": []}]}, 1) is None
+    gqb = build([{"t": 1000, "gemini": {"antigravity": gq}}], 1100, {}, False, {})["providers"][0]
+    assert gqb["id"] == "gemini" and len(gqb["accounts"][0]["windows"]) == 5 and gqb["accounts"][0]["windows"][0]["label"] == "Gemini Models · Weekly", gqb["accounts"][0]["windows"][0]
+    assert gqb["accounts"][0]["windows"][4]["used"] == 0.0 and gqb["accounts"][0]["windows"][0]["used"] == 0.59
+    cred_ = lambda exp, rt="R1": json.dumps({"token": {"access_token": "A1", "refresh_token": rt, "expiry": exp}, "id_token_email": "me@x.example"}).encode()
+    gl = gemini_login(cred_("2026-11-22T07:53:34.3845412-05:00"))
+    assert gl["access"] == "A1" and gl["refresh"] == "R1" and gl["email"] == "me@x.example" and gl["exp"] == 1_795_352_014, gl
+    assert gemini_login(b"nope") is None and gemini_login(b"{}") is None and gemini_login(b'{"token":{"access_token":""}}') is None and gemini_login(b'{"token":{"access_token":"a","expiry":"x"}}') is None
+    calls_ = []
+
+    def fake_post(req, timeout=10):
+        calls_.append((req.full_url.split(":")[-1], req.get_header("Authorization"), req.get_header("User-agent")))
+        u = req.full_url
+        if u.endswith("loadCodeAssist"):
+            return 200, {"cloudaicompanionProject": "proj-1"}
+        if u.endswith("retrieveUserQuotaSummary"):
+            assert json.loads(req.data) == {"project": "proj-1"}
+            return (401, {}) if req.get_header("Authorization") == "Bearer BAD" else (200, GQ_)
+        return 200, {"access_token": "A2", "expires_in": 3599}
+    GEMINI_TOKEN.clear(), GEMINI_PROJECT.clear()
+    far_ = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3000))
+    seat_, why_ = read_gemini_api(time.time(), lambda t: cred_(far_), fake_post, "9.9.9")
+    assert why_ == "" and seat_["email"] == "me@x.example" and len(seat_["n"]) == 5 and [c[0] for c in calls_] == ["loadCodeAssist", "retrieveUserQuotaSummary"], calls_
+    assert calls_[0][1] == "Bearer A1" and calls_[0][2] == "antigravity/hub/9.9.9 windows/amd64"        # the saved token while it lasts, the user agent that returns every group
+    calls_.clear()
+    seat_, why_ = read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, "9.9.9", refresh=lambda rt, post: ("A2", int(time.time()) + 3000))
+    assert why_ == "" and calls_[-1][1] == "Bearer A2" and [c[0] for c in calls_] == ["retrieveUserQuotaSummary"] and GEMINI_TOKEN["access"] == "A2"      # expired: refreshed, project remembered
+    calls_.clear()
+    read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, "9.9.9", refresh=lambda rt, post: 1 / 0)
+    assert calls_[-1][1] == "Bearer A2"                                                                  # the refreshed token is reused from memory, no second refresh
+    assert read_gemini_api(5, lambda t: None, fake_post) == (None, None) and read_gemini_api(5, lambda t: b"junk", fake_post) == (None, None)       # no credential
+    assert read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z", None), fake_post)[1] == GEMINI_EXPIRED            # expired and no refresh token
+    GEMINI_TOKEN.clear()
+    assert read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, refresh=lambda rt, post: ("expired", 0)) == (None, GEMINI_EXPIRED)
+    assert "could not refresh" in read_gemini_api(time.time(), lambda t: cred_("2020-01-01T00:00:00Z"), fake_post, refresh=lambda rt, post: (None, 0))[1]
+    GEMINI_TOKEN.clear()
+    far_ = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + 3000))
+    calls_.clear()
+    stale_ = lambda t: json.dumps({"token": {"access_token": "BAD", "refresh_token": "R1", "expiry": far_}}).encode()
+    seat_, why_ = read_gemini_api(time.time(), stale_, fake_post, "9.9.9", refresh=lambda rt, post: ("A2", int(time.time()) + 3000))
+    assert why_ == "" and [c[1] for c in calls_ if c[0] == "retrieveUserQuotaSummary"] == ["Bearer BAD", "Bearer A2"]       # the API refuses a token that looked valid: one refresh, one retry
+    assert read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (500, {}))[1] == "Antigravity usage unavailable (HTTP 500)"
+    assert read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (0, "URLError"))[1] == "Antigravity usage unavailable (network error (URLError))"
+    GEMINI_PROJECT.clear()
+    assert "unexpected response" in read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (200, {"cloudaicompanionProject": "p"}))[1]
+    GEMINI_PROJECT.clear()
+    assert "no Cloud Code project" in read_gemini_api(5, lambda t: cred_(far_), lambda req, timeout=10: (200, {}))[1]
+    GEMINI_PROJECT.clear()
+    # the OAuth refresh: client pairs are read from the installed app at run time; the first pair Google accepts is remembered
+    with tempfile.TemporaryDirectory() as ld_:
+        fakeexe_ = os.path.join(ld_, "language_server.exe")
+        cid_ = lambda n: ("123456789012-" + "abcdefghijklmnopqrstuvwxyz012345"[:30 + n % 2] + ".apps.googleusercontent.com").encode()
+        open(fakeexe_, "wb").write(b"\0" * (9 << 20) + b"junk" + cid_(0) + b"\0" + b"GOCSPX-" + b"s" * 28 + b"\0xx" + cid_(1) + b"GOCSPX-" + b"t" * 28 + b"\0")      # past one 8 MB read
+        prs_ = gemini_oauth_pairs(fakeexe_)
+        assert len(prs_) == 4 and prs_[0][1] == "GOCSPX-" + "s" * 28 and gemini_oauth_pairs(os.path.join(ld_, "missing.exe")) == []
+    tried_ = []
+
+    def tok_post(req, timeout=10):
+        body = urllib.parse.parse_qs(req.data.decode())
+        tried_.append((body["client_id"][0][-8:], body["client_secret"][0][7:9]))
+        return (200, {"access_token": "N1", "expires_in": 100}) if body["client_secret"][0][7] == "t" else (400, {"error": "invalid_client"})
+    pl2_ = list(prs_)
+    got_ = gemini_refresh("R1", tok_post, pl2_)
+    assert got_[0] == "N1" and len(tried_) == 2 and got_[1] > time.time() and pl2_[0][1][7] == "t"           # one pair refused, the second accepted, and tried first next time
+    pl_ = list(prs_)
+    assert gemini_refresh("R1", lambda r, t=10: (400, {"error": "invalid_grant"}), pl_) == ("expired", 0) and gemini_refresh("R1", lambda r, t=10: (0, "x"), pl_) == (None, 0)
+    assert gemini_refresh("R1", lambda r, t=10: (500, None), pl_) == (None, 0) and gemini_refresh("R1", tok_post, []) == (None, 0)
+    # the fallback: no credential asks the running language server (the older IDE); neither -> sign in once
+    assert read_gemini_any(1, lambda n: (None, None), lambda n: ({"ts": 1}, "")) == ({"ts": 1}, "")
+    assert read_gemini_any(1, lambda n: (None, None), lambda n: (None, LS_OFF)) == (None, GEMINI_NO_LOGIN)
+    assert read_gemini_any(1, lambda n: (None, GEMINI_EXPIRED), lambda n: ({"ts": 1}, "")) == (None, GEMINI_EXPIRED)      # a credential that does not work is not hidden by the fallback
+    assert read_gemini_any(1, lambda n: ({"ts": 2}, ""), lambda n: 1 / 0) == ({"ts": 2}, "")
+    assert gemini_version(os.path.join(tempfile.gettempdir(), "no-such-antigravity.exe")) == GEMINI_VER and re.fullmatch(r"\d+\.\d+\.\d+", gemini_version())
+    # Kimi Code: fixture-tested only (no account to read a real answer from)
+    KJ_ = {"usages": {"limit_5h": {"used_ratio": 0.25, "reset_time": "2026-11-22T15:00:00Z"}, "limit_7d": {"used_ratio": "0.5", "reset_time": "2026-11-29T10:00:00.5Z"},
+                      "limit_month_total": {"used_ratio": 1.7, "reset_time": "soon"}, "limit_month_code": {"reset_time": "2026-12-01T00:00:00Z"}}, "boosterWallet": {"balance": {"type": "BOOSTER"}}}
+    ks = kimi_seat(KJ_, 1000)
+    assert ks["s"] == 0.25 and ks["sp"] == 18000 and ks["w"] == 0.5 and ks["wp"] == WEEK and ks["m"] == 1.0 and "mr" not in ks and "c" not in ks and ks["sr"] > 1_700_000_000 and ks["ts"] == 1000, ks
+    assert kimi_seat({"usages": {}}, 1) is None and kimi_seat({}, 1) is None and kimi_seat(None, 1) is None and kimi_seat({"usages": {"limit_5h": {"used_ratio": "x"}}}, 1) is None
+    kb_ = build([{"t": 1000, "kimi": {"kimi": ks}}], 1100, {}, False, {})["providers"][0]
+    assert kb_["id"] == "kimi" and kb_["name"] == "Kimi" and [x["label"] for x in kb_["limits"]] == ["5-hour", "Weekly", "Monthly"] and len(kb_["accounts"][0]["windows"]) == 3, kb_["limits"]
+    with tempfile.TemporaryDirectory() as kh_:
+        cd_ = os.path.join(kh_, "credentials")
+        os.makedirs(cd_)
+        wk_ = lambda name, tok, exp, age=0: (open(os.path.join(cd_, name), "w").write(json.dumps({"access_token": tok, "refresh_token": "r", "expires_at": exp})), os.utime(os.path.join(cd_, name), (time.time() - age,) * 2))
+        assert kimi_token(100, kh_) == ("none", None) and not kimi_installed(kh_, lambda n: None)
+        wk_("kimi-code.json", "", 0)                                                                    # a revoked login (empty access token)
+        assert kimi_token(100, kh_) == ("none", None)
+        wk_("kimi-code.json", "T1", 50)
+        assert kimi_token(100, kh_) == ("expired", None) and kimi_token(10, kh_) == ("ok", "T1")        # 30 s of margin
+        wk_("other.json", "T2", 500, age=100)                                                           # an older file with a good token still counts
+        assert kimi_token(100, kh_) == ("ok", "T2")
+        open(os.path.join(cd_, "junk.json"), "w").write("not json")
+        wk_("kimi-code.json", "T3", 5000)                                                                # the newest login wins
+        assert kimi_token(100, kh_) == ("ok", "T3")
+        assert kimi_installed(kh_, lambda n: "x") and kimi_base(kh_) == KIMI_BASES["mainland-cn"]
+        open(os.path.join(kh_, "region"), "w").write("global\n")
+        assert kimi_base(kh_) == KIMI_BASES["global"]
+        os.environ["KIMI_CODE_BASE_URL"] = "https://k.example/coding/v1/"
+        try:
+            assert kimi_base(kh_) == "https://k.example/coding/v1"
+        finally:
+            del os.environ["KIMI_CODE_BASE_URL"]
+        kreq_ = []
+
+        def kpost(req, timeout=10):
+            kreq_.append((req.full_url, req.get_header("Authorization")))
+            return 200, KJ_
+        seat_, em_ = fetch_kimi(1000, kh_, kpost)
+        assert em_ is None and seat_["s"] == 0.25 and kreq_ == [("https://api.kimi.ai/coding/v1/usages", "Bearer T3")], kreq_
+        assert fetch_kimi(1000, kh_, lambda r, t=10: (401, {}))[0] == {"ok": False, "note": KIMI_EXPIRED} and fetch_kimi(1000, kh_, lambda r, t=10: (500, None))[0]["note"] == "Kimi usage unavailable (HTTP 500)"
+        assert fetch_kimi(1000, kh_, lambda r, t=10: (200, {"usages": {}}))[0]["note"] == "Kimi usage unavailable (unexpected response)"
+        assert fetch_kimi(1000, kh_, lambda r, t=10: (0, "URLError"))[0]["note"] == "Kimi usage unavailable (network error (URLError))"
+        assert fetch_kimi(10**10, kh_, kpost)[0] == {"ok": False, "note": KIMI_EXPIRED} and len(kreq_) == 1                  # an expired login is not sent
+        for f_ in glob.glob(os.path.join(cd_, "*.json")):
+            os.remove(f_)
+        assert fetch_kimi(1000, kh_, kpost) == ({"ok": False, "note": KIMI_SIGNED_OUT}, None)                             # installed, never signed in
+        nb_ = build([{"t": 5, "kimi": {"kimi": {"ok": False, "note": KIMI_SIGNED_OUT}}}], 9, {}, False, {})["providers"][0]
+        assert nb_["id"] == "kimi" and nb_["accounts"][0]["ok"] is False and nb_["accounts"][0]["note"] == KIMI_SIGNED_OUT and nb_["loaded"] == 0 and nb_["signed"] == 0     # the page shows the note; a signed-out Kimi has no accounts to count
+        sb_ = build([{"t": 5, "s": {"A": {"ok": False, "note": "probe failed"}, "B": {"ok": True, "w": 0.1, "wr": 9999, "ts": 5}}}], 9, {"claude": {"A": "a@x.org"}}, False, {})["providers"][0]
+        assert sb_["total"] == 2 and sb_["loaded"] == 1 and sb_["signed"] == 2, sb_     # a real seat whose read failed (its address is known) still counts
+    with tempfile.TemporaryDirectory() as kh2_:
+        keep_which_ = shutil.which
+        shutil.which = lambda n, *a, **k: None
+        try:
+            assert fetch_kimi(1, kh2_, kpost) == (None, None)                                                           # not installed: no seat, so no tab
+        finally:
+            shutil.which = keep_which_
     assert PROVIDERS["grok"][0] == "xAI" and PROVIDERS["gemini"][0] == "Gemini" and manifest()["name"] == manifest()["short_name"] == "Agent Dashboard" and "same xAI quota" in PROVIDER_NOTE["grok"]
 
     # A: history lines and the provider cache lose the retired cursor key, on disk
@@ -3603,7 +4536,8 @@ def selftest():
         cn_ = build([dict(rec_, codex={"C": got_["C"]})], N + 9, {}, False, {})["providers"][0]["accounts"]
         assert cn_[0]["ok"] and cn_[0]["note"] == "" and cn_[0]["windows"], cn_       # the reading shows on the page
         # the desktop app's page does not carry the meta refresh (removing the tag in script does not cancel the reload the browser already scheduled)
-        assert '<meta http-equiv="refresh"' not in page_html({"app": True}) and '<meta http-equiv="refresh" content="300">' in page_html({"app": False}) and '<meta http-equiv="refresh"' in page_html({})
+        assert '<meta http-equiv="refresh"' not in page_html({"app": True}) and '<meta http-equiv="refresh"' not in page_html({"app": False}) and '<meta http-equiv="refresh"' not in page_html({})
+        assert "setInterval(() => location.reload(), 300000)" in page_html({"app": False}) and "loadData(true)" in page_html({"app": True})       # the app polls /api/data; a page opened from its file reloads itself
         calls_, keep_ = [], (sample, load, save)                                        # the one-shot run (no --serve): sample first, then load, then reconcile
         try:
             globals()["sample"] = lambda now, force=False: calls_.append("sample") or {"t": N + 9, "codex": {"A": {"ts": N - 100, "w": 0.1}}}
@@ -3863,7 +4797,7 @@ def selftest():
     # B: Idle CPU priority. Every child is started with CHILD_FLAGS; this process lowers itself in main()
     with open(__file__, encoding="utf-8") as fh:
         flags = re.findall("creation" + r"flags=([^,)\n]+)", fh.read())
-    assert len(flags) >= 6 and set(flags) == {"CHILD_FLAGS"}, flags
+    assert len(flags) >= 6 and set(flags) <= {"CHILD_FLAGS", "DETACH_FLAGS"} and flags.count("DETACH_FLAGS") == 1 and DETACH_FLAGS & CHILD_FLAGS == CHILD_FLAGS, flags
     if os.name == "nt":
         k = _kernel32()
         me, was = k.GetCurrentProcess(), k.GetPriorityClass(k.GetCurrentProcess())
@@ -3889,6 +4823,26 @@ def selftest():
             assert st.drift_check(1000 * DRIFT_EVERY, td, [sys.executable]) and open(mark).read() == "--check --quiet --state " + os.path.join(STATE, ".rotator-drift.json") + chr(10)
             assert not st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY - 1, td, [sys.executable]) and open(mark).read().count("--check") == 1
             assert st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY, td, [sys.executable]) and open(mark).read().count("--check") == 2
+            assert not st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY + 5, td, [sys.executable]) and st.drift_check(1000 * DRIFT_EVERY + DRIFT_EVERY + 5, td, [sys.executable], force=True)     # Settings' Check now ignores the interval
+            assert open(mark).read().count("--check") == 3
+            # update_info: what the Settings page's Updates section shows
+            keep_st_, keep_chk_ = globals()["STATE"], globals()["in_checkout"]
+            globals()["STATE"], globals()["in_checkout"] = td, lambda here=None: False
+            try:
+                dp_ = os.path.join(td, ".rotator-drift.json")
+                open(dp_, "w").write(json.dumps({"checked": 1234, "ref": "origin/main abc1234", "differing": []}))
+                ui_ = st.update_info()
+                assert ui_["installed"] == "abc1234" and ui_["differing"] == [] and ui_["checked"] == 1234 and ui_["checkout"] is False and ui_["auto"] is autoupdate_enabled()
+                open(dp_, "w").write(json.dumps({"checked": 5, "ref": "origin/main def5678", "differing": ["a.py", "b.ps1"]}))
+                ui_ = st.update_info()
+                assert ui_["installed"] == "" and ui_["differing"] == ["a.py", "b.ps1"]            # files differ: the matching commit is not known
+                with pcache_txn() as c_:
+                    c_["updated"] = {"at": 9, "sha": "0011223", "restart": False}
+                assert st.update_info()["installed"] == "0011223" and st.update_info()["done"]["at"] == 9
+                os.remove(dp_)
+                assert st.update_info()["checked"] is None
+            finally:
+                globals()["STATE"], globals()["in_checkout"] = keep_st_, keep_chk_
             # both child runs go through run_bounded (a grandchild holding the pipe must not hold the sampler): a recorder in its place sees each call and its deadline
             real_rb_, seen_rb_ = globals()["run_bounded"], []
 
@@ -3897,7 +4851,7 @@ def selftest():
                 raise subprocess.TimeoutExpired(argv, timeout)           # a hung child: both callers must absorb it
             globals()["run_bounded"] = rb_rec_
             try:
-                assert st.drift_check(1000 * DRIFT_EVERY + 2 * DRIFT_EVERY, td, [sys.executable]) and seen_rb_[-1][1] == 120 and seen_rb_[-1][0][-4:] == ["--check", "--quiet", "--state", os.path.join(STATE, ".rotator-drift.json")]
+                assert st.drift_check(1000 * DRIFT_EVERY + 3 * DRIFT_EVERY, td, [sys.executable]) and seen_rb_[-1][1] == 120 and seen_rb_[-1][0][-4:] == ["--check", "--quiet", "--state", os.path.join(STATE, ".rotator-drift.json")]
                 if os.name == "nt":
                     assert ls_probe() == [] and seen_rb_[-1][1] == 30 and seen_rb_[-1][0][0] == "powershell"
             finally:
@@ -3963,7 +4917,7 @@ def selftest():
         wst.refreshing.acquire()
         wst.codex_usage_wait(p_)
         assert p_.returncode == 0 and took == [True] and not wst.refreshing.locked() and seen_[-1] is None     # waited with no limit, sampled, lock back
-        # /api/refresh with a Codex command still running: even when the request's own sample fails, the lock is held until the command ends
+        # /api/refresh with a Codex command still running: even when the request's own sample fails, the Codex lock is held until the command ends (the other providers' are not)
         gate_ = threading.Event()
 
         class Slow_:
@@ -3981,28 +4935,279 @@ def selftest():
             if len(boom_) == 1:
                 raise RuntimeError("sample failed")
         rst.take = take_
-        keep_r = {k: globals()[k] for k in ("codex_usage_argv", "run_codex_usage", "probe_claude")}
+        keep_r = {k: globals()[k] for k in ("codex_usage_argv", "run_codex_usage", "probe_claude", "refresh_live")}
         rsrv = __import__("http.server").server.ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
         rport = rsrv.server_address[1]
         rsrv.RequestHandlerClass = make_handler(rst, rport)
         threading.Thread(target=rsrv.serve_forever, daemon=True).start()
         try:
-            globals().update(codex_usage_argv=lambda cfg=None: ["codex-usage"], run_codex_usage=lambda argv, popen=None: (None, Slow_()), probe_claude=lambda: 0)
+            globals().update(codex_usage_argv=lambda cfg=None: ["codex-usage"], run_codex_usage=lambda argv, popen=None: (None, Slow_()), probe_claude=lambda: 0, refresh_live=lambda pid, now: None)
             cn_ = __import__("http.client").client.HTTPConnection("127.0.0.1", rport, timeout=10)
             cn_.request("POST", "/api/refresh", b"", {"Host": "127.0.0.1:%d" % rport, "X-Quota-App": "1"})
             st_ = cn_.getresponse().status
             cn_.close()
             time.sleep(0.3)
-            assert st_ == 500 and rst.refreshing.locked()                      # the sample failed, the Codex command still runs: the lock stays
+            assert st_ == 500 and rst.plock("codex").locked() and not rst.plock("claude").locked() and not rst.plock("grok").locked()      # the sample failed, the Codex command still runs: only its lock stays
+            assert not rst.refreshing.locked() and rst.refresh_running()
             gate_.set()
             end_ = time.time() + 5
-            while rst.refreshing.locked() and time.time() < end_:
+            while rst.plock("codex").locked() and time.time() < end_:
                 time.sleep(0.02)
-            assert not rst.refreshing.locked() and len(boom_) == 2             # the command ended: the waiter sampled again and gave the lock back
+            assert not rst.plock("codex").locked() and not rst.refresh_running() and len(boom_) == 2      # the command ended: the waiter sampled again and gave the lock back
         finally:
             globals().update(keep_r)
             rsrv.shutdown()
             rsrv.server_close()
+        # A3: providers refresh AT ONCE (the wall clock is the slowest, not the sum), each under its own lock; a body {"provider": id} refreshes one
+        import http.client as hc_
+        pst = Store.__new__(Store)
+        pst.lock, pst.refreshing, pst.blob = threading.RLock(), threading.Lock(), {"providers": []}
+        pcalls_ = []
+        pst.take = lambda force=False: pcalls_.append(("take", force)) or {"providers": [1]}
+
+        def prov_(pid, now):
+            pcalls_.append(pid)
+            time.sleep(0.4)
+        keep_p = {k: globals()[k] for k in ("probe_claude", "refresh_live", "codex_usage_argv")}
+        psrv = __import__("http.server").server.ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
+        pport = psrv.server_address[1]
+        psrv.RequestHandlerClass = make_handler(pst, pport)
+        threading.Thread(target=psrv.serve_forever, daemon=True).start()
+
+        def post_(body, host=None, path="/api/refresh"):
+            cn = hc_.HTTPConnection("127.0.0.1", pport, timeout=20)
+            cn.request("POST", path, body, {"Host": host or "127.0.0.1:%d" % pport, "X-Quota-App": "1", "Content-Type": "application/json"})
+            r = cn.getresponse()
+            out = (r.status, r.read())
+            cn.close()
+            return out
+        try:
+            globals().update(probe_claude=lambda: (time.sleep(0.4), pcalls_.append("claude"), 0)[2], refresh_live=prov_, codex_usage_argv=lambda cfg=None: None)
+            t0_ = time.time()
+            st_, body_ = post_(b"")
+            took_ = time.time() - t0_
+            assert st_ == 200 and sorted(c for c in pcalls_ if c != ("take", False)) == sorted(["claude", "grok", "muse", "kimi", "gemini"]) and pcalls_[-1] == ("take", False), pcalls_
+            assert took_ < 1.5, took_                                      # five providers of 0.4 s each: one provider's time, not five
+            assert not pst.refresh_running()
+            pcalls_.clear()
+            st_, body_ = post_(json.dumps({"provider": "grok"}).encode())                        # one provider: the others are not read
+            assert st_ == 200 and pcalls_ == ["grok", ("take", False)], pcalls_
+            pcalls_.clear()
+            assert post_(json.dumps({"provider": "nope"}).encode())[0] == 400 and post_(b"{bad")[0] == 400 and not pcalls_
+            assert post_(b"", host="evil.example")[0] == 403 and not pcalls_
+            # per-provider locks: a provider already refreshing is left to that run; the others still refresh
+            pst.plock("grok").acquire()
+            st_, body_ = post_(b"")
+            assert st_ == 200 and "grok" not in pcalls_ and "gemini" in pcalls_, pcalls_
+            pcalls_.clear()
+            assert post_(json.dumps({"provider": "grok"}).encode())[0] == 409 and not pcalls_                  # the one asked for is busy
+            pst.plock("grok").release()
+            # a switch or reset running refuses a refresh, and a refresh running refuses them
+            pst.refreshing.acquire()
+            assert post_(b"")[0] == 409 and not pcalls_
+            pst.refreshing.release()
+            pst.plock("kimi").acquire()
+            keep_tg_ = globals()["switch_targets"]
+            globals()["switch_targets"] = lambda *a, **k: {"claude": {"app": ["A"]}}
+            try:
+                assert post_(json.dumps({"provider": "claude", "role": "app", "seat": "A"}).encode(), path="/api/switch")[0] == 409 and not pst.refreshing.locked()      # a provider refreshing: refused, lock given back
+            finally:
+                globals()["switch_targets"] = keep_tg_
+            pst.plock("kimi").release()
+            # one provider failing does not stop the others or the rebuild
+            globals().update(refresh_live=lambda pid, now: 1 / 0 if pid == "muse" else pcalls_.append(pid))
+            pcalls_.clear()
+            assert post_(b"")[0] == 200 and "gemini" in pcalls_ and pcalls_[-1] == ("take", False) and "muse failed: ZeroDivisionError" in open(APPLOG).read()
+        finally:
+            globals().update(keep_p)
+            psrv.shutdown()
+            psrv.server_close()
+        # refresh_live() reads one live provider, forced, into the provider cache; a sample right after reads nothing again
+        with tempfile.TemporaryDirectory() as rl_:
+            keep_pc_, keep_f_ = PCACHE, {k: globals()[k] for k in ("fetch_grok", "read_gemini_any")}
+            globals()["PCACHE"] = os.path.join(rl_, "p.json")
+            seen_ = []
+            try:
+                globals().update(fetch_grok=lambda now_: (seen_.append(now_), ({"ts": int(now_), "w": 0.1}, "g@x.example"))[1],
+                                 read_gemini_any=lambda now_: (seen_.append("g"), ({"ts": int(now_), "email": "a@x.example", "n": {"w1": "W"}, "w1": 0.2}, ""))[1])
+                refresh_live("grok", 1000)
+                refresh_live("gemini", 1000)
+                c_ = load_pcache()
+                assert c_["grok"]["at"] == 1000 and c_["emails"]["grok"] == {"grok": "g@x.example"} and c_["gemini_read"]["at"] == 1000 and c_["emails"]["gemini"] == {"antigravity": "a@x.example"}
+                rec_, cache_ = {}, load_pcache()
+                run_live(["grok", "gemini"], rec_, cache_, 1100, False)
+                assert seen_ == [1000, "g"] and rec_["grok"]["grok"]["w"] == 0.1 and rec_["gemini"]["antigravity"]["w1"] == 0.2 and "email" not in rec_["gemini"]["antigravity"], (seen_, rec_)       # fresh: not read again
+                assert cache_["gemini_read"]["seat"]["email"] == "a@x.example"                                  # the cached read keeps the address; only the recorded copy lost it
+                run_live(["grok", "gemini"], rec_, cache_, 1000 + GEMINI_EVERY + 1, False)
+                assert seen_[2:] == ["g"], seen_                                                                # Gemini's own window is shorter than Grok's
+                run_live(["grok"], rec_, cache_, 1100, True)
+                assert seen_[-1] == 1100                                                                         # forced
+                globals().update(fetch_grok=lambda now_: 1 / 0)
+                rec_ = {}
+                run_live(["grok"], rec_, cache_, 99999, True)
+                assert rec_["grok"]["grok"] == {"ok": False, "note": "Grok usage unavailable (ZeroDivisionError)"}
+            finally:
+                globals().update(keep_f_, PCACHE=keep_pc_)
+        # A4: self-update. What to do about drift is one pure decision
+        D_ = ["usage-history.py"]
+        assert update_decision([], True, False, None, 100) == "none" and update_decision(D_, False, False, None, 100) == "manual" and update_decision(D_, True, True, None, 100) == "wait"
+        assert update_decision(D_, True, False, None, 100) == "apply" and update_decision(D_, True, False, {"ok": True, "sig": "usage-history.py", "at": 99}, 100) == "apply"
+        assert update_decision(D_, True, False, {"ok": False, "sig": "usage-history.py", "at": 100}, 100 + UPDATE_RETRY - 1) == "backoff"       # the same files failed a moment ago
+        assert update_decision(D_, True, False, {"ok": False, "sig": "usage-history.py", "at": 100}, 100 + UPDATE_RETRY) == "apply"             # ... and again after the wait
+        assert update_decision(D_ + ["x"], True, False, {"ok": False, "sig": "usage-history.py", "at": 100}, 101) == "apply"                      # other files: tried at once
+        assert update_decision(["b", "a"], True, False, {"ok": False, "sig": "a|b", "at": 100}, 101) == "backoff"                                 # order does not matter
+        with tempfile.TemporaryDirectory() as ut_:
+            cfg_ = os.path.join(ut_, "rotator.local.json")
+            assert autoupdate_enabled(cfg_) is True                                                       # no file: on
+            for txt_, want_ in (('{"autoUpdate": false}', False), ('{"autoUpdate": true}', True), ('{}', True), ('not json', True), ('{"autoUpdate": 0}', True)):
+                open(cfg_, "w").write(txt_)
+                assert autoupdate_enabled(cfg_) is want_, txt_
+            ok_, txt_, rs_ = update_outcome(0, "replaced usage-history.py\nadded    new.py\nrotator-sync: the usage dashboard's files changed")
+            assert ok_ and txt_ == "Updated 2 files." and rs_ is True
+            ok_, txt_, rs_ = update_outcome(0, "replaced usage-dashboard.template.html\nrotator-sync: the usage dashboard's page is updated")
+            assert ok_ and txt_ == "Updated 1 file." and rs_ is False
+            assert update_outcome(0, "rotator-sync: nothing to pull, live already matches the ref") == (True, "Already up to date.", False)
+            ok_, txt_, rs_ = update_outcome(1, "rotator-sync: another update is running; nothing was changed\n")
+            assert not ok_ and "another update is running" in txt_ and "Nothing was changed" in txt_ and rs_ is False and not update_outcome(2, "")[0]
+            # the restart command: same interpreter, script by full path, the arguments as they were, no doubled --wait-port
+            nsa_ = new_server_argv(["usage-history.py", "--serve", "--port", "8787", "--state-dir", "D:/s", "--wait-port", "5"], "pw.exe", 40)
+            assert nsa_ == ["pw.exe", os.path.abspath("usage-history.py"), "--serve", "--port", "8787", "--state-dir", "D:/s", "--wait-port", "40"], nsa_
+            # the build id: server code + the page files; it changes with either
+            open(os.path.join(ut_, "usage-dashboard.template.html"), "w").write("a")
+            open(os.path.join(ut_, "usage-sim.js"), "w").write("b")
+            id1_ = build_id(ut_)
+            assert re.fullmatch(r"[0-9a-f]{10}", id1_) and build_id(ut_) == id1_
+            open(os.path.join(ut_, "usage-sim.js"), "w").write("c")
+            assert build_id(ut_) != id1_ and build_id(os.path.join(ut_, "none")) not in (id1_, build_id(ut_))
+            assert SERVER_SIG.startswith(b'"""usage-history') and build([], 5, {}, False, {"build": "abc", "update": {"auto": True}})["build"] == "abc" and "build" not in build([], 5, {}, False, {})
+            # a git checkout (a clone, or a worktree of one) is never updated by the dashboard: that is git's job, and rotator-sync would replace its working files
+            gd_ = os.path.join(ut_, "co", "windows")
+            os.makedirs(gd_)
+            assert not in_checkout(gd_)
+            open(os.path.join(ut_, "co", ".git"), "w").write("gitdir: x")             # a worktree's .git is a file
+            assert in_checkout(gd_) and in_checkout(os.path.join(ut_, "co"))
+            assert not in_checkout(ut_) and in_checkout(os.path.join(os.path.dirname(HERE), "windows")) == any(os.path.exists(os.path.join(d, ".git")) for d in (HERE, os.path.dirname(HERE)))
+            # Store.update: rotator-sync --pull (injected here), then a restart only when the server's own file was replaced
+            sd_ = os.path.join(ut_, "state")
+            os.makedirs(sd_)
+            keep_u_ = {k: globals()[k] for k in ("STATE", "PCACHE", "HERE")}
+            globals().update(STATE=sd_, PCACHE=os.path.join(sd_, "p.json"), HERE=ut_)
+            open(os.path.join(ut_, "rotator-sync.py"), "w").write("")
+            open(os.path.join(sd_, ".rotator-drift.json"), "w").write(json.dumps({"differing": ["usage-history.py"], "ref": "origin/main abc1234def"}))
+            try:
+                us = Store.__new__(Store)
+                us.lock, us.refreshing, ub_ = threading.RLock(), threading.Lock(), []
+                us.rebuild = lambda now: ub_.append("rebuild")
+                runs_ = []
+
+                def fake_run(rc, out):
+                    def f(argv, timeout, **kw):
+                        runs_.append((argv, timeout))
+                        return subprocess.CompletedProcess(argv, rc, out, "")
+                    return f
+                us.restart = lambda: (ub_.append("restart"), True)[1]
+                res_ = us.update(run=fake_run(0, "replaced usage-history.py\n"), delay=0)
+                assert res_ == {"outcome": "ok", "text": "Updated 1 file.", "restart": True} and runs_[0][0][-3:-1] == ["--pull", "--state"] and runs_[0][0][-1] == os.path.join(sd_, ".rotator-drift.json")
+                end_ = time.time() + 5
+                while "restart" not in ub_ and time.time() < end_:
+                    time.sleep(0.02)
+                assert ub_ == ["restart"] and us.refreshing.locked() and UPDATE["state"] == "idle"          # the lock is kept: the process is about to be replaced
+                c_ = load_pcache()
+                assert c_["updated"]["sha"] == "abc1234def" and c_["updated"]["restart"] is True and c_["update_try"]["ok"] is True and c_["update_try"]["sig"] == "usage-history.py"
+                # a restart that cannot happen: the old server carries on, says so, and gives the lock back
+                us.refreshing.release()
+                us.restart = lambda: False
+                ub_.clear()
+                us.update(run=fake_run(0, "replaced usage-history.py\n"), delay=0)
+                end_ = time.time() + 5
+                while us.refreshing.locked() and time.time() < end_:
+                    time.sleep(0.02)
+                assert not us.refreshing.locked() and UPDATE["state"] == "failed" and "could not restart" in UPDATE["text"]
+                us.restart = lambda: 1 / 0
+                us.update(run=fake_run(0, "replaced usage-history.py\n"), delay=0)
+                end_ = time.time() + 5
+                while us.refreshing.locked() and time.time() < end_:
+                    time.sleep(0.02)
+                assert not us.refreshing.locked() and "restart failed: ZeroDivisionError" in open(APPLOG).read()
+                # only the page changed: no restart, the page is rebuilt, the lock is back
+                ub_.clear()
+                res_ = us.update(run=fake_run(0, "replaced usage-sim.js\n"), delay=0)
+                assert res_["restart"] is False and ub_ == ["rebuild"] and not us.refreshing.locked() and UPDATE["state"] == "idle"
+                # a failed pull: nothing restarts, the reason is kept, and the same files are not tried again by themselves for a while
+                res_ = us.update(run=fake_run(1, "rotator-sync: the update failed (OSError: x); every file was put back as it was\n"), delay=0, now=1000)
+                assert res_["outcome"] == "error" and "every file was put back" in res_["text"] and UPDATE["state"] == "failed" and not us.refreshing.locked()
+                assert load_pcache()["update_try"] == {"at": 1000, "ok": False, "sig": "usage-history.py"}
+                us.update = lambda auto=False, now=None: ub_.append(("auto", auto)) or {}
+                ub_.clear()
+                open(os.path.join(ut_, "rotator.local.json"), "w").write("{}")
+                assert us.auto_update(1000 + 60, os.path.join(ut_, "rotator.local.json")) == "backoff" and not ub_
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "apply" and ub_ == [("auto", True)]
+                ub_.clear()
+                us.refreshing.acquire()
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "wait" and not ub_              # a switch is running
+                us.refreshing.release()
+                us.plock("grok").acquire()
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "wait" and not ub_              # a refresh is running
+                us.plock("grok").release()
+                open(os.path.join(ut_, "rotator.local.json"), "w").write('{"autoUpdate": false}')
+                assert us.auto_update(1000 + UPDATE_RETRY + 1, os.path.join(ut_, "rotator.local.json")) == "manual" and not ub_
+                open(os.path.join(sd_, ".rotator-drift.json"), "w").write(json.dumps({"differing": []}))
+                assert us.auto_update(5, os.path.join(ut_, "rotator.local.json")) == "none"
+                del us.update
+                # busy: a switch or reset (the exclusive lock) or a refresh (a provider lock) is running: nothing is pulled, and the lock is given back
+                runs_.clear()
+                us.refreshing.acquire()
+                assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "busy" and not runs_
+                us.refreshing.release()
+                us.plock("codex").acquire()
+                assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "busy" and not runs_ and not us.refreshing.locked()
+                us.plock("codex").release()
+                # no rotator-sync next to the dashboard
+                os.remove(os.path.join(ut_, "rotator-sync.py"))
+                assert us.update(run=fake_run(0, ""), delay=0)["outcome"] == "error" and not runs_
+                # run from a git checkout: neither the button nor the automatic update touches it
+                open(os.path.join(ut_, "rotator-sync.py"), "w").write("")
+                os.makedirs(os.path.join(ut_, "gitcopy"))
+                open(os.path.join(ut_, ".git"), "w").write("gitdir: x")
+                assert us.update(run=fake_run(0, "replaced usage-history.py"), delay=0) == {"outcome": "error", "text": UPDATE_CHECKOUT, "restart": False} and not runs_ and not us.refreshing.locked()
+                open(os.path.join(sd_, ".rotator-drift.json"), "w").write(json.dumps({"differing": ["usage-history.py"]}))
+                assert us.auto_update(1, os.path.join(ut_, "rotator.local.json")) == "checkout"
+                os.remove(os.path.join(ut_, ".git"))
+                os.remove(os.path.join(ut_, "rotator-sync.py"))
+                # POST /api/update
+                ups_ = Store.__new__(Store)
+                ups_.lock, ups_.refreshing, ups_.blob = threading.RLock(), threading.Lock(), {}
+                answers_ = [{"outcome": "ok", "text": "Updated 1 file.", "restart": True}, {"outcome": "busy", "text": "x", "restart": False}, {"outcome": "error", "text": "y", "restart": False}, None]
+                got_ = []
+
+                def fake_upd(auto=False, delay=0.0):
+                    got_.append(delay)
+                    a_ = answers_.pop(0)
+                    if a_ is None:
+                        raise RuntimeError("boom")
+                    return a_
+                ups_.update = fake_upd
+                usrv = __import__("http.server").server.ThreadingHTTPServer(("127.0.0.1", 0), __import__("http.server").server.BaseHTTPRequestHandler)
+                uport = usrv.server_address[1]
+                usrv.RequestHandlerClass = make_handler(ups_, uport)
+                threading.Thread(target=usrv.serve_forever, daemon=True).start()
+                try:
+                    def upost_(app="1", host=None, body=b""):
+                        cn = hc_.HTTPConnection("127.0.0.1", uport, timeout=10)
+                        cn.request("POST", "/api/update", body, dict({"Host": host or "127.0.0.1:%d" % uport}, **({"X-Quota-App": app} if app else {})))
+                        r = cn.getresponse()
+                        out = (r.status, json.loads(r.read() or b"null") if r.status != 403 else None)
+                        cn.close()
+                        return out
+                    assert upost_(app=None)[0] == 403 and upost_(host="evil.example")[0] == 403 and not got_
+                    assert upost_(body=b"{}") == (200, {"outcome": "ok", "text": "Updated 1 file.", "restart": True}) and got_ == [1.0]       # the restart waits a second: the answer is out first
+                    assert upost_()[0] == 409 and upost_()[0] == 500 and upost_()[0] == 500
+                finally:
+                    usrv.shutdown()
+                    usrv.server_close()
+            finally:
+                globals().update(keep_u_)
+                UPDATE.update(state="idle", text="")
         open(cfg, "w").write(json.dumps({"codexRedeemScript": scr}))
         assert redeem_script(cfg) == scr
         open(cfg, "w").write(json.dumps({"codexRedeemScript": os.path.join(td, "missing.py")}))
@@ -4137,10 +5342,11 @@ def selftest():
             assert cst.codex_reset_clear("A", new2)["outcome"] == "ok" and load_pcache()["codex_pending"] == {}
             r_ = cst.codex_reset("A", "/x", lambda argv, **kw: Proc(b"?", 1) if "--confirm" in argv else Proc(json.dumps(dict(rd, rate_limits_before=dict(rd["rate_limits_before"], banked_reset_credits=1))).encode()))
             assert "unconfirmed" in r_["text"] and "A" in load_pcache()["codex_pending"]                              # the read showed 3 -> 1: still marked
-            stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini")}
+            stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini", "read_gemini_api")}
+            NOAPI_ = lambda now_: (None, None)      # Antigravity's own login is never read here (this PC may have one): the language-server fallback is what the stubs below replace
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({"A": {"ts": int(time.time()) + 5, "w": 0.1, "banked": 0}}, {}),
-                                 fetch_grok=lambda now_: (None, None), read_gemini=lambda now_: (None, "x"))
+                                 fetch_grok=lambda now_: (None, None), read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "x"))
                 sample(time.time(), True)
             finally:
                 globals().update(stub)
@@ -4150,7 +5356,7 @@ def selftest():
                 raise RuntimeError("boom")
             try:
                 keep_gone0_ = codex_homes_gone
-                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini=boom_,
+                globals().update(read_claude=lambda: {"X": {"ts": 1, "w": 0.1}}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=boom_, read_gemini_api=NOAPI_, read_gemini=boom_,
                                  codex_homes_gone=lambda *a_: True)
                 rs_ = sample(time.time(), True)
             finally:
@@ -4173,7 +5379,7 @@ def selftest():
             keep_gone_ = codex_homes_gone
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
-                                 read_gemini=lambda now_: (None, "x"), codex_homes_gone=lambda *a_: False)
+                                 read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "x"), codex_homes_gone=lambda *a_: False)
                 assert "codex" not in sample(time.time(), True)
             finally:
                 globals().update(stub, codex_homes_gone=keep_gone_)
@@ -4185,9 +5391,9 @@ def selftest():
             # a failed Gemini read AFTER a good one is recorded too (ok False): the history shows the outage, which carry_good and the rates need
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
-                                 read_gemini=lambda now_: ({"ts": int(now_), "plan": "Pro"}, None))
+                                 read_gemini_api=NOAPI_, read_gemini=lambda now_: ({"ts": int(now_), "plan": "Pro"}, None))
                 assert sample(time.time(), True)["gemini"]["antigravity"]["ts"] > 0
-                globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
+                globals().update(read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "Antigravity isn't running"))
                 rg_ = sample(time.time(), True)
             finally:
                 globals().update(stub)
@@ -4195,14 +5401,14 @@ def selftest():
             # the address in Antigravity's own answer is cached for the page and never recorded in the history; a good read naming none removes it; a failed read keeps it
             try:
                 globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None),
-                                 read_gemini=lambda now_: ({"ts": int(now_), "email": "ag@x.example"}, None))
+                                 read_gemini_api=NOAPI_, read_gemini=lambda now_: ({"ts": int(now_), "email": "ag@x.example"}, None))
                 rg_ = sample(time.time(), True)
                 assert load_pcache()["emails"]["gemini"] == {"antigravity": "ag@x.example"}, load_pcache().get("emails")
                 assert "email" not in rg_["gemini"]["antigravity"] and "ag@x" not in json.dumps(rg_), rg_
-                globals().update(read_gemini=lambda now_: (None, "Antigravity isn't running"))
+                globals().update(read_gemini_api=NOAPI_, read_gemini=lambda now_: (None, "Antigravity isn't running"))
                 sample(time.time(), True)
                 assert load_pcache()["emails"]["gemini"] == {"antigravity": "ag@x.example"}                           # not read: the cached address stays
-                globals().update(read_gemini=lambda now_: ({"ts": int(now_)}, None))
+                globals().update(read_gemini_api=NOAPI_, read_gemini=lambda now_: ({"ts": int(now_)}, None))
                 sample(time.time(), True)
                 assert "antigravity" not in load_pcache()["emails"].get("gemini", {}), load_pcache().get("emails")      # read, no address: unknown, not a stale one
             finally:
@@ -4585,11 +5791,17 @@ def selftest():
         assert sorted(round(v) for t, v in pairs["B"]) == [5000] * 8 and sorted(round(v) for t, v in pairs["C"]) == [1000] * 3, pairs["B"]
         set_weights({"seat": {"codex": {"B": 5.0}}})
         m = measured_ratios(pairs, N)
-        assert m["A"] == (1.0, 8) and m["B"] == (5.0, 8) and m["C"] == (None, 3), m      # 5 pairs needed; A's 40-day-old pairs left out; B over the weight-1 seat A
+        assert m == {"A": (1.0, 8, {}), "B": (5.0, 8, {}), "C": (None, 3, {})}, m      # 5 pairs needed; A's 40-day-old pairs left out; B over the weight-1 seat A
         set_weights(None)
-        m = measured_ratios(pairs, N)           # every seat weight 1: the reference is the median of A and B (3000)
-        assert abs(m["B"][0] - 5000 / 3000) < 1e-9 and abs(m["A"][0] - 1000 / 3000) < 1e-9
-        assert measured_ratios({"A": [(N, 1000.0)] * 4}, N) == {"A": (None, 4)} and measured_ratios({}, N) == {}
+        m = measured_ratios(pairs, N)           # every seat weight 1: the reference is the smallest of them (A, 1000)
+        assert m["B"][0] == 5.0 and m["A"][0] == 1.0, m
+        assert measured_ratios({"A": [(N, 1000.0)] * 4}, N) == {"A": (None, 4, {})} and measured_ratios({}, N) == {}
+        # a seat with fewer than 5 pairs in 21 days falls back to all its pairs and says how old they are; fewer than 5 altogether: still no ratio
+        old = lambda n, v, d: [(N - d * DAY + i, float(v)) for i in range(n)]
+        mw = measured_ratios({"A": old(8, 1000, 1), "B": old(6, 3000, 30) + old(2, 9000, 2), "C": old(4, 3000, 30), "D": old(3, 3000, 2) + old(2, 3000, 30)}, N)
+        assert mw["A"] == (1.0, 8, {}) and mw["B"] == (3.0, 8, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 1}), mw      # B: 2 in the window, so all 8 (median 3000); reference = A, the smallest (1000)
+        assert mw["C"] == (None, 4, {}) and mw["D"] == (3.0, 5, {"wide": True, "from": N - 30 * DAY, "to": N - 2 * DAY + 2}), mw
+        assert weight_suggestions({"A": old(8, 1000, 1), "B": old(24, 3000, 30)}, N) == {}      # the suggestion stays strict: only the last 21 days
         # a token counter that goes back (a new session) and a window change start a fresh anchor; a tick with no tokens in it is skipped
         e = lambda t, u, r, k: (t, None, u, r, k)
         assert token_pairs([e(1, 10, 99, 100), e(2, 11, 99, 50), e(3, 12, 99, 250), e(4, 13, 99, 250), e(5, 14, 99 + 5000, 900), e(6, 15, 99 + 5000, 1900)]) == [(3, 200.0), (6, 1000.0)]
@@ -4617,6 +5829,29 @@ def selftest():
                      {"weights": {"seat": {"codex": {"B": 5.0}}}, "codex": {"pairs": pairs}})["providers"][0]["accounts"]
         assert [a["ratio"] for a in blob] == [{"n": 8, "x": 1.0}, {"n": 8, "x": 5.0}, {"n": 3}, {"n": 0}], [a["ratio"] for a in blob]
         assert "ratio" not in build([{"t": N, "s": {"A": {"w": .2, "wr": N + 9999}}}], N, {}, False, {})["providers"][0]["accounts"][0]       # Codex only
+        wb = build([{"t": N, "codex": {s: {"w": .2, "wr": N + 9999, "wp": WEEK, "ts": N} for s in "AB"}}], N, {}, False, {"codex": {"pairs": {"A": old(8, 1000, 1), "B": old(6, 3000, 30)}}})["providers"][0]["accounts"]
+        assert wb[1]["ratio"] == {"n": 6, "x": 3.0, "wide": True, "from": N - 30 * DAY, "to": N - 30 * DAY + 5}, wb[1]["ratio"]      # the fallback reaches the page
+        # J0: one weekly meter per seat, but several Codex logs of that seat running at once: each log sees only its own share of the tokens between two ticks, so the
+        # tokens per 1 % are the COMBINED tokens of all the seat's logs, not each log's share. Every percent here costs 500 tokens in log 1 and 500 in log 2.
+        with tempfile.TemporaryDirectory() as td3:
+            os.makedirs(os.path.join(td3, "homes", "A"))
+            l1, l2 = [], []
+            for i in range(7):
+                l1.append(tk(N - 90_000 + 1000 * i, 10 + max(i - 1, 0), WA, 500 * i, 0, 0))       # log 1 reads the meter before log 2's tokens of this step have ticked it
+                l2.append(tk(N - 90_000 + 1000 * i + 500, 10 + i, WA, 500 * i, 0, 0))
+            roll(os.path.join(td3, "homes", "A", "sessions", "rollout-1.jsonl"), l1, N - 100)
+            roll(os.path.join(td3, "homes", "A", "sessions", "rollout-2.jsonl"), l2, N - 100)
+            pc = codex_measure(td3, N)[1]["A"]
+            assert [round(v) for _, v in pc] == [1000] * 6, pc          # 1000 = 500 + 500; per log alone it would read 500 (or 1000 for the log that happens to tick, with the other's share missing)
+            # an event of a window older than the newest is a lagging log, not a new window; the meter reading is the running maximum
+            lag = merged_events([[(1, None, 10, WA, 0), (3, None, 11, WA, 500)], [(2, None, 12, WA + 30, 0), (4, None, 11, WA, 100), (5, None, 3, WA - 400_000, 50)]])
+            assert [(t, u, k) for t, _, u, _, k in lag] == [(1, 10, 0), (2, 12, 0), (3, 12, 500), (4, 12, 600)], lag      # (5: a window from the past, dropped)
+            # J0b: the seat moved from plan "team" to "pro": only the pro samples count, whatever the team ones were
+            os.makedirs(os.path.join(td3, "homes", "B"))
+            eb = [tk(N - 90_000 + 1000 * i, 10 + i, WB, 100_000 * i, 0, 0, "team") for i in range(7)] + [tk(N - 80_000 + 1000 * i, 20 + i, WB, 700_000 + 1000 * i, 0, 0, "pro") for i in range(7)]
+            roll(os.path.join(td3, "homes", "B", "sessions", "rollout-b.jsonl"), eb, N - 100)
+            plans3, pairs3 = codex_measure(td3, N)
+            assert plans3["B"] == "pro" and [round(v) for _, v in pairs3["B"]] == [1000] * 6, pairs3["B"]      # not 100000 from the team samples
         set_weights(None)
     # I: a suggested weight for a Codex seat, from the same pairs: at least 20 samples, steady older and newer halves, more than 30 % off the weight, rounded
     def at(*vals):
@@ -4978,7 +6213,13 @@ def selftest():
         assert ba_[0]["banked"] == 7 and ba_[0]["bankedAt"] == JN and [(x["title"], x.get("n")) for x in ba_[0]["bankedList"]] == [
             ("Fable reset", 2), ("Full reset", None), ("5-hour reset", None), ("5-hour reset", None), ("Full reset", None), ("Reset", None)], ba_[0]
         assert ba_[0]["bankedList"][0]["expiresAt"] == JN + 3 * DAY and ba_[0]["bankedList"][-1]["expiresAt"] is None                 # no expiry sorts last
-        assert "banked" not in ba_[1] and ba_[1]["bankedAt"] == JN and "bankedAt" not in ba_[2] and ba_[2]["bankedNote"] == "sign-in needed" and "banked" not in ba_[3]
+        assert "banked" not in ba_[1] and ba_[1]["bankedAt"] == JN and "bankedAt" not in ba_[2] and ba_[2]["bankedNote"] == "Sign-in needed" and "banked" not in ba_[3]
+        # notes read as sentences on the page: a plain lowercase first word is capitalised (the stored text is not touched), a file name, code word or capital is left alone
+        assert [cap_note(x) for x in ("no usable reading", "sign-in expired: run grok to sign in again", "rate limited", "Kimi isn't signed in", "muse_usage_for_dashboard.py is missing", "`muse` was not found", "", "5-hour limit")] == [
+            "No usable reading", "Sign-in expired: run grok to sign in again", "Rate limited", "Kimi isn't signed in", "muse_usage_for_dashboard.py is missing", "`muse` was not found", "", "5-hour limit"]
+        nc_ = build([{"t": 5, "s": {"A": {"ok": False, "note": "no usable reading"}}}], 9, {}, False, {})["providers"][0]["accounts"][0]
+        assert nc_["note"] == "No usable reading", nc_
+
         gone = build([{"t": JN, "s": {"A": {"w": 0.1, "wr": JN + 9, "ts": JN}}}], JN + 4 * DAY, {}, False, ex)["providers"][0]["accounts"][0]       # the Fable grant (3 d) has expired by now
         assert gone["banked"] == 5 and gone["bankedList"][0]["title"] == "Full reset"
         assert "banked" not in build([{"t": JN, "s": {"A": {"w": 0.1, "wr": JN + 9, "ts": JN}}}], JN, {}, False, {})["providers"][0]["accounts"][0]
@@ -5308,7 +6549,8 @@ def selftest():
         assert not load_pcache().get("credits_claims")                                           # a seat that cannot send saves no claim
         # B: provider-cache writers never drop what another process saved meanwhile (a pending reset claim): a sample merges only its own
         # changes after its slow provider reads, and a transaction waits for the lock and starts from the file as it then is
-        stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini")}
+        stub = {k: globals()[k] for k in ("read_claude", "read_codex", "fetch_grok", "read_gemini", "read_gemini_api")}
+        NOAPI_ = lambda now_: (None, None)      # Antigravity's own login is never read here (this PC may have one): the language-server fallback is what the stubs below replace
 
         def mid_sample(now_):           # the server saves a claim while this sample is still reading providers
             o_ = load_pcache()
@@ -5316,7 +6558,7 @@ def selftest():
             save_pcache(o_)
             return None, "not readable"
         try:
-            globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), read_gemini=mid_sample)
+            globals().update(read_claude=lambda: {}, read_codex=lambda *a_, **k_: ({}, {}), fetch_grok=lambda now_: (None, None), read_gemini_api=NOAPI_, read_gemini=mid_sample)
             save_pcache({"credits": {"A": dict(ke)}})
             sample(KN, True)
             pc = load_pcache()
@@ -5785,7 +7027,7 @@ def main():
         say(backtest_table(backtest(load()))[0])
         return 0
     if "--serve" in sys.argv:
-        return serve(arg("--port", 8787))
+        return serve(arg("--port", 8787), arg("--wait-port", 0))
     now = time.time()
     hist = load() if "--render" in sys.argv else one_shot(now)
     render(build(hist, now, load_emails(), extra=load_extra()))

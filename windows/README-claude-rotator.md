@@ -12,7 +12,7 @@ the auth token changes.
 
 **You need:** Windows 10 or 11; [PowerShell 7.5 or later](https://aka.ms/powershell) (`pwsh`); Python 3.10+ with the `py` launcher;
 the Claude Code CLI (`claude`); Git, only for updates. Optional, each for its own tab or feature: the Claude desktop app,
-the Codex CLI, the Grok CLI, the Antigravity app (Gemini).
+the Codex CLI, the Grok CLI, the Antigravity app (Gemini), Kimi Code (the `kimi` CLI).
 
 1. **Get the files.** Clone this repo. The folder you run from (the **rotator folder**) is the repo's `windows/` folder,
    or a copy of it anywhere you like. Run from the clone itself, updates come from `git pull`: `rotator-sync` is for a
@@ -43,9 +43,11 @@ the Codex CLI, the Grok CLI, the Antigravity app (Gemini).
 | Tab | Needs | Optional extras |
 |---|---|---|
 | Claude | accounts added with `claude-rotator` (step 4); readings appear once the rotator has probed a seat (`--status`, or the watcher) | Banked reset credits need a full Claude login for that account, which the desktop app keeps: sign in to the account in the app and capture it with `claude-account --capture <label>` (a setup-token cannot read them). Switch buttons need the desktop app for the App role. |
-| Codex | the Codex CLI; one saved login per seat in `%USERPROFILE%\.codex\homes\<label>\`; readings come from each seat's usage cache there and from the Codex session logs | `codexUsageScript` lets Refresh update Codex; `codexRedeemScript` adds Apply reset; a `codex-app-rotator.ps1` next to the dashboard adds switch buttons. All are off until set. |
+| Codex | the Codex CLI; one saved login per seat in `%USERPROFILE%\.codex\homes\<label>\`; readings come from each seat's usage cache there and from the Codex session logs | `codexUsageScript` lets Refresh update Codex; `codexRedeemScript` adds Apply reset; the `codex-app-rotator.ps1` that comes with this repo, next to the dashboard, adds switch buttons. The two scripts are off until set. |
 | xAI | the Grok CLI, signed in (`grok`) | none |
-| Gemini | the Antigravity app running (not as administrator) | none |
+| Gemini | the Antigravity app signed in once (its login is read from the Windows Credential Manager; the app need not be running). Older Antigravity versions with no saved login fall back to the running app's language server | none |
+| Kimi | Kimi Code (`kimi` on PATH, or `~/.kimi-code/bin`), signed in (`kimi`, then log in). Without Kimi installed the tab does not appear; installed but signed out, it says "Kimi isn't signed in" | none |
+| Muse (Meta) | Muse Code, the `muse` terminal CLI (not the muse.ai agent), on PATH and logged in; `muse_usage_for_dashboard.py` next to the dashboard runs plain `muse usage` and parses its text (no network call, no credentials read). Without `muse` on PATH the tab does not appear | none |
 
 > Supersedes the old seat-based design. There are **no** separate `CLAUDE_CONFIG_DIR`
 > seat directories anymore (`~/.claude-seat2`, `~/.claude-seat3`). An empty/missing seat
@@ -817,11 +819,14 @@ seat's `usage-cache[-fable].json` (it never probes), appends a line to
 `.usage-history.jsonl` (35 days kept) in its state folder (`~/.claude-cli-accounts`, or `QUOTA_STATE_DIR` / `--state-dir`), and rewrites
 `usage-dashboard.html` there from `usage-dashboard.template.html`. The page shows
 the weekly quota left (all models or Fable) as a share of the whole pool (100 % = every seat full; the headline says how many seats), the usage rate in % of the whole pool per hour, and a projection of
-when the pool runs out, with each seat refilled at its weekly reset. It reloads itself every 5 min.
-**Refresh** (app only) probes every Claude seat (`claude-cli-account.ps1 --status`) and samples again. It updates Codex too when
+when the pool runs out, with each seat refilled at its weekly reset. The app asks the server for fresh data every minute without any spinner or message (it redraws only when something changed), and a page opened from `usage-dashboard.html` reads that file again every 5 min.
+**Refresh** (app only) reads every provider AT ONCE, one thread and one lock each, so the wait is the slowest provider, not the sum: it probes every Claude seat (`claude-cli-account.ps1 --status`), asks Grok, Gemini, Kimi and Muse, and then samples again
+(on the PC this was built on, a full Refresh went from 8.8-23 s, median 12 s, to 3.5-6.9 s, median 3.7 s). Each provider tab also has a small refresh icon of its own that refreshes only that provider and spins while it runs; the other tabs stay usable.
+`POST /api/refresh` with the body `{"provider": "<id>"}` (`claude`, `codex`, `grok`, `gemini`, `muse`, `kimi`) does the same: 400 for an unknown id, 409 when that provider is already refreshing; with no body it refreshes all of them, skipping any that is busy (`Store.refresh`, `Store.plock`, `run_live`, selftest). A switch or reset still refuses (409) while any provider refreshes, and a refresh refuses while one runs.
+It updates Codex too when
 `codexUsageScript` (and `codexUsageArgs`) in `rotator.local.json` name your Codex usage command (a `.ps1` runs under pwsh, a `.py`
-under `py -3`; see `rotator.local.example.json`): Refresh runs it first, at Idle and never killed; still running after 120 s, the page
-says Codex is still updating and the lock is held until it ends, then the dashboard samples again (`codex_usage_argv`,
+under `py -3`; see `rotator.local.example.json`): Refresh runs it at Idle and never kills it; still running after 120 s, the page
+says Codex is still updating and the Codex lock is held until it ends (the other providers' are not), then the dashboard samples again (`codex_usage_argv`,
 `run_codex_usage`, `Store.codex_usage_wait`, selftest). Unset, the Codex tab says Refresh cannot update it and how to set it up.
 `--render` re-renders without sampling; `--selftest` runs the checks. `--backfill [--days N]` rebuilds past history (Claude from
 `.rotate-log.txt`, Codex from the session logs) and is safe while the app runs: every write to the history file holds
@@ -852,10 +857,9 @@ Apply button (the server refuses it too). No reading lifts an unconfirmed mark, 
 for another reason (a credit expiring, one used elsewhere) or before the claim lands. It stays until the user's `Clear`, which asks first
 (Cancel is the default) and then drops it (`POST /api/codex-reset-clear`, `Store.codex_reset_clear`); that is for after
 codex-usage shows the reset was not used. The reset column stays on show while any seat has a reset action or a pending
-state, even with nothing banked (selftest, `usage-sim.test.js`). Gemini is readable only while the Antigravity app is open (the `agy` CLI keeps its token to itself). Gemini's limits are
-shown one per quota group: a group shared by several models is "Pool 1", "Pool 2"... (no model is named), and only a group
-of exactly one model carries that model's name (`parse_gemini`, selftest). The Gemini address shown with "Show emails" is the one Antigravity's own answer (`GetUserStatus`) gives for the account the limits belong to, not the Gemini CLI's `~/.gemini` login (a different account is possible); when a good read names none, the address is shown as unknown rather than a stale one, and a failed read leaves the last one.
-A reading over 1 h old is shown in a muted warning colour in the `Read` column, over 3 h in a stronger one. A Fable value read earlier than the seat's session and weekly readings shows its own "Read X ago" line in its cell, with the same two thresholds. A provider with nothing readable (Gemini with the Antigravity app closed) shows just its note.
+state, even with nothing banked (selftest, `usage-sim.test.js`). **Gemini** is read from Google's Cloud Code quota API with the login the Antigravity app keeps in the Windows Credential Manager (`gemini:antigravity`), so the app need not be running and its newer versions (which no longer expose a local port) work. One window per quota group and bucket: "Gemini Models", "Claude and GPT models" and "Gemini 4 Argon", each with a Weekly and a 5-hour bar where Google reports both (`parse_gemini_quota`, `read_gemini_api`, selftest); a bucket Google reports without a remaining fraction counts as 0 left. Google's answer depends on the user agent the request carries, so it names the installed app's version (`antigravity/hub/<version> windows/amd64`) and uses the `daily-cloudcode-pa` host. The login's access token lasts an hour: an expired one is refreshed in memory only (the saved credential is never written back), with the OAuth client id and secret read at run time out of the installed `language_server.exe` (nothing secret is in this repo; the scan of that 200 MB file takes a few seconds, once per run). No saved login: "Sign in to Antigravity once"; a refused refresh: "Antigravity sign-in expired — open Antigravity". Only a PC with no saved login at all still tries the running app's language server (`read_gemini`, `parse_gemini`: its groups are "Pool 1", "Pool 2"... and a group of one model carries that model's name). The Gemini address shown with "Show emails" is the one in the saved login (`id_token_email`), not the Gemini CLI's `~/.gemini` login; a read that has none shows it as unknown rather than a stale one, and a failed read leaves the last one.
+**Kimi** is read from Kimi Code's own saved login (`<KIMI_CODE_HOME or ~/.kimi-code>/credentials/*.json`, the newest valid one) with `GET <base>/usages` (`api.kimi.com`, or `api.kimi.ai` when the `region` file says `global`; `KIMI_CODE_BASE_URL` overrides): 5-hour, Weekly, and the two monthly caps when the plan has them (`kimi_seat`, `fetch_kimi`; tested against fixtures only). An expired login is not refreshed here (Kimi replaces the refresh token on every refresh, and writing Kimi's credential is not the dashboard's job): Kimi Code refreshes it the next time it runs, and until then the tab says to open Kimi.
+A reading over 1 h old is shown in a muted warning colour in the `Read` column, over 3 h in a stronger one. A Fable value read earlier than the seat's session and weekly readings shows its own "Read X ago" line in its cell, with the same two thresholds. A provider with nothing readable (Gemini or Kimi signed out) shows just its note.
 Limit: a seat used elsewhere (the app, the VM) only updates when something probes it, so its line moves in steps.
 
 Seats are not all the same size (a Codex Pro seat holds several times a Plus seat's allowance), so each seat has a **weight**: how many regular seats it
@@ -872,10 +876,12 @@ counts seats, not weights. The **current** weights are applied to the whole reco
 
 **Measured check (Codex only).** The weight is your statement, so the Codex table also shows a measured one, as a sanity check: from the rollout logs, the
 tokens a seat spends per 1 % of its weekly allowance (input minus cached input plus output, the same for every seat), the median over the last 21 days, divided by
-the same figure for the seats of weight 1. It reads `measured ≈ ×4.6 (12 samples)` under the seat, needs at least 5 samples (`not enough data` otherwise), and turns
-amber when it is more than 30 % away from the configured weight (a ratio of the two, either way). It never feeds the pooled numbers. A sample is the tokens
-between two consecutive whole-percent ticks of one log, so a seat used by several sessions at once reads cheaper per percent than it is, and a seat nobody ran
-in the last 21 days has no samples. A log of the active login is credited to the seat whose known weekly reset matches. Claude, xAI and Gemini show nothing:
+the same figure for the smallest seat of weight 1 (the unit the weights count in). It reads `Measured ≈ ×4.6 (12 samples)` under the seat, needs at least 5 samples
+(`Measured: not enough data` otherwise), and turns amber when it is more than 30 % away from the configured weight (a ratio of the two, either way). It never feeds
+the pooled numbers. A sample is the tokens between two whole-percent ticks of the seat's weekly meter, counted over ALL of that seat's logs merged into one timeline,
+so several sessions running at once on one seat are added together (each log alone would see only its share of what moved the meter). Only samples from the seat's
+current plan count. A seat with fewer than 5 samples in the last 21 days is measured on all its current-plan samples instead, and the line says how many and from when
+(`Measured ≈ ×2.9 (8 samples, Nov 1–3)`). A log of the active login is credited to the seat whose known weekly reset matches. Claude, xAI and Gemini show nothing:
 the rotator never sees their tokens.
 
 **Suggested weight (Codex only).** When the measurement is both steady and far from the weight, the table adds `Suggested weight ×3 (24 samples)` under the
@@ -922,17 +928,50 @@ refused (409) until it exits, when its outcome is logged and the data rebuilt:
 | Button | Runs | Asks first |
 |---|---|---|
 | Claude `Use for CLI` | `pwsh -NoProfile -File claude-cli-account.ps1 --switch <L> --no-usage` | no |
-| Claude `Use for App` | `claude-app-rotator.ps1 --switch <L> --relaunch` | yes: "Quitting the Claude app ends the sessions running in it." |
+| Claude `Use for app` | `claude-app-rotator.ps1 --switch <L> --relaunch` | yes: "Quitting the Claude app ends the sessions running in it." |
 | Claude header `Best seat` | `claude-cli-account.ps1 --switch best --no-usage` (`--best` only prints the ranking) | no |
-| Codex `Use for CLI + App` | `codex-app-rotator.ps1 --switch <L>` | yes |
+| Codex `Use for CLI + app` | `codex-app-rotator.ps1 --switch <L>` | yes |
 | Codex header `Next seat` | `codex-app-rotator.ps1 --rotate` (the next saved seat in order, not a headroom pick) | yes |
 
 A button is left off the seat that already holds that role (its CLI/App badge) and off seats the rotator cannot use (Claude CLI: no `token.txt`; Claude
 app: no captured `config.json`; Codex: no saved `auth.json`). The Codex buttons appear only when `codex-app-rotator.ps1` sits next to
-`usage-history.py` (it is not in this repo). The result shows as a toast: the exit code and the rotator's last unindented line, with tokens and email
+`usage-history.py` (it comes with this repo, with `codex-cli-account.ps1`). The result shows as a toast: the exit code and the rotator's last unindented line, with tokens and email
 addresses removed; the action is also written to the app log, and the data is reloaded so the badges move. Code: `switch_targets`, `switch_check`,
 `switch_argv`, `run_switch`, `switch_outcome`, `Store.switch` in `usage-history.py` (selftest block L); the buttons are `quotaSwitchBtns` /
 `quotaBestBtn` in `usage-sim.js`.
+
+## Settings panel (`dashboard_settings.py`, `settings.js`)
+
+The gear button in the page's top row opens the Settings drawer, so the rotator needs no terminal. The page loads `settings.js` (served by
+`dashboard_settings.serve`); `usage-history.py` only hands `/settings.js` and `/api/settings/*` to that module. Every action needs the same
+`X-Quota-App: 1` header as the other POSTs, takes a seat name of 1 to 32 letters, digits, `-` or `_` (not starting with `-` or `_`), and runs an
+existing rotator as an argv list (no shell, no page text in a command). A long action is a background job: the page polls
+`GET /api/settings/job?id=` and shows the last output lines (tokens and addresses removed) when it fails; one settings action runs at a time and
+it also waits for a running Refresh or switch. A rotator started this way is never killed. Tests: `test-dashboard-settings.py` (fake command runner,
+temp folders, fake Credential Manager; `RUN_REAL_CRED=1` also checks the ctypes layer on one throwaway entry of its own).
+
+| What | How (`POST /api/settings/action`, `action` =) |
+|---|---|
+| Claude CLI: add a seat | `claude.cli.add` opens `claude setup-token` in a visible console; `claude.cli.import` takes the pasted token, writes it to a private temp file and runs `claude-cli-account.ps1 --import <L> <file> [--replace]`; the file is removed afterwards |
+| Claude CLI: switch / best | `claude.cli.switch` = `--switch <L> --no-usage`; `claude.cli.best` = `--switch best --no-usage` |
+| Claude app: save login / switch | `claude.app.capture` = `claude-app-rotator.ps1 --capture <L>`, refused with a message while the app runs; `claude.app.switch` = `--switch <L> --relaunch` (the page asks first); `claude.app.best` picks from the dashboard's numbers |
+| Codex: add / switch / best | `codex.add` opens `codex login` in a visible console with `CODEX_HOME` set to a NEW home folder (an existing seat is never logged over), `codex.check` refuses a login already saved as another seat; `codex.switch` = `codex-app-rotator.ps1 --switch <L>`; `codex.best` |
+| Gemini, xAI (Grok), Kimi: seats | `cred.capture`, `cred.switch`, `cred.best`: see below |
+| Remove / restore a seat | `remove` MOVES the seat to `<store>\.removed\<label>-<UTC stamp>` (never deletes; the seat in use is refused; Claude moves its app and CLI folders together and undoes the first move if the second fails); `restore` moves it back, refused if the name is taken |
+| Display address, weight | `set.email` (`email.txt`, or the seat's `meta.json` for credential seats), `set.weight` (`seatWeights` in `rotator.local.json`, other keys kept) |
+| Automation | `task.set` runs `schtasks /Change /TN <name> /ENABLE or /DISABLE` for the listed tasks only (auto-rotate, app-history sync, app-seat keepalive, Codex keepalive, rotate proxy); `proxy.restart` ends and runs the proxy task; `auto.resume` creates or removes `~\.claude-cli-accounts\.auto-resume-off`, which `Ping-ActiveSessions` in `claude-cli-account.ps1` checks; `sync.history` runs `sync-app-history.ps1` (the `~\.grok\bin` copy when there is one); `keepalive.status` runs `claude-app-seat-keepalive.ps1 -Status` |
+
+**Credential seats (Gemini, xAI, Kimi).** A provider whose login is a file or a Windows Credential Manager entry gets a generic seat store in
+`~\.agent-dashboard-seats\<provider>\<label>\` (`meta.json`, `files\`, `cred\`). The login stores found on this PC: Gemini = the generic credential
+`gemini:antigravity` (the Antigravity app) plus `~\.gemini\oauth_creds.json` and `google_accounts.json` (the Gemini CLI), saved as one seat; xAI = `~\.grok\auth.json`;
+Kimi = a folder under `~\.kimi-code` (`credentials`, `auth` or `tokens`, whichever exists: **not verified**, Kimi is not signed in on the PC this was written on).
+Capture saves the login now in use (refused when it is already another seat's, or when the name holds a different account without "replace"). Switch is refused while
+the provider's program runs (`antigravity.exe`, `grok.exe`, `kimi.exe`); otherwise it copies the login in use to `.swap-backups\before-<label>-<stamp>`, saves it back into the
+seat it belongs to (matched by address) so refreshed tokens are kept, writes the chosen seat, reads it back, and puts the old login back if that fails. "Most headroom" uses the
+dashboard's own windows (the most used window decides; a capped seat is never picked); the dashboard reads only the login in use, so the last reading of each seat is kept in
+`.readings.json` whenever the panel is open (a seat never in use while it was open has no number and is not picked). **Muse** has no seats: its login is not in any file or Credential
+Manager entry the dashboard can find. Automatic rotation stays Claude and Codex only. Limits (`shortcut:` in the code): seat files are plain files like `token.txt` (not encrypted
+separately); the Kimi folder name is a guess; a job shows its output only when it ends.
 
 ## Keeping the install in sync (`rotator-sync`)
 
@@ -956,5 +995,8 @@ exists.
 | `rotator-sync --selftest` | Runs the built-in checks in a temporary repo. |
 
 Options: `--repo <clone>`, `--live <folder>`, `--ref <ref>` (default `origin/main`). The usage dashboard shows
-"Update available from GitHub (N files differ)" when `.rotator-drift.json` lists any file; its Details name the files and
-say to run `rotator-sync --pull`.
+"Update available from GitHub (N files differ)" when `.rotator-drift.json` lists any file (the check runs every 6 h), and updates itself:
+- **Automatic.** `autoUpdate` in `rotator.local.json` (default on; `false` turns it off). Once the check finds a difference and no refresh, switch or reset is running, the dashboard runs `rotator-sync --pull` itself (`Store.auto_update`; the same all-or-nothing pull with its journal and backups, run as a subprocess). If that fails, the same files are not tried again by themselves for 6 h and the page says why.
+- **Update now.** The banner's button (`POST /api/update`) does the same on demand; with `autoUpdate` off it is the only way.
+- **Restart.** When the dashboard's own file (`usage-history.py`) was replaced, the running server starts its replacement FIRST (the same interpreter and arguments, detached, so the Task Scheduler run ending does not end it), waits up to 6 s to see it stay running (an update that does not even load leaves the old server up, with a note), then lets go of the port and exits; the new server takes it over. The page asks for the new build and reloads itself (`build` in `/api/data` is a short hash of the server code and the page files); afterwards the banner says "Updated to <commit>" for ten minutes. A change to the page files only needs no restart. Checked end to end on the PC this was built on under a throwaway scheduled task (manual and automatic). Limit: the replacement is not a child of the scheduled task, so Task Scheduler's Stop does not stop it (Task Manager does, and the next logon starts the task as before).
+- **Never in a git checkout.** A copy of the dashboard that sits in a git checkout (its folder or the one above holds `.git`: a clone or a worktree) is not updated by the dashboard, by either route: `git pull` is its update (`in_checkout`). `rotator-sync` alone only refuses its own clone, and would replace a developer's other worktree with GitHub's files.
