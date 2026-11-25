@@ -379,7 +379,8 @@ class HistLock:
 # ---- inputs from disk ---------------------------------------------------------------------------------------------------------
 
 def dir_fp(*dirs):
-    """A fingerprint of leveldb dirs: every file's name and size (a rewritten or appended database changes it)."""
+    """A fingerprint of leveldb dirs by CONTENT: SHA-256 over every file's name and bytes. Names and sizes are not enough: both logs can be replaced
+    by ones of equal length holding other pin ids."""
     h = hashlib.sha256()
     for d in dirs:
         try:
@@ -388,29 +389,21 @@ def dir_fp(*dirs):
             h.update(b'missing|')
             continue
         for n in names:
+            h.update(('%d:%s;' % (len(n), n)).encode('utf-8', 'replace'))
             try:
-                sz = os.path.getsize(os.path.join(d, n))
+                with open(os.path.join(d, n), 'rb') as f:
+                    for chunk in iter(lambda: f.read(1 << 20), b''):
+                        h.update(chunk)
             except OSError:
-                sz = -1
-            h.update(('%s:%d;' % (n, sz)).encode('utf-8', 'replace'))
-        h.update(b'|')
-    return h.hexdigest()
-
-
-def recs_fp(app_dir, acct):
-    h = hashlib.sha256()
-    for p in sorted(glob.glob(os.path.join(app_dir, 'claude-code-sessions', acct, '*', 'local_*.json'))):
-        try:
-            st = os.stat(p)
-            h.update(('%s:%d:%d;' % (os.path.relpath(p, app_dir), st.st_size, st.st_mtime_ns)).encode('utf-8', 'replace'))
-        except OSError:
-            continue
+                h.update(b'unreadable')
+            h.update(b'|')
+        h.update(b'||')
     return h.hexdigest()
 
 
 class Progress:
     """Bootstrap reads every seat and may not finish inside the rotator's 60 s (a starved Idle process reads a seat in ~48 s). Each seat's result
-    is kept here, keyed by seat and a fingerprint of its inputs, and saved after EVERY seat, so a killed stage's next run resumes with what it
+    is kept here, keyed by seat and the SHA-256 of its two databases' contents, and saved after EVERY seat, so a killed stage's next run resumes with what it
     finished. Global intent (state.json) is still proposed only by a run that scanned every readable seat."""
 
     def __init__(self, path):
@@ -435,23 +428,14 @@ class Progress:
         os.replace(tmp, self.path)
 
 
-def cached_view(prog, app_dir, seat, acct):
-    fp = recs_fp(app_dir, acct)
-    v = prog.get(seat, 'view', fp)
-    if v is not None:
-        return View({r[0]: Rec(*r) for r in v})
-    view = read_view(app_dir, acct)
-    prog.put(seat, 'view', fp, [[r.sid, r.cli, r.archived, r.last, r.title] for r in view.recs.values()])
-    return view
-
-
 def cached_pins(prog, seat, dirs):
     fp = dir_fp(*dirs)
     v = prog.get(seat, 'pins', fp)
     if v is not None:
         return Pins(v['ok'], v['why'], v['pins'], v['manifest'])
     pins = read_pins(*dirs)
-    prog.put(seat, 'pins', fp, {'ok': pins.ok, 'why': pins.why, 'pins': pins.pins, 'manifest': pins.manifest})
+    if pins.ok:                              # only a successful read is kept: a failure may be transient, and is read again next time
+        prog.put(seat, 'pins', fp, {'ok': True, 'why': '', 'pins': pins.pins, 'manifest': pins.manifest})
     return pins
 
 
@@ -470,12 +454,12 @@ def gather(seats_root, app_dir, seats, target, bootstrap, extra=None, prog=None,
                 chks[s] = (None, sha256_file(cp))
     for s, acct in seats.items():
         if s == leaving and not (bootstrap or s == target or s in chks or s in (extra or {})):
-            views[s] = cached_view(prog, app_dir, s, acct) if prog is not None else read_view(app_dir, acct)      # records only: the report names its pins
+            views[s] = read_view(app_dir, acct)      # records only: the report names its pins
             continue
         if bootstrap or s == target or s in chks or s in (extra or {}):
             dirs = (extra or {}).get(s) or seat_dirs(os.path.join(seats_root, s))
             if prog is not None and s not in (extra or {}):
-                views[s] = cached_view(prog, app_dir, s, acct)
+                views[s] = read_view(app_dir, acct)
                 stash[s] = cached_pins(prog, s, dirs)
                 prog.save()                      # after every seat: a kill keeps what was finished
             else:
@@ -572,6 +556,7 @@ def run_stage(a):
         return 1
     res = {'status': 'skipped', 'n': 0, 'reason': ''}
     plan = None
+    config_outcome, config_pair = 'refused: the target seat was not read', 'stash'     # the shared config's outcome for the pair that is to be installed
     try:
         seats = list_seats(seats_root)
         if a.target not in seats:
@@ -609,8 +594,13 @@ def run_stage(a):
                     cfg = new_config_bytes(app_dir, final_list)
                     if cfg:
                         write_text(os.path.join(gdir, 'config.json'), jdump({'sha256': cfg[0], 'pair': final_pair, 'b64': base64.b64encode(cfg[1]).decode('ascii')}))
+                        config_outcome = 'prepared'
+                    else:
+                        config_outcome = 'match'
                 except Skip as e:
                     plan.lines.append(str(e))
+                    config_outcome = 'refused: %s' % e
+                config_pair = final_pair
             if plan.skips:
                 res = {'status': 'skipped', 'n': 0, 'reason': plan.skips[0]}
             else:
@@ -630,6 +620,7 @@ def run_stage(a):
     text = report_text(plan, a.target, a.leaving) if plan else ''
     write_text(os.path.join(gdir, 'report.txt'), text)
     # the rotator installs a staged pair only when this names ITS target, ITS generation and the pair that exists
+    res.update({'config': config_outcome, 'config_pair': config_pair})
     res.update({'target': a.target, 'gen': gen, 'pair': 'staged' if (os.path.isdir(os.path.join(gdir, LS_DIR[0])) and os.path.isdir(os.path.join(gdir, IDB_DIR[0]))
                                                                       and os.path.exists(os.path.join(gdir, 'baseline.json'))) else 'stash'})
     write_text(os.path.join(gdir, 'result.json'), jdump(res))

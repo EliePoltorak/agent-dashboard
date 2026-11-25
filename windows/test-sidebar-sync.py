@@ -543,6 +543,7 @@ def test_logic(tmp):
     g = w.stage('C', 'D')
     c = g.f('config.json')
     newcfg = json.loads(__import__('base64').b64decode(c['b64']))
+    check('result.json carries the config outcome for the installed pair: prepared', g.result['config'] == 'prepared' and g.result['config_pair'] == 'staged', str(g.result))
     check('config.json: pair staged, hash of the config read, only the pin list changed',
           c['pair'] == 'staged' and c['sha256'] == SS.sha256_file(cp) and newcfg['preferences']['epitaxyPrefs']['starred-local-code-sessions'] == ['local_d1']
           and newcfg['preferences']['epitaxyPrefs']['other'] == {'k': 1} and newcfg['top'] is True)
@@ -551,14 +552,17 @@ def test_logic(tmp):
     cfg['preferences']['epitaxyPrefs']['starred-local-code-sessions'] = ['local_d1']
     open(cp, 'wb').write(json.dumps(cfg, indent=2, ensure_ascii=False).encode('utf-8'))
     g = w.stage('C', 'D', 'g2')
-    check('config already holding the pins: no config.json', g.f('config.json') is None)
+    check('config already holding the pins: no config.json, and the outcome says match explicitly', g.f('config.json') is None and g.result['config'] == 'match', str(g.result))
     cfg['preferences']['epitaxyPrefs']['starred-local-code-sessions'] = []
     open(cp, 'wb').write(json.dumps(cfg, indent=2, ensure_ascii=False).encode('utf-8'))
     g = w.stage('C', 'D', 'g3')
     check('no pin change but a stale config: a config-only repair, pair stash', g.f('config.json')['pair'] == 'stash' and not g.staged)
     open(cp, 'wb').write(b'{"preferences": {"epitaxyPrefs": {"starred-local-code-sessions": []}}}')
     g = w.stage('C', 'D', 'g4')
-    check('a config that does not round-trip byte for byte is never rewritten', g.f('config.json') is None and 'config not changed' in g.f('report.txt'))
+    check('a config that does not round-trip byte for byte is never rewritten, and the outcome is an explicit refusal (not an omission)', g.f('config.json') is None and 'config not changed' in g.f('report.txt') and g.result['config'].startswith('refused: config not changed'), str(g.result))
+    os.unlink(cp)
+    g = w.stage('C', 'D', 'g5')
+    check('an unreadable (missing) config is a refusal too', g.result['config'].startswith('refused:'), str(g.result))
 
     # --forget
     w = two(fresh())
@@ -619,6 +623,29 @@ def test_logic(tmp):
         check('a seat whose databases changed is re-read (A edited, D reinstalled); unchanged ones come from the cache', rs_ == ['A', 'D'], str(rs_))
     finally:
         SS.read_pins = real_read
+    # equal-length replacement: a seat's databases rewritten with other pin ids of the SAME length (names and sizes unchanged) must not hit the cache
+    w.stage('B', 'D', 'gb5')                                         # a full scan caches every seat
+    w.set_pins('A', ['local_z1'])                                    # ['local_a1'] -> ['local_z1']: same length
+    SS.read_pins = counting
+    try:
+        del reads[:]
+        w.stage('B', 'D', 'gb6')
+        check('equal-length replacement of a seat\'s pins is a cache MISS (content fingerprint), the fresh pins are used',
+              any(os.sep + 'A' + os.sep in r for r in reads if SS.WORK not in r), str(reads))
+        check('the fresh pins, not the stale cached ones, reach the proposed state',
+              json.load(open(os.path.join(w.seats, SS.WORK, 'gb6', 'state.json')))['pins'] == {'cli1': True} and True)
+    finally:
+        SS.read_pins = real_read
+    # a failed read is never cached
+    w2 = World(fresh())
+    w2.seat('A', 'aa', [])
+    w2.seat('B', 'ab', [])
+    w2.rec('aa', 'local_a1', 'cli1')
+    w2.rec('ab', 'local_b1', 'cli1')
+    w2.set_pins('A', ['local_a1'], idb_key=False)                    # A's IndexedDB has no pin state: unreadable
+    w2.stage('B', 'B', 'gc1')
+    boot2 = json.load(open(os.path.join(w2.seats, SS.BOOT)))
+    check('a failed read is not cached (only successful reads are), and no record cache exists', 'A' not in boot2['seats'] and 'B' in boot2['seats'] and all(set(v) <= {'pins'} for v in boot2['seats'].values()), str(boot2))
     w.state({'cli1': True})
     w.stage('B', 'D', 'gb4')
     check('once a state exists the bootstrap cache is dropped', not os.path.exists(os.path.join(w.seats, SS.BOOT)))
