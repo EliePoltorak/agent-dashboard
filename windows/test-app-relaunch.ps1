@@ -174,7 +174,7 @@ $lines = foreach ($d in Get-ChildItem $seats -Directory | Where-Object { $_.Name
   if (Test-Path $cp) { "$($d.Name)`t$((Get-FileHash $cp -Algorithm SHA256).Hash)" }
 }
 if ($lines) { $lines | Set-Content (Join-Path $g 'consumed.txt') }
-if ($env:STUB_CONFIG) {
+if ($env:STUB_CONFIG -and $env:STUB_CONFIG -ne 'refused') {
   $live = Join-Path $app 'claude_desktop_config.json'
   $sha = if ($env:STUB_CONFIG -eq 'badhash') { 'DEADBEEF' } else { (Get-FileHash $live -Algorithm SHA256).Hash }
   $pair = if ($env:STUB_MODE -eq 'staged') { 'staged' } else { 'stash' }
@@ -184,7 +184,8 @@ if ($env:STUB_CONFIG) {
 $n = if ($env:STUB_MODE -eq 'staged') { 1 } else { 0 }
 $rg = if ($env:STUB_RESULT -eq 'wronggen') { 'some-other-gen' } else { $gen }
 $rp = if ($env:STUB_MODE -eq 'staged') { 'staged' } else { 'stash' }
-('{"status":"' + $(if ($n) { 'synced' } else { 'nothing' }) + '","n":' + $n + ',"reason":"","target":"' + $target + '","gen":"' + $rg + '","pair":"' + $rp + '"}') | Set-Content (Join-Path $g 'result.json')
+$co = if ($env:STUB_CONFIG -eq 'refused') { 'refused: config not changed (boom)' } elseif ($env:STUB_CONFIG) { 'prepared' } else { 'match' }
+('{"status":"' + $(if ($n) { 'synced' } else { 'nothing' }) + '","n":' + $n + ',"reason":"","target":"' + $target + '","gen":"' + $rg + '","pair":"' + $rp + '","config":"' + $co + '","config_pair":"' + $rp + '"}') | Set-Content (Join-Path $g 'result.json')
 'report' | Set-Content (Join-Path $g 'report.txt')
 'done'
 '@ | Set-Content $stub
@@ -286,7 +287,7 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $body = '$orig = ${function:Copy-Dir}; function Copy-Dir($s, $d) { & $orig $s $d; if ($s -like ''*sidebar-sync-work*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-Switch 'D'"
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   $st = Join-Path $sc '.claude-app-seats'; $app = Join-Path $sc 'AppData\Claude'
-  Check 'staged IndexedDB copy fails: BOTH sidebar dirs come from the stash, stash baseline recorded' ((Rdf "$app\$ls") -eq 'D-stash' -and (Rdf "$app\$idb") -eq 'D-stash' -and (Rdf "$st\D\sidebar-baseline.json") -match '"pins":\["stash"\]') $r.out
+  Check 'staged IndexedDB copy fails: BOTH sidebar dirs come from the stash, the baseline stays INVALID (the stage''s config outcome was for the staged pair)' ((Rdf "$app\$ls") -eq 'D-stash' -and (Rdf "$app\$idb") -eq 'D-stash' -and (Rdf "$st\D\sidebar-baseline.json") -match '"valid":false') $r.out
   Check 'staged copy failed: the staged-pair config is not committed (S74), the note says skipped' ((Rdf "$app\claude_desktop_config.json") -eq '{"old":true}' -and $r.out -match 'Sidebar: skipped \(the staged copy could not be installed') $r.out
   $sc = New-Scenario 's4b'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $body = '$orig = ${function:Copy-Dir}; function Copy-Dir($s, $d) { & $orig $s $d; if ($d -like ''*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-SwitchRelaunch 'D'"
@@ -405,7 +406,7 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
 
   # partial installs: no config commit without a saved baseline; a failed commit makes the baseline invalid again
   $sc = New-Scenario 'r1h'; $env:STUB_LOG = Join-Path $sc 'stub.log'
-  $body = "function Copy-Item { param([Parameter(Position=0)]`$Path, [Parameter(Position=1)]`$Destination, `$LiteralPath, [switch]`$Force) if (`"`$Destination`" -like '*sidebar-baseline.json.tmp') { throw 'disk full' }; Microsoft.PowerShell.Management\Copy-Item @PSBoundParameters }`nInvoke-Switch 'D'"
+  $body = "`$orig = `${function:Write-JsonAtomic}; function Write-JsonAtomic(`$path, `$obj) { if (`$path -like '*sidebar-baseline.json' -and `$obj.ContainsKey('pins')) { throw 'disk full' }; & `$orig `$path `$obj }`nInvoke-Switch 'D'"
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   Check 'the baseline could not be saved: the shared config is NOT replaced, the baseline stays invalid, the note says partial' ((Rdf "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"old":true}' -and (Rdf "$sc\.claude-app-seats\D\sidebar-baseline.json") -match '"valid":false' -and $r.out -match 'Sidebar: partial \(config not changed: the baseline was not saved\)' -and $r.out -notmatch 'VERIFY') $r.out
   $sc = New-Scenario 'r1i'; $env:STUB_LOG = Join-Path $sc 'stub.log'
@@ -414,6 +415,45 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $sc = New-Scenario 'r1j'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   Check 'config committed after the baseline was saved: synced, baseline valid, verify scheduled' ((Rdf "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"new":true}' -and (Rdf "$sc\.claude-app-seats\D\sidebar-baseline.json") -match '"valid":true' -and $r.out -match 'Sidebar: synced 1 pins' -and $r.out -match 'VERIFY D') $r.out
+
+  # 12) review round 2: explicit config outcome and baseline order, capture under the lock, history/heartbeat around the relaunch lock
+  $sc = New-Scenario 'r2a'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = 'refused' }
+  Check 'a config the stage REFUSED to read (explicit outcome, not an omitted file): not replaced, baseline stays invalid, partial, no verify' ((Rdf "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"old":true}' -and (Rdf "$sc\.claude-app-seats\D\sidebar-baseline.json") -match '"valid":false' -and $r.out -match 'Sidebar: partial \(config not changed \(refused: config not changed \(boom\)\)\)' -and $r.out -notmatch 'VERIFY') $r.out
+  $sc = New-Scenario 'r2b'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  $body = "function Commit-SidebarConfig { `$b = Get-Content (Join-Path `$SeatRoot 'D\sidebar-baseline.json') -Raw; Write-Host ('BASELINE_AT_COMMIT ' + `$b); exit 5 }`nInvoke-Switch 'D'"
+  $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
+  Check 'interrupted between the candidate baseline and the config commit: the candidate is on disk but INVALID (carries the pins, valid:false), and stays so' ($r.rc -eq 5 -and $r.out -match 'BASELINE_AT_COMMIT .*"valid":false' -and $r.out -match 'BASELINE_AT_COMMIT .*staged' -and (Rdf "$sc\.claude-app-seats\D\sidebar-baseline.json") -match '"valid":false' -and (Rdf "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"old":true}') "rc=$($r.rc) $($r.out)"
+  $sc = New-Scenario 'r2c'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
+  Check 'match/committed: the baseline is rewritten valid:true only at the end, after the config was replaced' ((Rdf "$sc\.claude-app-seats\D\sidebar-baseline.json") -match '"valid":true' -and (Rdf "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"new":true}') $r.out
+
+  # capture: every check inside the seat lock
+  $sc = New-Scenario 'r2d'
+  '{"lastKnownAccountUuid":"unew"}' | Set-Content "$sc\AppData\Claude\config.json"          # the live login matches no seat: the pre-lock checks of the old code passed
+  $body = "`$real = `${function:Enter-SeatLock}; function Enter-SeatLock { '{""lastKnownAccountUuid"":""ud""}' | Set-Content (Join-Path `$AppDir 'config.json'); & `$real }`nInvoke-Capture 'X'"
+  $r = Invoke-Scenario $sc $body @{}
+  Check 'a capture queued behind a lock while the live login changes to ANOTHER seat is refused, nothing copied' ($r.rc -eq 1 -and $r.out -match "already captured as seat 'D'" -and -not (Test-Path "$sc\.claude-app-seats\X") -and -not (Test-Path "$sc\.claude-app-seats\.seat-write.lock")) "rc=$($r.rc) $($r.out)"
+  $sc = New-Scenario 'r2e'
+  '{"lastKnownAccountUuid":"unew"}' | Set-Content "$sc\AppData\Claude\config.json"
+  $body = "`$real = `${function:Enter-SeatLock}; function Enter-SeatLock { `$script:up = `$true; & `$real }`nfunction Get-AppProcs { if (`$script:up) { [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]::Zero } } }`nInvoke-Capture 'X'"
+  $r = Invoke-Scenario $sc $body @{}
+  Check 'a capture queued behind a lock while the app is started is refused by the app-closed check made inside the lock' ($r.rc -eq 1 -and $r.out -match 'BLOCKED' -and -not (Test-Path "$sc\.claude-app-seats\X") -and -not (Test-Path "$sc\.claude-app-seats\.seat-write.lock")) "rc=$($r.rc) $($r.out)"
+  $sc = New-Scenario 'r2f'
+  '{"lastKnownAccountUuid":"unew"}' | Set-Content "$sc\AppData\Claude\config.json"
+  $r = Invoke-Scenario $sc "Invoke-Capture 'X'" @{}
+  Check 'an ordinary capture still works and releases the lock' ($r.rc -eq 0 -and $r.out -match "Captured current login as profile 'X'" -and (Rdf "$sc\.claude-app-seats\X\owner-uuid.txt") -eq 'unew' -and -not (Test-Path "$sc\.claude-app-seats\.seat-write.lock")) "rc=$($r.rc) $($r.out)"
+
+  # history sync is quiet while the relaunch lock is held; the heartbeat runs after the app is up and the lock is released; a plain switch keeps today's order
+  $sc = New-Scenario 'r2g'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  $lk2 = '$SeatRoot\.seat-write.lock'
+  $hs = "function Invoke-AppHistorySync([switch]`$Quiet) { Write-Host ('HIST quiet=' + [bool]`$Quiet + ' lock=' + (Test-Path `"$lk2`")) }`nfunction Invoke-AppSeatPublish { Write-Host ('PUBLISH lock=' + (Test-Path `"$lk2`")) }`n"
+  $body = $hs + "function Get-AppProcs { if (`$script:launched -or `$script:n++ -lt 1) { [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]::Zero } } }`nInvoke-SwitchRelaunch 'D'"
+  $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
+  Check 'relaunch: the history sync runs -Quiet inside the lock; the heartbeat runs AFTER the app is up, with the lock released' ($r.out -match 'HIST quiet=True lock=True' -and $r.out -match 'PUBLISH lock=False' -and $r.out.IndexOf('PUBLISH') -gt $r.out.IndexOf('Relaunched the Claude app') -and $r.out -notmatch 'PUBLISH lock=True') $r.out
+  $sc = New-Scenario 'r2h'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  $r = Invoke-Scenario $sc ($hs + "Invoke-Switch 'D'") @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
+  Check 'a plain --switch keeps today''s order: history sync (not quiet) then the heartbeat, before the last line' ($r.out -match 'HIST quiet=False lock=False' -and $r.out.IndexOf('HIST') -lt $r.out.IndexOf('PUBLISH') -and $r.out.IndexOf('PUBLISH') -lt $r.out.IndexOf('Now reopen')) $r.out
 } catch { $fail++; Write-Host "  FAIL  the test itself stopped: $_" -ForegroundColor Red } finally {
   foreach ($k in $keep.Keys) { Set-Item "env:$k" $keep[$k] }
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

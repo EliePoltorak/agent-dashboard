@@ -367,6 +367,7 @@ function Invoke-SwitchRelaunch([string]$label) {
   $lk = Try-EnterSeatLock
   if (-not $lk) { Write-Host "BLOCKED: $(Join-Path $SeatRoot '.seat-write.lock') is held (another switch or the seat keep-alive). Re-run in a minute." -ForegroundColor Red; exit 1 }
   $script:SeatLockHeld = $lk; $script:LockOwnedByRelaunch = $true
+  $publishAfter = $false
   try {
     $wasRunning = @(Get-AppProcs).Count -gt 0
     $recorded = Get-AppAccountUuid
@@ -386,7 +387,7 @@ function Invoke-SwitchRelaunch([string]$label) {
           $deadline = (Get-Date).AddSeconds($script:StartWaitSec)
           while (-not $up -and (Get-Date) -lt $deadline) { if (@(Get-AppProcs).Count -gt 0) { $up = $true } else { Start-Sleep -Milliseconds 500 } }
         }
-        if ($up) { Write-Host "Relaunched the Claude app on seat $(Resolve-Label $label).$note" -ForegroundColor Green }
+        if ($up) { $publishAfter = $true; Write-Host "Relaunched the Claude app on seat $(Resolve-Label $label).$note" -ForegroundColor Green }
         else {      # the switch stands; only the reopening failed. Exit 3 so a caller (the dashboard) does not report a plain success
           Write-Host "Switched to seat $(Resolve-Label $label), but the Claude app could not be reopened; open it from the Start menu.$note" -ForegroundColor Red
           exit 3
@@ -403,6 +404,7 @@ function Invoke-SwitchRelaunch([string]$label) {
       }
     }
   } finally { $script:LockOwnedByRelaunch = $false; Release-SeatLock }
+  if ($publishAfter) { Invoke-AppSeatPublish }       # the app is up and the lock is free: never inside the critical section
 }
 function Copy-Dir($src,$dst){ robocopy $src $dst /E /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null; $script:RobocopyRc = $LASTEXITCODE }
 function Mirror-Dir($src,$dst){ robocopy $src $dst /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null; $script:RobocopyRc = $LASTEXITCODE }
@@ -416,11 +418,13 @@ function Remove-SidebarDirs {
   # only ever the two dirs this switch's copy just created in empty paths
   foreach ($d in $SidebarDirs) { if (Test-Path -LiteralPath "$AppDir\$d") { Remove-Item -LiteralPath "$AppDir\$d" -Recurse -Force -ErrorAction SilentlyContinue } }
 }
-function Invoke-AppHistorySync {
+function Invoke-AppHistorySync([switch]$Quiet) {
+  # -Quiet is used while --relaunch holds the seat lock: the sync then skips AT ONCE if another run holds its own lock (an interactive run would
+  # wait up to 3 min), and the scheduled history task covers it.
   $sync = "$env:USERPROFILE\.grok\bin\sync-app-history.ps1"   # stays in .grok\bin (scheduled task points there)
   if (Test-Path $sync) {
     Write-Host "Syncing session history into the app index..." -ForegroundColor DarkGray
-    try { & $sync } catch { Write-Host "  (history sync skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+    try { if ($Quiet) { & $sync -Quiet } else { & $sync } } catch { Write-Host "  (history sync skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow }
   }
 }
 function Invoke-AppSeatPublish {
@@ -557,30 +561,41 @@ function Invoke-Switch([string]$label) {
       }
       $label | Set-Content "$SeatRoot\.active" -Encoding UTF8
       Write-Host "Switched the Claude app login to profile '$label' ($(Get-ProfileEmail $label))." -ForegroundColor Green
-      # 3) record what was installed, the target's baseline (valid only now), and the shared config
+      # 3) record what was installed, the target's baseline and the shared config. The candidate baseline is written FIRST with valid:false, so an
+      # interruption anywhere below leaves it invalid (S66); the stage's explicit config outcome for the installed pair is then settled (match,
+      # prepared -> commit, or refused); and only when it is match or committed is the candidate rewritten with valid:true. A refused or failed
+      # config, after a staged install or where it was needed for the stash install, leaves the stores disagreeing: the baseline stays invalid, so
+      # whatever the app reconciles at launch is never read as a user edit at the next departure, and the note says partial.
       try { Write-JsonAtomic (Join-Path $src 'sidebar-installed.json') @{ created = (Get-LiveCreation) } } catch {}
+      $candidate = $null
       try {
         $bsrc = if ($pair -eq 'staged') { "$gdir\baseline.json" } elseif ($stage -and $stage.ran) { "$gdir\baseline-stash.json" } else { $null }
-        if ($bsrc -and (Test-Path -LiteralPath $bsrc)) {
-          Copy-Item -LiteralPath $bsrc -Destination (Join-Path $src 'sidebar-baseline.json.tmp') -Force
-          [IO.File]::Move((Join-Path $src 'sidebar-baseline.json.tmp'), (Join-Path $src 'sidebar-baseline.json'), $true)
-          $b = Read-JsonFile (Join-Path $src 'sidebar-baseline.json'); $baselineOk = [bool]($b -and $b['valid'] -eq $true)
+        $b0 = if ($bsrc -and (Test-Path -LiteralPath $bsrc)) { Read-JsonFile $bsrc } else { $null }
+        if ($b0 -and $b0['valid'] -eq $true) {
+          $b0['valid'] = $false
+          Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') $b0
+          $b0['valid'] = $true
+          $candidate = $b0
         }
-      } catch { Write-Host "  (sidebar: baseline not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
-      # The shared config only AFTER the baseline was saved (S66). Three outcomes: it already matched (the stage prepared none), committed, or could
-      # not be updated. A failure after a staged install, or where it was needed for the stash install, leaves the three stores disagreeing, so the
-      # baseline goes invalid again: whatever the app reconciles at launch is then not read as a user edit at the next departure.
-      $cfg = @{ state = 'matched'; why = '' }; $partial = $null
-      if ($stage -and $stage.ran -and (Test-Path -LiteralPath (Join-Path $gdir 'config.json'))) {
-        $cfg = if ($baselineOk) { Commit-SidebarConfig $gdir $pair $gen } else { @{ state = 'failed'; why = 'config not changed: the baseline was not saved' } }
-        if ($cfg.why) { try { Add-Content -LiteralPath (Join-Path $gdir 'report.txt') -Value $cfg.why } catch {} }
-        if ($cfg.state -eq 'failed') {
-          $partial = $cfg.why
-          try { Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') @{ valid = $false } } catch {}
-          $baselineOk = $false
-        }
+      } catch { Write-Host "  (sidebar: baseline not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow; $candidate = $null }
+      $cfg = @{ state = 'match'; why = '' }; $partial = $null
+      $res0 = if ($stage -and $stage.ran) { Read-JsonFile (Join-Path $gdir 'result.json') } else { $null }
+      if ($res0 -and $candidate) {
+        $co = [string]$res0['config']; $cpair = [string]$res0['config_pair']
+        if ($cpair -ne $pair) { $cfg = @{ state = 'otherpair'; why = "config not changed: its outcome is for the $cpair pair, the $pair pair is installed" } }
+        elseif ($co -eq 'match') { $cfg = @{ state = 'match'; why = '' } }
+        elseif ($co -eq 'prepared') { $cfg = Commit-SidebarConfig $gdir $pair $gen }
+        else { $cfg = @{ state = 'failed'; why = $(if ($co) { "config not changed ($co)" } else { 'config not changed: the stage reported no config outcome' }) } }
+      } elseif ($res0 -and $res0['config'] -eq 'prepared') {
+        $cfg = @{ state = 'failed'; why = 'config not changed: the baseline was not saved' }
       }
-      if ($stage -and $stage.ran -and $pair -eq 'staged' -and -not $baselineOk -and -not $partial) { $partial = 'the baseline could not be saved' }
+      if ($cfg.why) { try { Add-Content -LiteralPath (Join-Path $gdir 'report.txt') -Value $cfg.why } catch {} }
+      if ($cfg.state -eq 'failed') { $partial = $cfg.why }
+      if ($candidate -and $cfg.state -in @('match', 'committed')) {
+        try { Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') $candidate; $baselineOk = $true }
+        catch { Write-Host "  (sidebar: baseline not validated: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+      }
+      if ($stage -and $stage.ran -and $pair -eq 'staged' -and -not $baselineOk -and -not $partial -and $cfg.state -ne 'otherpair') { $partial = 'the baseline could not be saved' }
       # the line the dashboard shows
       if (-not $script:SidebarNote) {
         $res = if ($stage -and $stage.ran) { Read-JsonFile (Join-Path $gdir 'result.json') } else { $null }
@@ -612,12 +627,43 @@ function Invoke-Switch([string]$label) {
   Remove-OldGens $SidebarWork
   Remove-OldGens $SidebarBackups
   # 3) make this account's app history show your CLI sessions
-  Invoke-AppHistorySync
-  # 4) tell the box which seat the app is on now (heartbeat issue); never fatal to the switch
-  Invoke-AppSeatPublish
+  Invoke-AppHistorySync -Quiet:$script:LockOwnedByRelaunch
+  # 4) tell the box which seat the app is on now (heartbeat issue); never fatal to the switch. Under --relaunch the lock is still held and the app
+  # is not up yet: the publish (synchronous GitHub calls) runs after the app has started and the lock is released, in Invoke-SwitchRelaunch.
+  if (-not $script:LockOwnedByRelaunch) { Invoke-AppSeatPublish }
   Write-Host "To undo: --switch <previous-label>, or restore that backup folder into $AppDir." -ForegroundColor DarkGray
   $script:SwitchDone = $true
   if (-not $Relaunch) { Write-Host "Now reopen the Claude desktop app.$(if ($script:SidebarNote) { ' ' + $script:SidebarNote })" -ForegroundColor Cyan }
+}
+
+function Invoke-Capture([string]$label) {
+  # --capture <label>: the app-closed check, the live account read and the duplicate-owner gate all run INSIDE the seat lock. A capture queued behind
+  # a --relaunch would otherwise pass them while the app was closed and the old seat still installed, then copy the newly started seat's profile over
+  # another seat and write its uuid as that seat's owner.
+  if (-not $label) { Write-Host "Usage: --capture <label>" -ForegroundColor Red; exit 1 }
+  $seatLock = Enter-SeatLock
+  try {
+    Assert-Closed
+    # Duplicate-owner gate: capturing a login already pinned to ANOTHER seat just clones
+    # that seat under a new name — then "switching" to the new label silently lands on the
+    # old account (how seat E got captured as a copy of c, 2026-07-07). The uuid must be
+    # unique across seats; log into the target account first.
+    $curUuid = Get-AppAccountUuid
+    $dupe = Find-SeatByUuid $curUuid
+    if ($dupe -and ($dupe -ne (Resolve-Label $label))) {
+      Write-Host "REFUSED: the app's current login (uuid $curUuid) is already captured as seat '$dupe' ($(Get-ProfileEmail $dupe))." -ForegroundColor Red
+      Write-Host "Capturing it as '$label' would make '$label' a duplicate of '$dupe' -- switching to it would land on the same account." -ForegroundColor Yellow
+      Write-Host "Open the app, log in as the '$label' account (Settings > Log out > log in), quit fully, then re-run --capture $label." -ForegroundColor Yellow
+      exit 1
+    }
+    $dst = Join-Path $SeatRoot $label
+    New-Item -ItemType Directory -Path $dst -Force | Out-Null
+    foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$dst\$f" -Force } }
+    foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Copy-Dir "$AppDir\$d" "$dst\$d" } }
+    "captured=$stamp account=$(Get-ProfileEmail $label) uuid=$(Get-AppAccountUuid) label=$label" | Set-Content "$dst\meta.txt" -Encoding UTF8
+    (Get-AppAccountUuid) | Set-Content "$dst\owner-uuid.txt" -Encoding UTF8   # pins this seat to this account
+    Write-Host "Captured current login as profile '$label' (uuid $(Get-AppAccountUuid)) -> $dst" -ForegroundColor Green
+  } finally { $seatLock.Dispose() }
 }
 
 # ---- flag parse ----
@@ -696,32 +742,7 @@ switch ($mode) {
     break
   }
 
-  'capture' {
-    if (-not $label) { Write-Host "Usage: --capture <label>" -ForegroundColor Red; exit 1 }
-    Assert-Closed
-    # Duplicate-owner gate: capturing a login already pinned to ANOTHER seat just clones
-    # that seat under a new name — then "switching" to the new label silently lands on the
-    # old account (how seat E got captured as a copy of c, 2026-07-07). The uuid must be
-    # unique across seats; log into the target account first.
-    $curUuid = Get-AppAccountUuid
-    $dupe = Find-SeatByUuid $curUuid
-    if ($dupe -and ($dupe -ne (Resolve-Label $label))) {
-      Write-Host "REFUSED: the app's current login (uuid $curUuid) is already captured as seat '$dupe' ($(Get-ProfileEmail $dupe))." -ForegroundColor Red
-      Write-Host "Capturing it as '$label' would make '$label' a duplicate of '$dupe' -- switching to it would land on the same account." -ForegroundColor Yellow
-      Write-Host "Open the app, log in as the '$label' account (Settings > Log out > log in), quit fully, then re-run --capture $label." -ForegroundColor Yellow
-      exit 1
-    }
-    $seatLock = Enter-SeatLock
-    $dst = Join-Path $SeatRoot $label
-    New-Item -ItemType Directory -Path $dst -Force | Out-Null
-    foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$dst\$f" -Force } }
-    foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Copy-Dir "$AppDir\$d" "$dst\$d" } }
-    "captured=$stamp account=$(Get-ProfileEmail $label) uuid=$(Get-AppAccountUuid) label=$label" | Set-Content "$dst\meta.txt" -Encoding UTF8
-    (Get-AppAccountUuid) | Set-Content "$dst\owner-uuid.txt" -Encoding UTF8   # pins this seat to this account
-    Write-Host "Captured current login as profile '$label' (uuid $(Get-AppAccountUuid)) -> $dst" -ForegroundColor Green
-    $seatLock.Dispose()
-    break
-  }
+  'capture' { Invoke-Capture $label; break }
 
   'switch' { if ($Relaunch) { Invoke-SwitchRelaunch $label } else { Invoke-Switch $label }; break }
 
