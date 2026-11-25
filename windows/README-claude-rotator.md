@@ -548,11 +548,12 @@ another account/seat — never appear in the app's history on their own.
 (pruning was removed 2026-11-16). A session is copied to the seats that lack it only if it is **recent**
 (last activity within `-MaxAgeDays`, **default 7**; `0` = no age limit) AND matches a keep category.
 A session pinned on any seat that belongs to the synced workspace (`-Cwd`), with its transcript on this
-machine, is copied too, whatever its age. This follows the records' `isStarred` flag, which the sync
+machine, is copied too, whatever its age, and so is every session linked to a kept or pinned one by `spawnedFrom`
+that has its transcript on this machine (see *Side sessions and families* below). Pinning follows the records' `isStarred` flag, which the sync
 spreads to every seat, not the sidebar's own pin list (see below).
 
 **Old sessions are archived (2026-11-16).** A `-Cwd` session whose transcript is on this machine
-and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat. It is then remembered in
+and was last written more than `-MaxAgeDays` ago (UTC) is archived on every seat (not one whose only transcript is in an app worktree folder). It is then remembered in
 `.flag-state.json` (`autoArchived`, session id → value), so this sync will not archive it again for age while the entry stays. The value is one of four kinds:
 
 - a plain date: archived for age by this sync; if its transcript is written again after that date and is recent (a resume, or a CLI process exiting after a long idle, which appends a few lines) it is un-archived once, and archived again when it goes stale (if its records were all removed and recreated meanwhile, it simply stays un-archived);
@@ -704,6 +705,19 @@ claude-sync-history -Cwd 'C:\path\to\project'  # a different workspace
 
 - Script: `%USERPROFILE%\.grok\bin\sync-app-history.ps1`
 - Records it creates are tagged `permissionMode:"default"`; transcripts are never touched.
+- **Side sessions and families.** A kept (or pinned) session brings every session connected to it through `spawnedFrom.sessionId`
+  (its side sessions, what it was spawned from, their siblings and so on) whose transcript is on this machine, whatever their length. Sessions whose transcript
+  is only in an app worktree folder of `-Cwd` are classified and kept like any other, with or without a parent, but are not archived for age; they (transcripts only under `~/.claude/projects/` folders named after `<-Cwd>\.claude\worktrees\<name>`, `<enc>--claude-worktrees-*` except at a drive or share root) are carried too, only from a worktree-cwd record (so
+  they keep their worktree folder, its repo part respelled the way the destination seat spells the workspace), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted
+  when some seat has a record of them). A session whose transcript is in
+  the repo folder is copied as before, from a record whose cwd is `-Cwd` (a blank-titled one as a last resort, rather than
+  fabricating). Copies of worktree records are not caught up to the transcript tip afterwards (pass 1.5 covers cwd = `-Cwd`
+  records only; issue #31).
+  Every copy gets a new session id, as before: the same id on two seats would share state the app keys by session id for
+  the whole machine (`git-worktrees.json` leases a worktree to one, `side-session-notes\<id>`, `claude_desktop_config.json`).
+  A carried child's `spawnedFrom` names the parent id, and its `startChain` the chain's first session id, that its own seat holds, when that seat holds it or gets it this run; otherwise they are copied as is. A clone source with no link, or whose link names a parent id no seat holds, first takes the link another record of the session in this repo carries whose parent some seat holds; a source with no link takes any link when none resolves, and one whose own link is dead keeps it. `startChain` comes from the same record; when that record has none, the source's own `startChain` is kept only if the seat being written holds its first session (a grandparent, held or written this run). A record fabricated without a source also gets a different id on
+  each seat. A family member deleted on one seat comes back on the next run while its family is kept, as a kept session
+  always has.
 - **No record is moved or deleted.** Runs before 2026-11-16 moved pruned records to
   `~/.claude-app-seats\.pruned-history-backups\<timestamp>\`. Tune what's "substantive" via
   `-MinAssistant` and the `$AutoSignature` list at the top of the script; `-NoPrune` is still
