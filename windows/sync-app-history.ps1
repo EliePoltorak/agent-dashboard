@@ -72,7 +72,10 @@
   chain's first session id, that its own seat holds, when that seat holds it or gets it this run; otherwise copied as is.
   A clone source with no link, or whose link names a parent id no seat holds, first takes the link another record of the
   session in this repo carries whose parent some seat holds; a source with no link takes any link when none resolves, and
-  one whose own link is dead keeps it. startChain comes from the same record (none when that record has none).
+  one whose own link is dead keeps it. startChain comes from the same record; when that record has none, the source's own
+  startChain is kept only if its first session id is one some seat holds (a live chain root, e.g. a grandparent).
+  While the desktop app is running (archive flags not synced), a family member whose transcript is older than
+  -MaxAgeDays is not added: it would land un-archived; the next run with the app closed carries it.
   A family member deleted on one seat comes back on the next run while its family is kept, as a kept session always has.
 
   TITLES
@@ -365,6 +368,7 @@ function Write-Record([string]$subDir, $file) {
 $nowUtc = [DateTime]::UtcNow   # age checks compare UTC, so a DST change can't skew them
 $allT = New-Object System.Collections.Generic.HashSet[string]
 $keep = New-Object System.Collections.Generic.HashSet[string]
+$recentT = New-Object System.Collections.Generic.HashSet[string]   # transcripts within -MaxAgeDays (the family closure reads it)
 $nInterrupted = 0; $nUnfinishedMpr = 0; $nStale = 0
 foreach ($m in $transcripts) {
   # A transcript that can't be read (deleted since it was listed, access denied) is left out entirely: its
@@ -376,6 +380,7 @@ foreach ($m in $transcripts) {
   # RECENCY: copy only sessions whose last activity is within the window. Older ones are archived
   # instead (pass 1.4, AUTO-ARCHIVE in the header). $MaxAgeDays <= 0 disables the age limit.
   $recent  = ($MaxAgeDays -le 0) -or (($nowUtc - $m.LastWriteTimeUtc).TotalDays -le $MaxAgeDays)
+  if ($recent) { [void]$recentT.Add($m.BaseName) }
   $substantive   = (-not $c.sig) -and ($c.asst -ge $MinAssistant)
   # Interrupted excludes automated dispatches: a dispatched agent's transcript simply ENDS
   # at its last tool_result (the harness stops it there), so an unclean tail on an automated
@@ -831,12 +836,18 @@ foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
 } }
 $fams = @{}
 foreach ($x in @($uf.Keys)) { $rt = Get-FamRoot $x; if (-not $fams.ContainsKey($rt)) { $fams[$rt] = New-Object System.Collections.Generic.List[string] }; $fams[$rt].Add($x); if ($x -ne $rt -and -not $fams[$rt].Contains($rt)) { $fams[$rt].Add($rt) } }
-$famAdded = 0
+$famAdded = 0; $famDeferred = 0
 foreach ($fm in $fams.Values) {
   if (-not @($fm | Where-Object { $keep.Contains($_) -or ($pinnedCli.Contains($_) -and $allT.Contains($_)) }).Count) { continue }
-  foreach ($x in $fm) { if ($allT.Contains($x) -and $keep.Add($x)) { $famAdded++ } }
+  foreach ($x in $fm) {
+    if (-not $allT.Contains($x) -or $keep.Contains($x)) { continue }
+    # flags not synced this run (app running): an old member would be written un-archived; the next closed-app run carries it
+    if ($flagSkip -and -not $recentT.Contains($x)) { $famDeferred++; continue }
+    [void]$keep.Add($x); $famAdded++
+  }
 }
 if (-not $Quiet -and $famAdded -gt 0) { "$famAdded linked (side) session(s) added to those to be on every seat" }
+if (-not $Quiet -and $famDeferred -gt 0) { "$famDeferred old linked session(s) left for the next run with the app closed (archive flags are not synced while it runs)" }
 # Pass 2 clones a parent before its side sessions, so a child cloned in the same pass can point at the id the parent got on that seat.
 $cliParent = @{}
 foreach ($l in $bucketRecs.Values) { foreach ($r in $l) {
@@ -928,7 +939,7 @@ foreach ($acct in $accts) {
             if ($lk) {
               $cj | Add-Member -NotePropertyName spawnedFrom -NotePropertyValue ($lk.sf | ConvertFrom-Json -DateKind String) -Force
               if ($lk.sc) { $cj | Add-Member -NotePropertyName startChain -NotePropertyValue ($lk.sc | ConvertFrom-Json -DateKind String) -Force }
-              else { $cj.PSObject.Properties.Remove('startChain') }   # never pair the new link with the source's own chain
+              elseif (-not ($cj.startChain.firstSessionId -and $sidCli.ContainsKey([string]$cj.startChain.firstSessionId))) { $cj.PSObject.Properties.Remove('startChain') }   # keep the source's own chain root only if some seat holds it
             }
           }
           $cj.sessionId = "local_$([guid]::NewGuid().ToString())"   # always a new id (see the header: ids the app shares per machine)

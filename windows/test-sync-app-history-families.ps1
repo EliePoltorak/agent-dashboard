@@ -21,7 +21,8 @@
   holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record, the copy at the tip with the link (L, L2, L3), a blank title (T), a blank-titled repo record cloned with its link
   (BT), blank-titled records only, the tip one used for new copies (BL), a titled linkless source taking the link a
   blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a titled source's own dead link replaced by one that
-  resolves (GD), and its own dead startChain dropped when the grafted link brings none (GC), a
+  resolves (GD), and its own startChain dropped when the grafted link brings none and its root is not held (GC), kept when it is (GC2),
+  an old family member not added while the app runs (flags not synced) and added by the next closed-app run (FA), a
   malformed id (M), the
   not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
@@ -71,8 +72,9 @@ Set-Content "$F\deleted_$pGuid" 'x' -NoNewline                                  
 
 $fail = 0
 function check($name, $ok) { if ($ok) { "PASS $name" } else { "FAIL $name"; $script:fail++ } }
-function run {
-  $out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -Cwd '$repo' -AssumeAppClosed *>&1" 2>&1 | ForEach-Object { "$_" })
+function run([switch]$appOpen) {
+  $mode = if ($appOpen) { '-AssumeAppRunning' } else { '-AssumeAppClosed' }
+  $out = @(pwsh -NoProfile -Command "`$env:APPDATA='$sb\app'; `$env:USERPROFILE='$sb\home'; & '$Script' -Cwd '$repo' $mode *>&1" 2>&1 | ForEach-Object { "$_" })
   $script:lastOut = $out
   if ($LASTEXITCODE -ne 0) { "FAIL sync exited $LASTEXITCODE"; $script:fail++ }
   $out | Where-Object { $_ -match 'rror|xception|WARNING|classified' } | ForEach-Object { "    $_" }
@@ -260,13 +262,22 @@ transcript $pDir $gdPCli 7 'parent of a child with a dead own link'; transcript 
 record $A $gdPSid $gdPCli $repo 'Parent of a dead-linked child' $null
 record $A "local_$([guid]::NewGuid())" $gdCli $repo 'Titled child GD' "local_$([guid]::NewGuid())"
 record $B "local_$([guid]::NewGuid())" $gdCli $repo '' $gdPSid
-# GC: like GD, but B's linked record has no startChain: seat C's copy takes B's spawnedFrom and drops A's own dead startChain
+# GC: like GD, but B's linked record has no startChain: seat C's copy takes B's spawnedFrom and drops A's own startChain,
+# whose root no seat holds. GC2: the same, but A's own startChain names a grandparent A holds: the copy keeps it
 $gcCli = [guid]::NewGuid().ToString(); $gcPCli = [guid]::NewGuid().ToString(); $gcPSid = "local_$([guid]::NewGuid())"
 transcript $pDir $gcPCli 7 'parent of a child whose live link has no chain'; transcript $pDir $gcCli 7 'child with a dead chain'
 record $A $gcPSid $gcPCli $repo 'Parent of a chainless link' $null
 record $A "local_$([guid]::NewGuid())" $gcCli $repo 'Titled child GC' "local_$([guid]::NewGuid())"
 $gcB = "local_$([guid]::NewGuid())"; record $B $gcB $gcCli $repo '' $gcPSid
 $f = "$B\$gcB.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('startChain'); Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
+$g2Cli = [guid]::NewGuid().ToString(); $g2PCli = [guid]::NewGuid().ToString(); $g2GCli = [guid]::NewGuid().ToString()
+$g2PSid = "local_$([guid]::NewGuid())"; $g2GSid = "local_$([guid]::NewGuid())"
+transcript $pDir $g2GCli 7 'grandparent GC2'; transcript $pDir $g2PCli 7 'parent GC2'; transcript $pDir $g2Cli 7 'child GC2 with a live chain root'
+record $A $g2GSid $g2GCli $repo 'Grandparent GC2' $null; record $A $g2PSid $g2PCli $repo 'Parent GC2' $null
+$g2A = "local_$([guid]::NewGuid())"; record $A $g2A $g2Cli $repo 'Titled child GC2' "local_$([guid]::NewGuid())"
+$f = "$A\$g2A.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.startChain.firstSessionId = $g2GSid; $j.startChain.depth = 2; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
+$g2B = "local_$([guid]::NewGuid())"; record $B $g2B $g2Cli $repo '' $g2PSid
+$f = "$B\$g2B.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('startChain'); Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
 # N: a repo session with a side-session-notes folder: its copy gets a new id (deleting it must never take the notes)
@@ -310,7 +321,9 @@ check "a titled linkless source takes the family link another record carries, re
 $grP = @($rC | Where-Object { $_.cliSessionId -eq $grPCli }); $gr = @($rC | Where-Object { $_.cliSessionId -eq $grCli })
 check "the grafted link is one that resolves, remapped to seat C's parent" ($gr.Count -eq 1 -and $grP.Count -eq 1 -and $gr[0].spawnedFrom.sessionId -eq $grP[0].sessionId -and $gr[0].startChain.firstSessionId -eq $grP[0].sessionId)
 $gcP = @($rC | Where-Object { $_.cliSessionId -eq $gcPCli }); $gc = @($rC | Where-Object { $_.cliSessionId -eq $gcCli })
-check "a grafted link whose record has no startChain drops the source's own dead startChain (GC)" ($gc.Count -eq 1 -and $gcP.Count -eq 1 -and $gc[0].title -eq 'Titled child GC' -and $gc[0].spawnedFrom.sessionId -eq $gcP[0].sessionId -and $null -eq $gc[0].startChain)
+check "a grafted link whose record has no startChain drops the source's own startChain whose root no seat holds (GC)" ($gc.Count -eq 1 -and $gcP.Count -eq 1 -and $gc[0].title -eq 'Titled child GC' -and $gc[0].spawnedFrom.sessionId -eq $gcP[0].sessionId -and $null -eq $gc[0].startChain)
+$g2P = @($rC | Where-Object { $_.cliSessionId -eq $g2PCli }); $g2G = @($rC | Where-Object { $_.cliSessionId -eq $g2GCli }); $g2 = @($rC | Where-Object { $_.cliSessionId -eq $g2Cli })
+check "a grafted link whose record has no startChain keeps the source's own startChain when its root is held (GC2)" ($g2.Count -eq 1 -and $g2P.Count -eq 1 -and $g2G.Count -eq 1 -and $g2[0].spawnedFrom.sessionId -eq $g2P[0].sessionId -and $g2[0].startChain.firstSessionId -in @($g2GSid, $g2G[0].sessionId))
 $gdP = @($rC | Where-Object { $_.cliSessionId -eq $gdPCli }); $gd = @($rC | Where-Object { $_.cliSessionId -eq $gdCli })
 check "a titled source whose own link names a parent no seat holds takes a link that resolves, remapped to seat C's parent" ($gd.Count -eq 1 -and $gdP.Count -eq 1 -and $gd[0].title -eq 'Titled child GD' -and $gd[0].spawnedFrom.sessionId -eq $gdP[0].sessionId -and $gd[0].startChain.firstSessionId -eq $gdP[0].sessionId)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
@@ -325,6 +338,25 @@ transcript $wDir $vCli 7 'substantive worktree session'
 record $A "local_$([guid]::NewGuid())" $vCli $wt 'Substantive worktree session' $null
 run
 check 'with no repo project folder, a worktree session is still carried' (@(recsIn $B | Where-Object { $_.cliSessionId -eq $vCli }).Count -eq 1)
+
+if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
+Remove-Item -LiteralPath $sb -Recurse -Force
+
+# ---- third sandbox (FA): a recent parent and its 30-day-old side session, synced first with the app running -----------
+$sb = "C:\Dev\Temp\sync-app-history-families-test\$(Get-Date -Format 'yyyyMMdd-HHmmss')-$PID-3"
+$projRoot = "$sb\home\.claude\projects"; $ccs = "$sb\app\Claude\claude-code-sessions"; $ws = [guid]::NewGuid().ToString()
+$A = "$ccs\aaaaaaaa-0000-0000-0000-000000000001\$ws"; $B = "$ccs\bbbbbbbb-0000-0000-0000-000000000002\$ws"
+$pDir = "$projRoot\C--SyncFamTest-repo"; $wDir = "$projRoot\C--SyncFamTest-repo--claude-worktrees-wt1"
+New-Item -ItemType Directory $A, $B, $pDir, $wDir, "$sb\home\.claude-app-seats" -Force | Out-Null
+"sandbox: $sb"
+$faP = [guid]::NewGuid().ToString(); $faC = [guid]::NewGuid().ToString(); $faPSid = "local_$([guid]::NewGuid())"
+transcript $pDir $faP 7 'recent parent FA'; transcript $wDir $faC 2 'old side session FA'
+(Get-Item "$wDir\$faC.jsonl").LastWriteTime = (Get-Date).AddDays(-30)
+record $A $faPSid $faP $repo 'Parent FA' $null; record $A "local_$([guid]::NewGuid())" $faC $wt 'Old side session FA' $faPSid
+run -appOpen
+check 'with the app running, the parent is carried but its old side session is not (FA)' (@(recsIn $B | Where-Object { $_.cliSessionId -eq $faP }).Count -eq 1 -and @(recsIn $B | Where-Object { $_.cliSessionId -eq $faC }).Count -eq 0)
+run
+check 'the next run with the app closed carries the old side session (FA)' (@(recsIn $B | Where-Object { $_.cliSessionId -eq $faC }).Count -eq 1)
 
 if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
 Remove-Item -LiteralPath $sb -Recurse -Force
