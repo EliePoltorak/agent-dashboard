@@ -62,8 +62,8 @@
   (side sessions, what it was spawned from, their siblings and so on), whatever their length or age, if their transcripts
   are here. Sessions whose transcript is only in an app worktree folder of -Cwd are classified and kept like any other, with
   or without a parent, but are not archived for age; they (transcripts only in projects folders named after <-Cwd>\.claude\worktrees\<name>, records with cwd
-  = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their own
-  cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
+  = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their worktree
+  folder, its repo part in the destination seat's spelling), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
   is copied as before, from a cwd = -Cwd record only (a blank-titled one as a last resort, rather than fabricating).
   Copies of worktree records are not caught up to the transcript tip afterwards (pass 1.5 covers cwd = -Cwd records only;
   issue #31). Every copy gets a new session id, as before: the same id on two

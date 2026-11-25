@@ -698,7 +698,7 @@ claude-sync-history -Cwd 'C:\path\to\project'  # a different workspace
 - **Side sessions and families.** A kept (or pinned) session brings every session connected to it through `spawnedFrom.sessionId`
   (its side sessions, what it was spawned from, their siblings and so on) whose transcript is on this machine, whatever their length. Sessions whose transcript
   is only in an app worktree folder of `-Cwd` are classified and kept like any other, with or without a parent, but are not archived for age; they (transcripts only under `~/.claude/projects/` folders named after `<-Cwd>\.claude\worktrees\<name>`, `<enc>--claude-worktrees-*` except at a drive or share root) are carried too, only from a worktree-cwd record (so
-  they keep their worktree cwd), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted
+  they keep their worktree folder, its repo part respelled the way the destination seat spells the workspace), and are never fabricated (no well-titled worktree record on any seat: skipped, and counted
   when some seat has a record of them). A session whose transcript is in
   the repo folder is copied as before, from a record whose cwd is `-Cwd` (a blank-titled one as a last resort, rather than
   fabricating). Copies of worktree records are not caught up to the transcript tip afterwards (pass 1.5 covers cwd = `-Cwd`

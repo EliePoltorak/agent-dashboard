@@ -5,7 +5,7 @@
   (cwd <repo>\.claude\worktrees\<name>, record field spawnedFrom.sessionId = the parent's id) exist only on seat A.
   After a sync: seat B has both, each under a new session id (the app keys some state by session id for the whole
   machine, e.g. worktree leases and side-session notes), and the child's spawnedFrom names the parent id each seat
-  holds; the child keeps its worktree cwd; the side session is carried although it is short (2 assistant turns,
+  holds; the child keeps its worktree folder (its repo part in seat B's spelling, RS); the side session is carried although it is short (2 assistant turns,
   below -MinAssistant); a seat that already holds the parent under another id gets the child but no second parent,
   linked to that id; a second run adds nothing.
   Every copy gets a new id: seat D holds an unreadable file named with the parent's id (left byte-identical), seat E a
@@ -23,7 +23,8 @@
   blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a titled source's own dead link replaced by one that
   resolves (GD), and its own startChain dropped when the grafted link brings none and its root is not held (GC), kept when it is (GC2), dropped when only another seat holds it (GC3), a
   malformed id (M), the
-  not-carried count (Z), and a worktree session carried with no repo project folder at all.
+  not-carried count (Z), a worktree session carried with no repo project folder at all, and a drive-root workspace's
+  worktree session carried, its folder in the destination seat's spelling (QR).
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
   %APPDATA% / %USERPROFILE% redirected, -AssumeAppClosed and an explicit synthetic -Cwd. Sandbox deleted on success,
   kept on failure. Exit 1 on failure.
@@ -93,7 +94,7 @@ check 'seat B gets the parent' ($bp.Count -eq 1)
 check 'seat B gets the worktree side session' ($bc.Count -eq 1)
 check 'the parent gets a new session id on seat B' ($bp.Count -eq 1 -and $bp[0].sessionId -ne $pSid)
 check 'the worktree side session gets a new id on seat B (worktree leases are keyed by session id)' ($bc.Count -eq 1 -and $bc[0].sessionId -ne $cSid)
-check 'the side session keeps its worktree cwd' ($bc.Count -eq 1 -and $bc[0].cwd -eq $wt)
+check 'the side session keeps its worktree folder' ($bc.Count -eq 1 -and $bc[0].cwd -eq $wt)
 check "the worktree copy keeps its worktree folder, in seat B's spelling of the repo, and takes that spelling as originCwd (RS)" ($bc.Count -eq 1 -and $bc[0].cwd -ceq ($repo.ToLowerInvariant() + '\.claude\worktrees\wt1') -and $bc[0].originCwd -ceq $repo.ToLowerInvariant())
 check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($rB | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
 check 'seat C gets the side session' (@($rC | Where-Object { $_.cliSessionId -eq $cCli }).Count -eq 1)
@@ -210,7 +211,7 @@ record $A "local_$([guid]::NewGuid())" $jaCli $wt 'Child on seat A' $jSidA
 record $B "local_$([guid]::NewGuid())" $jbCli $wt 'Child on seat B' $jSidB
 record $C $jbSidC $jbCli $wt 'Child on seat B' $jSidB
 # H: a worktree-only session with two repo-cwd records at different turns and a worktree record: pass 1.5 leaves it alone,
-# and its copy keeps the worktree cwd
+# and its copy keeps the worktree folder
 $hCli = [guid]::NewGuid().ToString(); $h1 = [guid]::NewGuid().ToString(); $h2 = [guid]::NewGuid().ToString()
 Set-Content "$wDir\$hCli.jsonl" (@('{"type":"user","message":{"role":"user","content":"worktree session with repo records"}}') + (1..6 | ForEach-Object { asst ([guid]::NewGuid()) $null }) + @((asst $h1 $null), (asst $h2 $h1)))
 (Get-Item "$wDir\$hCli.jsonl").LastWriteTime = (Get-Date).AddMinutes(-30)
@@ -356,9 +357,10 @@ $qDir = "$projRoot\Q---claude-worktrees-wt1"; New-Item -ItemType Directory $qDir
 $qCli = [guid]::NewGuid().ToString()
 transcript $qDir $qCli 7 'worktree session at a drive root'
 record $A "local_$([guid]::NewGuid())" $qCli $qwt 'Drive-root worktree session' $null
-record $B "local_$([guid]::NewGuid())" ([guid]::NewGuid().ToString()) $repo 'Drive-root repo session on seat B' $null
+record $B "local_$([guid]::NewGuid())" ([guid]::NewGuid().ToString()) 'q:\' 'Drive-root repo session on seat B' $null
 run
-check 'at a drive-root workspace a worktree session is still carried (QR)' (@(recsIn $B | Where-Object { $_.cliSessionId -eq $qCli }).Count -eq 1)
+$cq = @(recsIn $B | Where-Object { $_.cliSessionId -eq $qCli })
+check 'at a drive-root workspace a worktree session is carried, its folder and originCwd in seat B''s spelling (QR)' ($cq.Count -eq 1 -and $cq[0].cwd -ceq 'q:\.claude\worktrees\wt1' -and $cq[0].originCwd -ceq 'q:\')
 
 if ($fail) { "FAILED: $fail (sandbox kept: $sb)"; exit 1 }
 Remove-Item -LiteralPath $sb -Recurse -Force
