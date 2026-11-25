@@ -20,6 +20,7 @@ Steps:
 param([string]$From = 'C', [string]$To = 'D')
 
 $ErrorActionPreference = 'Stop'
+(Get-Process -Id $PID).PriorityClass = 'Idle'      # first: every child below inherits Idle (owner rule 10e)
 $here = $PSScriptRoot
 $rot = Join-Path $here 'claude-app-rotator.ps1'
 $sync = Join-Path $here 'sidebar-sync.py'
@@ -38,27 +39,40 @@ function Record([string]$name, [bool]$ok, [string]$detail = '') {
 function Invoke-Sync([string[]]$a) { (& py -3 -I $sync @a --seats $seats | Out-String).Trim() }
 function Get-Stores([string]$cli) { (Invoke-Sync @('--journey', 'stores', '--target', $To, '--cli', $cli)) | ConvertFrom-Json }
 function Switch-To([string]$seat) {
-  # --relaunch closes the app (never force-kills it), switches, and reopens it. Returns the stamp the switch started at.
-  $t0 = Get-Date
+  # --relaunch closes the app (never force-kills it), switches, and reopens it. A nonzero exit stops the journey. -> the generation of THIS switch,
+  # read from the rotator's own "sidebar gen:" line.
   Say "Switching to seat $seat (the app will close and reopen)..." 'Yellow'
-  & pwsh -NoProfile -File $rot --switch $seat --relaunch
-  Say "rotator exit code: $LASTEXITCODE" 'DarkGray'
-  $t0
+  $out = & pwsh -NoProfile -File $rot --switch $seat --relaunch 2>&1 | ForEach-Object { $_.ToString() }
+  $rc = $LASTEXITCODE
+  $out | ForEach-Object { Write-Host $_ }
+  if ($rc -ne 0) { Record "switch to $seat succeeded" $false "the rotator exited $rc; the journey stops here" ; throw "rotator exit $rc" }
+  $m = $out | ForEach-Object { [regex]::Match($_, 'sidebar gen:\s*(\S+)') } | Where-Object { $_.Success } | Select-Object -First 1
+  if (-not $m) { Record "switch to $seat reported its sidebar generation" $false 'no "sidebar gen:" line in the rotator output'; throw 'no generation' }
+  $m.Groups[1].Value
 }
-function Wait-Verify([string]$seat, [datetime]$since) {
-  # the sync's own check for this switch: a gen dir created after $since whose verify.txt names the seat. Bounded at 5 min.
+function Wait-Verify([string]$seat, [string]$gen) {
+  # THIS switch's own check: <work>\<gen>\verify.txt naming the seat and the gen, with a result of differences=0 (not superseded, not "could not
+  # check"). Bounded at 5 min. -> @{ dir; ok; text }.
+  $d = Join-Path $work $gen; $v = Join-Path $d 'verify.txt'
   $end = (Get-Date).AddMinutes(5)
   while ((Get-Date) -lt $end) {
-    $g = Get-ChildItem -LiteralPath $work -Directory -ErrorAction SilentlyContinue | Where-Object { $_.CreationTime -ge $since.AddSeconds(-2) } | Sort-Object Name -Descending
-    foreach ($d in $g) {
-      $v = Join-Path $d.FullName 'verify.txt'
-      if ((Test-Path $v) -and ((Get-Content $v -Raw) -match "seat $seat")) { return $d.FullName }
+    if (Test-Path $v) {
+      $t = Get-Content $v -Raw
+      $ok = ($t -match "seat $seat\b") -and ($t -match "gen $([regex]::Escape($gen))\b") -and ($t -match 'differences=0\b')
+      return @{ dir = $d; ok = $ok; text = ($t -replace "\s+", ' ') }
     }
     Start-Sleep -Seconds 5
   }
-  return $null
+  return @{ dir = $d; ok = $false; text = 'no verify.txt within 5 min' }
+}
+function Test-Stores($s, [string]$seat, [bool]$wantPinned) {
+  # explicit booleans from ALL THREE stores, on the expected account/seat; an unreadable store ($null) is a failure, never "unpinned"
+  if (-not $s -or $s.seat -ne $seat) { return $false }
+  foreach ($k in 'Local Storage', 'IndexedDB', 'config') { if ($s.$k -isnot [bool] -or $s.$k -ne $wantPinned) { return $false } }
+  $true
 }
 
+try {
 Say "Journey: pins must follow you from seat $From to seat $To and back. Seats come from $seats." 'White'
 Say 'Make sure nothing in the app is mid-task: it will be closed and reopened several times.' 'Yellow'
 if (-not (Ask 'Start?')) { return }
@@ -72,37 +86,41 @@ Say "Step 1. The test session is: ""$($info.pick.title)""   (it must be visible 
 # ---- step 2: pin on From, switch to To
 Say "Step 2a. In the app, on seat $From, PIN the session named above (right-click it in the sidebar > Pin). Then CLOSE NOTHING." 'White'
 if (-not (Ask 'Is it pinned now?')) { return }
-$t = Switch-To $To
-$gdir = Wait-Verify $To $t
-Record 'step 2: the check ran for the switch to the target' ($null -ne $gdir) $(if ($gdir) { $gdir } else { 'no verify.txt within 5 min' })
+$gen = Switch-To $To
+$v = Wait-Verify $To $gen
+Record "step 2: the sync's own check for THIS switch (gen $gen) found no differences" $v.ok $v.text
 $s = Get-Stores $cli
-Record 'step 2: the three pin stores all hold the pin on the target (Local Storage, IndexedDB, config)' ($s.'Local Storage' -and $s.IndexedDB -and $s.config) ($s | ConvertTo-Json -Compress)
+Record 'step 2: all three pin stores hold the pin on the target seat (Local Storage, IndexedDB, config)' (Test-Stores $s $To $true) ($s | ConvertTo-Json -Compress)
 Say "Step 2b. Look at the sidebar on seat ${To}: ""$($info.pick.title)"" should be in the PINNED section." 'White'
 Record 'step 2: you SEE it pinned on the target' (Ask 'Is it pinned on this seat?')
 
 # ---- step 3: unpin on To, switch back
 Say "Step 3a. Now UNPIN it on seat $To." 'White'
 if (-not (Ask 'Is it unpinned now?')) { return }
-$t = Switch-To $From
-$gdir = Wait-Verify $From $t
-Record 'step 3: the check ran for the switch back' ($null -ne $gdir)
+$gen = Switch-To $From
+$v = Wait-Verify $From $gen
+Record "step 3: the sync's own check for THIS switch (gen $gen) found no differences" $v.ok $v.text
 $s = Get-Stores $cli
-Record 'step 3: the three pin stores all show it unpinned' (-not $s.'Local Storage' -and -not $s.IndexedDB -and -not $s.config) ($s | ConvertTo-Json -Compress)
+Record 'step 3: all three pin stores explicitly show it unpinned on the origin seat' (Test-Stores $s $From $false) ($s | ConvertTo-Json -Compress)
 Record 'step 3: you SEE it unpinned (not in the pinned section) on the origin seat' (Ask "Is ""$($info.pick.title)"" unpinned on seat $From now?")
 
 # ---- step 4: a pin with no copy on the target is counted, not added
 if ($info.nocopy) {
   Say "Step 4. ""$($info.nocopy.title)"" is pinned on $From but has no copy on $To. Switching to $To must REPORT it (reach limit), not fail." 'White'
-  $t = Switch-To $To
-  $gdir = Wait-Verify $To $t
-  $rep = if ($gdir) { Get-Content (Join-Path $gdir 'report.txt') -Raw } else { '' }
-  Record 'step 4: the report counts the session the target has no copy of' ($rep -match 'no copy on') ($rep -split "`n" | Where-Object { $_ -match 'no copy' } | Select-Object -First 1)
+  $gen = Switch-To $To
+  $v = Wait-Verify $To $gen
+  $rf = Join-Path $v.dir 'report.txt'
+  $rep = if (Test-Path $rf) { Get-Content $rf -Raw } else { '' }
+  # the report names each counted session as "no copy: <title> (<cli id>)": the SELECTED one must be in it, and the count must be at least 1
+  $counted = ($rep -match "no copy on $To[^\n]*: ([1-9]\d*)") -and ($rep -match [regex]::Escape("($($info.nocopy.cli))"))
+  Record 'step 4: the report counts THE session the target has no copy of (not just any count)' $counted ($rep -split "`n" | Where-Object { $_ -match 'no copy' } | Select-Object -First 3 | Out-String)
   $null = Switch-To $From
 } else { Say 'Step 4: no session is pinned on the origin seat without a copy on the target; skipped.' 'DarkGray'; $results.Add('SKIP  step 4 (nothing to test with)') }
 
 # ---- step 5: restore
 Say "Step 5. Restore the original state: the test session should be UNPINNED on both seats (it was when we started)." 'White'
 Record 'step 5: you restored the original state' (Ask 'Done?')
+} catch { Say "Journey stopped: $_" 'Red'; $allOk = $false }
 Say ''
 Say '==== paste this block into the PR comment ====' 'White'
 $results | ForEach-Object { Write-Host $_ }

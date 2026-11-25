@@ -46,7 +46,15 @@ def tree_hash(d):
     return h.hexdigest()
 
 
+def idle_priority():
+    """Owner rule 10e: this entry point and every child it starts (children inherit) run at IDLE priority."""
+    if os.name == 'nt':
+        import ctypes
+        ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00000040)
+
+
 def main():
+    idle_priority()
     ap = argparse.ArgumentParser()
     ap.add_argument('--dest', default=r'C:\Dev\Temp\sidebar-sync-sandbox')
     ap.add_argument('--target', default='')

@@ -549,12 +549,18 @@ seat's two sidebar databases. The app keeps the pin list in three places and all
 gives every copy a new one), so pins are matched through `cliSessionId`; a pin goes on the unarchived, newest copy the seat has.
 Only the staging copy is ever written; the seat's own stash is never modified, and on any failure the stash's own pair goes in, as before.
 The result is the last line of the switch output, which the dashboard shows: `Sidebar: synced N pins.`, `Sidebar: nothing to sync.` or
-`Sidebar: skipped (<reason>) - see <report>`.
+`Sidebar: partial (<reason>) - see <report>` (the pins were installed but the shared config could not be updated, so this activation's
+baseline is left invalid and its departure is not read as your edits) or `Sidebar: skipped (<reason>) - see <report>`.
 
 **Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent), per seat `sidebar-baseline.json`
 (its pins as installed; valid only after a successful install), `sidebar-installed.json` and `sidebar-departure.json` (written when you leave a
-seat, consumed by the next stage), `.sidebar-sync-work\<gen>\` (the staging copy, `report.txt`, `verify.txt`; newest 10 kept) and
+seat, consumed by the next stage), `.sidebar-sync-bootstrap.json` (the first scan's per-seat progress, so a scan that times out resumes instead of restarting),
+`.sidebar-sync-work\<gen>\` (one generation per switch, named `<stamp>-<pid/random>`, allocated under the seat lock; the staging copy, `report.txt`, `verify.txt`; newest 10 kept) and
 `.sidebar-sync-backups\<gen>\` (the config as it was before the rotator replaced it; newest 10 kept).
+
+**One lock.** `--switch <seat> --relaunch` takes the seat lock before the app is closed and keeps it through the switch and the wait for the
+app to start (the history sync runs inside it too); a switch waiting behind it re-checks that the app is closed and that the target's login is
+the right account before it touches anything.
 
 **The check after launch.** After every switch with a valid baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
 waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences - see <report>` on
