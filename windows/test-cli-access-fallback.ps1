@@ -12,8 +12,9 @@ any rotation if either mock is not the live definition, and the process environm
 $ErrorActionPreference = 'Stop'
 try { (Get-Process -Id $PID).PriorityClass = 'Idle' } catch {}      # first: every child below inherits Idle
 $fail = 0
-function Check([string]$name, [bool]$ok, [string]$detail = '') {
-  if ($ok) { Write-Host "  PASS  $name" -ForegroundColor Green }
+function Check([string]$name, $ok, [string]$detail = '') {
+  # Untyped: a null result is a FAIL, never a binding error that aborts the rest of the run.
+  if ([bool]$ok) { Write-Host "  PASS  $name" -ForegroundColor Green }
   else { $script:fail++; Write-Host "  FAIL  $name  $detail" -ForegroundColor Red }
 }
 
@@ -711,19 +712,24 @@ function Set-NestedRej($TopTs, $TopSrc, $NestTs, $NestData) {
 }
 $rej429 = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day_overage_included'; oi7_stat = 'rejected' }
 $oiOnly = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600) }
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' $nowS $rej429
 $sample = Get-ProxySample 'A' $true
 Check 'a --now check sees a fresh nested Fable-only rejection under a stale default reading' ($sample.fable_only_rejection -and $sample.status -eq 'rejected' -and $sample.claim -eq 'seven_day_overage_included')
 Check 'a nested Fable-only rejection sample carries no session value for the projection' ($null -eq $sample.s5_util)
 Set-NestedRej $nowS $null $nowS $rej429
 Check 'a --now check sees a fresh nested Fable-only rejection under a rotator probe reading' ((Get-ProxySample 'A' $true).fable_only_rejection)
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' $nowS $oiOnly
 Check 'a nested rejection carried only by 7d_oi-status is seen' ((Get-ProxySample 'A' $true).fable_only_rejection)
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' ($nowS + 3600) $rej429
 Check 'a future-dated nested rejection is not a fresh rejection' ($null -eq (Get-ProxySample 'A' $true))
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' ($nowS - 600) $rej429
 Check 'a stale nested rejection does not satisfy a --now check' ($null -eq (Get-ProxySample 'A' $true))
 $renewedRej = $rej429.Clone(); $renewedRej.oi7_reset = [string]($nowS - 60)
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' $nowS $renewedRej
 Check 'a nested rejection whose Fable window already renewed does not trigger' ($null -eq (Get-ProxySample 'A' $true))
 $weeklyCarried = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; status = 'rejected'; claim = 'seven_day'; w7_util = 1.0; oi7_stat = 'allowed'; oi7_util = 0.2 }
@@ -778,11 +784,13 @@ Check 'a carried full reading rejected on a default window is not a Fable-only r
    fable_cap = @{ ts = $nowS; observed_ms = $nowS * 1000; data = $rej429 } } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache.json') -Encoding UTF8
 $sample = Get-ProxySample 'A' $true
 Check 'a fresh weekly cap above a nested Fable rejection is the sample reported' ($sample.w7_stat -eq 'rejected' -and -not $sample.fable_only_rejection)
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' ($nowS - 30) $rej429
 @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.4 } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -Encoding UTF8
 Check 'a newer Fable cache allowance supersedes a nested Fable rejection' ($null -eq (Get-ProxySample 'A' $true))
 Remove-Item -LiteralPath (Join-Path $seatA 'usage-cache-fable.json') -ErrorAction SilentlyContinue
+$nowS = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()   # freshness is measured from here: a slow (Idle) run must not age the readings out
 Set-NestedRej ($nowS - 900) 'proxy' ($nowS - 30) $rej429
 @{ ts = $nowS - 600; observed_ms = ($nowS - 600) * 1000; data = @{ label = 'A'; ok = $true; http = 200; oi7_stat = 'allowed'; oi7_util = 0.85 }
    fable_cap = @{ ts = $nowS; observed_ms = $nowS * 1000; data = @{ label = 'A'; ok = $true; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($nowS + 3600) } } } |
@@ -1177,7 +1185,8 @@ $null = Invoke-CheckRotate 0 $false $true 'test'
 $stAfter = Get-Content $RotateState -Raw | ConvertFrom-Json
 Check 'with no free seat the Fable-only rejection leaves the session projection state alone' ([int]$stAfter.lastWorst -eq 55 -and [int64]$stAfter.lastTs -eq ($tn - 300)) ("lastWorst=$($stAfter.lastWorst) lastTs=$($stAfter.lastTs)")
 # The proxy's --now and the StopFailure hook both check the same Fable 429: with no free seat, the second check
-# must not fire on that observation, or on the ranking's own re-probe of the seat, again.
+# must not fire on that proxy observation again. (The ranking's own re-probe of the seat is a new observation and
+# may fire through the cached-cap check, as on main: every capped seat is retried each tick.)
 Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 foreach ($l in 'B','C','D','E','F') { $script:plan[$l] = 'quota' }
 @{ acct = 'A'; nextHaiku = 0; lastWorst = 0; lastTs = 0; fableBase = 0; fableTs = 0; nextFable = 0; rotations = @() } |
@@ -1189,7 +1198,7 @@ $stOnce = Get-Content $RotateState -Raw | ConvertFrom-Json
 $null = Invoke-CheckRotate 0 $false $true 'test'
 $rlTwice = Join-Path $Root '.rotate-log.txt'
 $logTwice = if (Test-Path -LiteralPath $rlTwice) { Get-Content -LiteralPath $rlTwice -Raw } else { '' }
-Check 'two checks of one proxy Fable rejection with no free seat trigger once' (([regex]::Matches($logTwice, 'FABLE window REJECTED')).Count -eq 1 -and ([regex]::Matches($logTwice, 'FABLE window CAPPED')).Count -eq 0) ("log=$logTwice")
+Check 'two checks of one proxy Fable rejection with no free seat fire on it once' (([regex]::Matches($logTwice, 'FABLE window REJECTED')).Count -eq 1) ("log=$logTwice")
 Check '... and the ladder is armed at its floor' ([int64]$stOnce.fableTs -ge ($tn - 5) -and [int]$stOnce.fableBase -eq 100) ("fableTs=$($stOnce.fableTs) base=$($stOnce.fableBase)")
 # A rejection the proxy observes after that check is a new observation, and still fires.
 Start-Sleep -Seconds 2
@@ -1199,6 +1208,17 @@ $tNew = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
 $null = Invoke-CheckRotate 0 $false $true 'test'
 $logNew = if (Test-Path -LiteralPath $rlTwice) { Get-Content -LiteralPath $rlTwice -Raw } else { '' }
 Check '... and a newer proxy Fable rejection after it still fires' (([regex]::Matches($logNew, 'FABLE window REJECTED')).Count -eq 2) ("log=$logNew")
+# A fableTs later than the clock (the clock was set back) must not silence a fresh proxy rejection.
+Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
+foreach ($l in 'B','C','D','E','F') { $script:plan[$l] = 'quota' }
+$tF = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+@{ acct = 'A'; nextHaiku = 0; lastWorst = 0; lastTs = 0; fableBase = 0; fableTs = $tF + 3600; nextFable = 0; rotations = @() } |
+  ConvertTo-Json | Set-Content -LiteralPath $RotateState -Encoding UTF8
+@{ ts = $tF; observed_ms = $tF * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tF + 3600) } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logF = if (Test-Path -LiteralPath (Join-Path $Root '.rotate-log.txt')) { Get-Content -LiteralPath (Join-Path $Root '.rotate-log.txt') -Raw } else { '' }
+Check 'a fableTs later than the clock does not silence a fresh proxy Fable rejection' ($logF -match 'FABLE window REJECTED') ("log=$logF")
 Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 @{ ts = $tn; observed_ms = $tn * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tn + 3600) } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8

@@ -1129,6 +1129,9 @@ function Invoke-CheckRotateCore {
   # this very tick, because Select-RotationTarget wrote its usage-cache-fable.json on the way in.
   if ($st.acct -ne $act) { $st.acct = $act; $st.nextHaiku = 0; $st.lastWorst = 0; $st.lastTs = 0
                            $st.fableBase = 0; $st.fableTs = 0; $st.nextFable = 0 }
+  # A Fable observation time later than the clock (the clock was set back) cannot be trusted, and kept it would silence
+  # every rejection until the clock caught up. Forget it: at worst one already-counted observation is counted again.
+  if ([int64]$st.fableTs -gt $now) { $st.fableTs = 0 }
   # --now (StopFailure hook, proxy): something just hit a limit, so look immediately.
   if ($ForceNow) { $st.nextHaiku = 0 }
 
@@ -1142,8 +1145,8 @@ function Invoke-CheckRotateCore {
   } elseif ($now -ge [int64]$st.nextHaiku) {
     # A reading the proxy took off real traffic in the last 2 min is as good as a probe, and free.
     $u = Get-ProxySample $act $ForceNow
-    # A proxy Fable rejection already counted (by this trigger or the cached-cap check below) is not a new one: a second
-    # check inside the freshness window (the proxy's --now, then the StopFailure hook's) probes live instead of re-firing.
+    # A proxy Fable rejection at or before the last Fable observation counted (fableTs) is not a new one: a second check
+    # inside the freshness window (the proxy's --now, then the StopFailure hook's) probes live instead of re-firing on it.
     if ($u.fable_only_rejection -and [int64][math]::Floor([int64]$u.observed_ms / 1000) -le [int64]$st.fableTs) { $u = $null }
     if (-not $u) { $u = Get-UsageCached $act $true }          # live, haiku only: ~1s, ~9 tokens
     # A Fable rejection the proxy just saw (Fable-only, or a full Fable 429 whose 5h/7d windows are allowed):
@@ -1333,12 +1336,6 @@ function Invoke-CheckRotateCore {
     Write-RotateLog "NO USABLE TARGET - staying on '$act'. $detail" Red
     Write-RotateLog "  every alternative is capped, fable-capped, the desktop-app seat, or already >= $sessBar% session. Owner action needed." Red
     if ($capped -eq 'access') { Write-SeatHealth $false $act 'exhausted' }
-    if ($capped -eq 'fable' -and -not $DryRun) {
-      # The ranking above probed this seat's Fable window again. Count everything observed up to now, so the next check
-      # (the StopFailure hook right after the proxy's --now, or the next tick) does not re-trigger on that probe; the
-      # ladder, armed at its floor, re-probes the seat on its own schedule.
-      $st.fableTs = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds(); Save-RotateState $st
-    }
     return 3
   }
   if ($win.label -eq $act) {
