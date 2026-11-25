@@ -261,7 +261,8 @@ record $A $gdPSid $gdPCli $repo 'Parent of a dead-linked child' $null
 record $A "local_$([guid]::NewGuid())" $gdCli $repo 'Titled child GD' "local_$([guid]::NewGuid())"
 record $B "local_$([guid]::NewGuid())" $gdCli $repo '' $gdPSid
 # GC: like GD, but B's linked record has no startChain: seat C's copy takes B's spawnedFrom and drops A's own startChain,
-# whose root no seat holds. GC2: the same, but A's own startChain names a grandparent A holds: the copy keeps it
+# whose root no seat holds. GC2: the same, but A's own startChain names a grandparent whose transcript is here, so seat C
+# gets it this run (before the child): the copy keeps it, remapped to seat C's id
 $gcCli = [guid]::NewGuid().ToString(); $gcPCli = [guid]::NewGuid().ToString(); $gcPSid = "local_$([guid]::NewGuid())"
 transcript $pDir $gcPCli 7 'parent of a child whose live link has no chain'; transcript $pDir $gcCli 7 'child with a dead chain'
 record $A $gcPSid $gcPCli $repo 'Parent of a chainless link' $null
