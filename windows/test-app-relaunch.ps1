@@ -181,9 +181,10 @@ if ($env:STUB_CONFIG) {
   $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('{"new":true}'))
   ('{"sha256":"' + $sha + '","pair":"' + $pair + '","b64":"' + $b64 + '"}') | Set-Content (Join-Path $g 'config.json')
 }
-'{"status":"synced","n":1,"reason":""}' | Set-Content (Join-Path $g 'result.json')
+$n = if ($env:STUB_MODE -eq 'staged') { 1 } else { 0 }
+('{"status":"' + $(if ($n) { 'synced' } else { 'nothing' }) + '","n":' + $n + ',"reason":""}') | Set-Content (Join-Path $g 'result.json')
 'report' | Set-Content (Join-Path $g 'report.txt')
-'Sidebar: synced 1 pins.'
+'done'
 '@ | Set-Content $stub
 
   $sleeper = Join-Path $root 'sleeper.ps1'
@@ -218,7 +219,7 @@ if ($env:STUB_CONFIG) {
 `$script:StartWaitSec = 2
 function Invoke-AppHistorySync {}
 function Invoke-AppSeatPublish {}
-function Start-SidebarVerify { param(`$l, `$g) Write-Host "VERIFY `$l `$g" }
+if (-not `$env:REAL_VERIFY) { function Start-SidebarVerify { param(`$l, `$g) Write-Host "VERIFY `$l `$g" } }
 function Find-AppLauncher { @{ file = 'fake-claude.exe'; args = @() } }
 function Start-Process {
   param(`$FilePath, `$ArgumentList, [switch]`$PassThru, `$WindowStyle, `$RedirectStandardOutput, `$RedirectStandardError)
@@ -232,24 +233,24 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
     try { $o = & pwsh -NoProfile -Command ($pre + "`n" + $body) 2>&1 | Out-String; @{ rc = $LASTEXITCODE; out = $o } }
     finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
   }
-  function Rd($p) { if (Test-Path -LiteralPath $p) { (Get-Content -LiteralPath $p -Raw).Trim() } else { '<missing>' } }
+  function Rdf($p) { if (Test-Path -LiteralPath $p) { (Get-Content -LiteralPath $p -Raw).Trim() } else { '<missing>' } }
   $ls = 'Local Storage\leveldb\marker.txt'; $idb = 'IndexedDB\https_claude.ai_0.indexeddb.leveldb\marker.txt'
 
   # 1) staged pair in: the staged databases are the copy-in source; baseline copied only after the install; state published; checkpoint consumed
   $sc = New-Scenario 's1'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   $st = Join-Path $sc '.claude-app-seats'; $app = Join-Path $sc 'AppData\Claude'
-  Check 'staged: the staged pair is the copy-in source for both sidebar dirs' ((Rd "$app\$ls") -eq 'STAGED' -and (Rd "$app\$idb") -eq 'STAGED') "rc=$($r.rc) out=$($r.out)"
-  Check 'staged: the other login dirs come from the stash' ((Rd "$app\Network\marker.txt") -eq 'D-stash' -and (Rd "$app\Session Storage\marker.txt") -eq 'D-stash')
-  Check 'staged: the departure checkpoint of the leaving seat was written after the re-capture (the stage read it; the publish then consumed it)' ((Rd "$st\.sidebar-sync-work\$gen\consumed.txt") -match '^C\s' -and (Rd "$st\C\Local Storage\leveldb\marker.txt") -eq 'live-C') (Rd "$st\.sidebar-sync-work\$gen\consumed.txt")
-  $log = Rd $env:STUB_LOG
+  Check 'staged: the staged pair is the copy-in source for both sidebar dirs' ((Rdf "$app\$ls") -eq 'STAGED' -and (Rdf "$app\$idb") -eq 'STAGED') "rc=$($r.rc) out=$($r.out)"
+  Check 'staged: the other login dirs come from the stash' ((Rdf "$app\Network\marker.txt") -eq 'D-stash' -and (Rdf "$app\Session Storage\marker.txt") -eq 'D-stash')
+  Check 'staged: the departure checkpoint of the leaving seat was written after the re-capture (the stage read it; the publish then consumed it)' ((Rdf "$st\.sidebar-sync-work\$gen\consumed.txt") -match '^C\s' -and (Rdf "$st\C\Local Storage\leveldb\marker.txt") -eq 'live-C') (Rdf "$st\.sidebar-sync-work\$gen\consumed.txt")
+  $log = Rdf $env:STUB_LOG
   Check 'staged: the stage ran for the right seats, with the target baseline INVALID while it ran' ($log -match 'leaving=C target=D' -and $log -match '"valid":false') $log
-  Check 'staged: the target baseline is the staged one, valid, carrying the gen' ((Rd "$st\D\sidebar-baseline.json") -match '"pins":\["staged"\]' -and (Rd "$st\D\sidebar-baseline.json") -match $gen)
-  Check 'staged: sidebar-installed.json records the live creation times' ((Rd "$st\D\sidebar-installed.json") -match '"created":\{"ls":\d+,"idb":\d+\}' -or (Rd "$st\D\sidebar-installed.json") -match '"idb":\d+')
-  Check 'staged: state published, consumed checkpoint deleted (hash matched)' ((Rd "$st\.sidebar-sync-state.json") -match 'cliX' -and -not (Test-Path "$st\C\sidebar-departure.json")) (Get-ChildItem $st -Force | Out-String)
-  Check 'staged: config committed by the rotator, preimage saved' ((Rd "$app\claude_desktop_config.json") -eq '{"new":true}' -and (Rd "$st\.sidebar-sync-backups\$gen\claude_desktop_config.json") -eq '{"old":true}') (Rd "$app\claude_desktop_config.json")
+  Check 'staged: the target baseline is the staged one, valid, carrying the gen' ((Rdf "$st\D\sidebar-baseline.json") -match '"pins":\["staged"\]' -and (Rdf "$st\D\sidebar-baseline.json") -match $gen)
+  Check 'staged: sidebar-installed.json records the live creation times' ((Rdf "$st\D\sidebar-installed.json") -match '"created":\{"ls":\d+,"idb":\d+\}' -or (Rdf "$st\D\sidebar-installed.json") -match '"idb":\d+')
+  Check 'staged: state published, consumed checkpoint deleted (hash matched)' ((Rdf "$st\.sidebar-sync-state.json") -match 'cliX' -and -not (Test-Path "$st\C\sidebar-departure.json")) (Get-ChildItem $st -Force | Out-String)
+  Check 'staged: config committed by the rotator, preimage saved' ((Rdf "$app\claude_desktop_config.json") -eq '{"new":true}' -and (Rdf "$st\.sidebar-sync-backups\$gen\claude_desktop_config.json") -eq '{"old":true}') (Rdf "$app\claude_desktop_config.json")
   Check 'staged: verify was scheduled for the new gen after a valid baseline' ($r.out -match "VERIFY D $gen")
-  Check 'staged: .active moved, the previous login is backed up' ((Rd "$st\.active") -eq 'D' -and (Rd "$st\.swap-backups\$gen\Local Storage\leveldb\marker.txt") -eq 'live-C')
+  Check 'staged: .active moved, the previous login is backed up' ((Rdf "$st\.active") -eq 'D' -and (Rdf "$st\.swap-backups\$gen\Local Storage\leveldb\marker.txt") -eq 'live-C')
   Check 'staged: the last unindented line carries the sidebar result' ((@($r.out -split "`r?`n" | Where-Object { $_ -and $_ -notmatch '^\s' })[-1]) -match '^Now reopen the Claude desktop app\. Sidebar: synced 1 pins\.$') $r.out
 
   # 2) the checkpoint is written after a good re-capture only (a live database dir missing -> none)
@@ -271,18 +272,18 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $sc = New-Scenario 's3'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   $st = Join-Path $sc '.claude-app-seats'; $app = Join-Path $sc 'AppData\Claude'
-  Check 'stash pair: the seat''s own databases go in, its stash baseline is recorded, a stash-pair config repair is committed' ((Rd "$app\$ls") -eq 'D-stash' -and (Rd "$st\D\sidebar-baseline.json") -match '"pins":\["stash"\]' -and (Rd "$app\claude_desktop_config.json") -eq '{"new":true}') $r.out
+  Check 'stash pair: the seat''s own databases go in, its stash baseline is recorded, a stash-pair config repair is committed' ((Rdf "$app\$ls") -eq 'D-stash' -and (Rdf "$st\D\sidebar-baseline.json") -match '"pins":\["stash"\]' -and (Rdf "$app\claude_desktop_config.json") -eq '{"new":true}') $r.out
   $sc = New-Scenario 's3b'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = 'badhash' }
-  Check 'config refused when the live file is not the one that was read: left alone, reported' ((Rd "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"old":true}' -and (Rd "$sc\.claude-app-seats\.sidebar-sync-work\$gen\report.txt") -match 'config not changed: it differs') (Rd "$sc\.claude-app-seats\.sidebar-sync-work\$gen\report.txt")
+  Check 'config refused when the live file is not the one that was read: left alone, reported' ((Rdf "$sc\AppData\Claude\claude_desktop_config.json") -eq '{"old":true}' -and (Rdf "$sc\.claude-app-seats\.sidebar-sync-work\$gen\report.txt") -match 'config not changed: it differs') (Rdf "$sc\.claude-app-seats\.sidebar-sync-work\$gen\report.txt")
 
   # 4) one staged copy failing: the stash PAIR and its baseline go in, a `pair: staged` config is NOT committed (S74); both failing: stop, no relaunch
   $sc = New-Scenario 's4'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $body = '$orig = ${function:Copy-Dir}; function Copy-Dir($s, $d) { & $orig $s $d; if ($s -like ''*sidebar-sync-work*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-Switch 'D'"
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   $st = Join-Path $sc '.claude-app-seats'; $app = Join-Path $sc 'AppData\Claude'
-  Check 'staged IndexedDB copy fails: BOTH sidebar dirs come from the stash, stash baseline recorded' ((Rd "$app\$ls") -eq 'D-stash' -and (Rd "$app\$idb") -eq 'D-stash' -and (Rd "$st\D\sidebar-baseline.json") -match '"pins":\["stash"\]') $r.out
-  Check 'staged copy failed: the staged-pair config is not committed (S74), the note says skipped' ((Rd "$app\claude_desktop_config.json") -eq '{"old":true}' -and $r.out -match 'Sidebar: skipped \(the staged copy could not be installed') $r.out
+  Check 'staged IndexedDB copy fails: BOTH sidebar dirs come from the stash, stash baseline recorded' ((Rdf "$app\$ls") -eq 'D-stash' -and (Rdf "$app\$idb") -eq 'D-stash' -and (Rdf "$st\D\sidebar-baseline.json") -match '"pins":\["stash"\]') $r.out
+  Check 'staged copy failed: the staged-pair config is not committed (S74), the note says skipped' ((Rdf "$app\claude_desktop_config.json") -eq '{"old":true}' -and $r.out -match 'Sidebar: skipped \(the staged copy could not be installed') $r.out
   $sc = New-Scenario 's4b'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $body = '$orig = ${function:Copy-Dir}; function Copy-Dir($s, $d) { & $orig $s $d; if ($d -like ''*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-SwitchRelaunch 'D'"
   $r = Invoke-Scenario $sc ("function Get-AppProcs { if (`$script:launched -or `$script:n++ -lt 1) { [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]::Zero } } }`n" + $body) @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG }
@@ -291,14 +292,15 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   # 5) stage over its time: that PID is stopped, nothing published, the checkpoint stays; the next switch consumes it (S73)
   $sc = New-Scenario 's5'; $env:STUB_LOG = Join-Path $sc 'stub.log'; $pidf = Join-Path $sc 'stub.pid'
   $t0 = Get-Date
-  $r = Invoke-Scenario $sc "`$script:StageTimeoutSec = 3; Invoke-Switch 'D'" @{ STUB_MODE = 'sleep'; STUB_LOG = $env:STUB_LOG; STUB_PIDFILE = $pidf }
+  $r = Invoke-Scenario $sc "`$script:StageTimeoutSec = 25; Invoke-Switch 'D'" @{ STUB_MODE = 'sleep'; STUB_LOG = $env:STUB_LOG; STUB_PIDFILE = $pidf }
   $st = Join-Path $sc '.claude-app-seats'
-  $spid = [int](Rd $pidf)
+  $spid = if (Test-Path $pidf) { [int](Rdf $pidf) } else { 0 }
+  Check 'timed-out stage: the stub started (its PID is on record)' ($spid -gt 0)
   Start-Sleep -Milliseconds 500
   Check 'timed-out stage: that PID was stopped' (-not (Get-Process -Id $spid -ErrorAction SilentlyContinue)) "pid=$spid"
   if (Get-Process -Id $spid -ErrorAction SilentlyContinue) { Stop-Process -Id $spid }       # only the PID the stub wrote, and only if the check above failed
-  Check 'timed-out stage: nothing published, the checkpoint is intact, the stash pair is installed with an INVALID baseline' (-not (Test-Path "$st\.sidebar-sync-state.json") -and (Test-Path "$st\C\sidebar-departure.json") -and (Rd "$sc\AppData\Claude\$ls") -eq 'D-stash' -and (Rd "$st\D\sidebar-baseline.json") -match '"valid":false') (Get-ChildItem $st -Force | Out-String)
-  Check 'timed-out stage: the note says skipped with the reason and a report path' ($r.out -match 'Sidebar: skipped \(the stage did not finish in 3 s\) - see .*report\.txt') $r.out
+  Check 'timed-out stage: nothing published, the checkpoint is intact, the stash pair is installed with an INVALID baseline' (-not (Test-Path "$st\.sidebar-sync-state.json") -and (Test-Path "$st\C\sidebar-departure.json") -and (Rdf "$sc\AppData\Claude\$ls") -eq 'D-stash' -and (Rdf "$st\D\sidebar-baseline.json") -match '"valid":false') (Get-ChildItem $st -Force | Out-String)
+  Check 'timed-out stage: the note says skipped with the reason and a report path' ($r.out -match 'Sidebar: skipped \(the stage did not finish in 25 s\) - see .*report\.txt') $r.out
   Check 'timed-out stage: no verify (the baseline is invalid)' ($r.out -notmatch 'VERIFY')
   $r = Invoke-Scenario $sc "Invoke-Switch 'C'" @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
   Check 'the next switch consumes the surviving checkpoints and publishes (S73)' ((Test-Path "$st\.sidebar-sync-state.json") -and -not (Test-Path "$st\C\sidebar-departure.json") -and (Test-Path "$st\D\sidebar-departure.json") -eq $false) (Get-ChildItem $st -Recurse -Filter 'sidebar-*' -Force | Out-String)
@@ -306,7 +308,7 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   # 6) a stage that fails (exit 1): the switch goes on with the stash pair, nothing published
   $sc = New-Scenario 's6'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'exit1'; STUB_LOG = $env:STUB_LOG }
-  Check 'stage exit 1: switch completes on the stash pair, nothing published, note says the stage failed' ((Rd "$sc\AppData\Claude\$ls") -eq 'D-stash' -and -not (Test-Path "$sc\.claude-app-seats\.sidebar-sync-state.json") -and $r.out -match 'Sidebar: skipped \(the stage failed \(exit 1\)\)') $r.out
+  Check 'stage exit 1: switch completes on the stash pair, nothing published, note says the stage failed' ((Rdf "$sc\AppData\Claude\$ls") -eq 'D-stash' -and -not (Test-Path "$sc\.claude-app-seats\.sidebar-sync-state.json") -and $r.out -match 'Sidebar: skipped \(the stage failed \(exit 1\)\)') $r.out
 
   # 7) move-aside failure: what was moved goes back, nothing cleared, the old login is intact and the relaunch reopens it only once verified (S75)
   $sc = New-Scenario 's7'; $env:STUB_LOG = Join-Path $sc 'stub.log'
@@ -314,13 +316,13 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $body = "`$fs = [IO.File]::Open('$lockf', 'Open', 'Read', 'None')`n" + "function Get-AppProcs { if (`$script:launched -or `$script:n++ -lt 1) { [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]::Zero } } }`ntry { Invoke-SwitchRelaunch 'D' } finally { `$fs.Dispose() }"
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
   $app = "$sc\AppData\Claude"; $st = "$sc\.claude-app-seats"
-  Check 'move-aside fails on the second dir: the first is moved back, live login intact, nothing cleared' ($r.rc -eq 1 -and $r.out -match 'REFUSED: could not move the current login' -and (Rd "$app\$ls") -eq 'live-C' -and (Rd "$app\Session Storage\marker.txt") -eq 'live-C' -and (Rd "$st\.active") -eq 'C') "rc=$($r.rc) $($r.out)"
+  Check 'move-aside fails on the second dir: the first is moved back, live login intact, nothing cleared' ($r.rc -eq 1 -and $r.out -match 'REFUSED: could not move the current login' -and (Rdf "$app\$ls") -eq 'live-C' -and (Rdf "$app\Session Storage\marker.txt") -eq 'live-C' -and (Rdf "$st\.active") -eq 'C') "rc=$($r.rc) $($r.out)"
   Check 'move-aside refusal: the app is reopened on the old login only because it was verified intact' ($r.out -match 'LAUNCHED' -and $r.out -match 'Switch failed; relaunched the Claude app on its old login') $r.out
 
   # 8) same-seat switch stages nothing and swaps nothing (it used to reload the older stash over the live profile)
   $sc = New-Scenario 's8'; $env:STUB_LOG = Join-Path $sc 'stub.log'
   $r = Invoke-Scenario $sc "Invoke-Switch 'C'" @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG }
-  Check 'same-seat switch: live profile untouched, nothing staged, .active written, says so' ((Rd "$sc\AppData\Claude\$ls") -eq 'live-C' -and -not (Test-Path $env:STUB_LOG) -and (Rd "$sc\.claude-app-seats\.active") -eq 'C' -and $r.out -match 'nothing to swap' -and $r.out -match 'Sidebar: nothing to sync\.') $r.out
+  Check 'same-seat switch: live profile untouched, nothing staged, .active written, says so' ((Rdf "$sc\AppData\Claude\$ls") -eq 'live-C' -and -not (Test-Path $env:STUB_LOG) -and (Rdf "$sc\.claude-app-seats\.active") -eq 'C' -and $r.out -match 'nothing to swap' -and $r.out -match 'Sidebar: nothing to sync\.') $r.out
 
   # 9) the relaunch checks the live identity in both branches, its wait is bounded, the lock is released, exit 3 is kept (S68, S69, S75, S76)
   $sc = New-Scenario 's9'; $env:STUB_LOG = Join-Path $sc 'stub.log'
@@ -350,17 +352,17 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   # 10) the verify spawn: both streams redirected to files, started detached through cmd.exe, and it does NOT keep the caller's stdout pipe open
   $sc = New-Scenario 's10'; $pidf = Join-Path $sc 'sleeper.pid'; New-Item -ItemType Directory -Path "$sc\.claude-app-seats\.sidebar-sync-work\$gen" -Force | Out-Null
   $body = "function Start-Process { param(`$FilePath, `$ArgumentList, `$WindowStyle) Write-Host `"SPAWN `$FilePath :: `$ArgumentList :: `$WindowStyle`" }`nfunction Get-SidebarSyncCommand { @{ file = 'C:\py\python.exe'; args = @('-I', 'C:\r\sidebar-sync.py') } }`nStart-SidebarVerify 'D' '$gen'"
-  $pre = (Invoke-Scenario $sc $body @{}).out
+  $pre = (Invoke-Scenario $sc $body @{ REAL_VERIFY = '1' }).out
   $r = Invoke-Scenario $sc ($body -replace 'function Start-Process.*?\n', '') @{}
   Check 'verify spawn: cmd.exe, hidden, --verify with gen and target, stdout AND stderr redirected to files in the gen dir' ($pre -match 'SPAWN cmd.exe' -and $pre -match 'Hidden' -and $pre -match '--verify" "--gen" "20261125-120000" "--target" "D"' -and $pre -match '> "[^"]*verify\.out"' -and $pre -match '2> "[^"]*verify\.err"') $pre
   $t0 = Get-Date
   $body2 = "function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-File', '$sleeper') } }`nStart-SidebarVerify 'D' '$gen'"
-  $r = Invoke-Scenario $sc $body2 @{ SLEEPER_PIDFILE = $pidf }
+  $r = Invoke-Scenario $sc $body2 @{ SLEEPER_PIDFILE = $pidf; REAL_VERIFY = '1' }
   $alive = $false
   for ($i = 0; $i -lt 60 -and -not (Test-Path $pidf); $i++) { Start-Sleep -Milliseconds 500 }
-  if (Test-Path $pidf) { $spid = [int](Rd $pidf); $alive = [bool](Get-Process -Id $spid -ErrorAction SilentlyContinue); if ($alive) { Stop-Process -Id $spid } }
+  if (Test-Path $pidf) { $spid = [int](Rdf $pidf); $alive = [bool](Get-Process -Id $spid -ErrorAction SilentlyContinue); if ($alive) { Stop-Process -Id $spid } }
   Check 'verify spawn: the caller''s output pipe closed while the spawned child was still running (it holds no inherited pipe)' ($alive -and $r.out -notmatch 'not started') "alive=$alive out=$($r.out)"
-} finally {
+} catch { $fail++; Write-Host "  FAIL  the test itself stopped: $_" -ForegroundColor Red } finally {
   foreach ($k in $keep.Keys) { Set-Item "env:$k" $keep[$k] }
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
 }
