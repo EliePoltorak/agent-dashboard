@@ -5669,6 +5669,23 @@ def selftest():
         assert run_switch(a_, gone) == ({"outcome": "error", "text": "The rotator could not run: FileNotFoundError."}, None)
         p_ = P_(0, b"", slow=True)
         assert run_switch(a_, pop(p_)) == ({"outcome": "running", "text": SWITCH_RUNNING}, p_) and p_.calls == [("communicate", 120)]       # no kill, no terminate
+        # a rotator that leaves a detached child holding NO pipes (the sidebar sync's --verify, which waits for the app for up to 30 min) must not hold
+        # run_switch: it returns with the rotator, while that child is still running (a child holding the stdout pipe would make communicate wait for it)
+        done_ = os.path.join(ld, "detached-done.txt")
+        kid_ = "import time; time.sleep(25); open(%r, 'w').close()" % done_
+        rot_ = ("import subprocess, sys; subprocess.Popen([sys.executable, '-c', %r], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+                "close_fds=True); print('Relaunched the Claude app on seat B. Sidebar: nothing to sync.')" % kid_)
+        r_, p_ = run_switch([sys.executable, "-c", rot_])
+        assert r_ == {"outcome": "ok", "text": "Done: Relaunched the Claude app on seat B. Sidebar: nothing to sync."} and p_ is None and not os.path.exists(done_), (r_, p_)
+        for _ in range(100):                                   # the child did keep running: it finishes on its own (nothing is killed)
+            if os.path.exists(done_):
+                break
+            time.sleep(0.5)
+        assert os.path.exists(done_), "the detached child never finished"
+        # the sidebar sync's result rides on the last unindented line, which the dashboard shows (200 characters)
+        sb_ = "Relaunched the Claude app on seat D. Sidebar: skipped (the stage did not finish in 60 s) - see C:\\Users\\User\\.claude-app-seats\\.sidebar-sync-work\\20261125-101010\\report.txt"
+        assert switch_outcome(0, "Switched.\r\n" + sb_ + "\r\n")["text"] == "Done: " + sb_ and len("Done: " + sb_) < 200
+        assert switch_outcome(0, sb_ + "\r\n  indented detail\r\n")["text"] == "Done: " + sb_
         # Store.switch: runs the argv for the action, logs without tokens, rebuilds (which re-reads in_use)
         globals()["APPLOG"] = os.path.join(ld, "log.txt")
         fs = Store.__new__(Store)
