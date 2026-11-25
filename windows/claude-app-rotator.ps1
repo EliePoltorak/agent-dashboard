@@ -175,11 +175,179 @@ function Start-ClaudeApp {
     return $true
   } catch { Write-Host "Could not reopen the Claude app: $($_.Exception.Message)" -ForegroundColor DarkYellow; return $false }
 }
+# ---- sidebar PINS follow you across seats (agent-dashboard issue #10; engine: sidebar-sync.py, design: README "Sidebar pins follow you across seats") ----
+# The rotator holds the seat lock with the app closed and owns every durable step. Python only READS the seats and builds a staging copy of the
+# two sidebar databases (Local Storage, IndexedDB) under .sidebar-sync-work\<gen>\; this script installs it, and commits the shared config.
+$SidebarDirs    = @('Local Storage', 'IndexedDB')
+$SidebarWork    = Join-Path $SeatRoot '.sidebar-sync-work'
+$SidebarBackups = Join-Path $SeatRoot '.sidebar-sync-backups'
+$SidebarKeep    = 10
+$script:StageTimeoutSec = 60
+$script:StartWaitSec    = 30
+$script:SeatLockHeld    = $null
+$script:ProfileIntact   = $true      # after a refusal: is the old login verified back in place? (the relaunch reopens the app only if so)
+$script:SidebarNote     = ''         # 'Sidebar: ...' appended to the last line, which the dashboard shows
+$script:RobocopyRc      = 0
+
+function Release-SeatLock { if ($script:SeatLockHeld) { try { $script:SeatLockHeld.Dispose() } catch {}; $script:SeatLockHeld = $null } }
+function Try-EnterSeatLock {
+  # Enter-SeatLock without the exit: the relaunch decides under the lock but must never abort a finished switch.
+  $null = New-Item -ItemType Directory -Path $SeatRoot -Force -ErrorAction SilentlyContinue
+  $p = Join-Path $SeatRoot '.seat-write.lock'
+  for ($i = 0; $i -lt 90; $i++) {
+    try { return [IO.FileStream]::new($p, 'CreateNew', 'Write', 'None', 1, [IO.FileOptions]::DeleteOnClose) } catch { Start-Sleep 1 }
+  }
+  return $null
+}
+function Write-JsonAtomic([string]$path, $obj) {
+  # temp sibling, then replace: a failure leaves the old file in place
+  $tmp = "$path.tmp"
+  [IO.File]::WriteAllText($tmp, ($obj | ConvertTo-Json -Depth 8 -Compress), [Text.UTF8Encoding]::new($false))
+  [IO.File]::Move($tmp, $path, $true)
+}
+function Read-JsonFile([string]$path) {
+  try { Get-Content -LiteralPath $path -Raw -ErrorAction Stop | ConvertFrom-Json -AsHashtable } catch { $null }
+}
+function Get-LiveCreation {
+  # CreationTime (Windows file time) of each live sidebar leveldb dir: copy-in creates fresh dirs, so this changes at every activation and also
+  # catches a database the app recreated (sidebar-sync.py reads the same numbers).
+  $o = @{}
+  foreach ($k in @(@('ls', "$AppDir\Local Storage\leveldb"), @('idb', "$AppDir\IndexedDB\https_claude.ai_0.indexeddb.leveldb"))) {
+    $o[$k[0]] = if (Test-Path -LiteralPath $k[1]) { (Get-Item -LiteralPath $k[1]).CreationTimeUtc.ToFileTimeUtc() } else { $null }
+  }
+  $o
+}
+function Write-DepartureCheckpoint([string]$seat, $created) {
+  # <seat>\sidebar-departure.json = {baseline, installed, created}, written after a good re-capture. An unconsumed one keeps its OLD baseline:
+  # the seat has run on its stash pair since, so that baseline is still the right comparison and both sets of edits are read together.
+  $d = Join-Path $SeatRoot $seat; $cp = Join-Path $d 'sidebar-departure.json'
+  $baseline = $null
+  if (Test-Path -LiteralPath $cp) {
+    $old = Read-JsonFile $cp
+    $baseline = if ($old -and $old.ContainsKey('baseline')) { $old['baseline'] } else { @{ valid = $false } }
+  } else {
+    $baseline = Read-JsonFile (Join-Path $d 'sidebar-baseline.json')
+    if ($null -eq $baseline) { $baseline = @{ valid = $false } }
+  }
+  Write-JsonAtomic $cp @{ baseline = $baseline; installed = (Read-JsonFile (Join-Path $d 'sidebar-installed.json')); created = $created }
+}
+function Get-SidebarSyncCommand {
+  # @{ file; args } for sidebar-sync.py (the real python.exe, not the py launcher, so stopping the PID stops the work), or $null.
+  $script = Join-Path $PSScriptRoot 'sidebar-sync.py'
+  if (-not (Test-Path -LiteralPath $script)) { return $null }
+  $py = $null
+  try { $py = @(& py -3 -c 'import sys; print(sys.executable)' 2>$null)[0] } catch {}
+  if (-not $py -or -not (Test-Path -LiteralPath $py)) { return $null }
+  @{ file = $py; args = @('-I', $script) }
+}
+function Join-Args([string[]]$a) { ($a | ForEach-Object { '"' + ($_ -replace '"', '\"') + '"' }) -join ' ' }
+function Invoke-SidebarStage([string]$prev, [string]$label, [string]$gen) {
+  # --stage in a child, 60 s in all, else that PID is stopped. -> @{ ran; reason; gdir }. ran = exit 0 in time (its files are then trustworthy).
+  $gdir = Join-Path $SidebarWork $gen
+  New-Item -ItemType Directory -Path $gdir -Force | Out-Null
+  $cmd = Get-SidebarSyncCommand
+  if (-not $cmd) { return @{ ran = $false; reason = 'python or sidebar-sync.py was not found'; gdir = $gdir } }
+  $argv = @($cmd.args) + @('--stage', '--leaving', $prev, '--target', $label, '--gen', $gen, '--seats', $SeatRoot, '--app', $AppDir)
+  try {
+    $p = Start-Process -FilePath $cmd.file -ArgumentList (Join-Args $argv) -PassThru -WindowStyle Hidden -RedirectStandardOutput (Join-Path $gdir 'stage.out') -RedirectStandardError (Join-Path $gdir 'stage.err')
+    if (-not $p.WaitForExit($script:StageTimeoutSec * 1000)) {
+      try { Stop-Process -Id $p.Id -Force } catch {}
+      return @{ ran = $false; reason = "the stage did not finish in $($script:StageTimeoutSec) s"; gdir = $gdir }
+    }
+    if ($p.ExitCode -ne 0) { return @{ ran = $false; reason = "the stage failed (exit $($p.ExitCode))"; gdir = $gdir } }
+  } catch { return @{ ran = $false; reason = "the stage could not run: $($_.Exception.Message)"; gdir = $gdir } }
+  @{ ran = $true; reason = ''; gdir = $gdir }
+}
+function Publish-SidebarState([string]$gdir) {
+  # Only after a stage that exited 0 in time, under the seat lock: the proposed global state replaces the published one (atomic), and each
+  # checkpoint the stage read is deleted if it is still the one it hashed. A stage that never finished publishes and consumes nothing.
+  $st = Join-Path $gdir 'state.json'
+  if (Test-Path -LiteralPath $st) {
+    $live = Join-Path $SeatRoot '.sidebar-sync-state.json'
+    Copy-Item -LiteralPath $st -Destination "$live.tmp" -Force
+    [IO.File]::Move("$live.tmp", $live, $true)
+  }
+  $cf = Join-Path $gdir 'consumed.txt'
+  if (Test-Path -LiteralPath $cf) {
+    foreach ($line in @(Get-Content -LiteralPath $cf)) {
+      $s, $h = $line -split "`t"
+      if (-not $s -or $s -notmatch '^[^\\/.][^\\/]*$') { continue }
+      $cp = Join-Path (Join-Path $SeatRoot $s) 'sidebar-departure.json'
+      if ((Test-Path -LiteralPath $cp) -and ((Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash -ieq $h)) { Remove-Item -LiteralPath $cp -Force }
+    }
+  }
+}
+function Commit-SidebarConfig([string]$gdir, [string]$pair, [string]$gen) {
+  # The shared claude_desktop_config.json carries a third copy of the pin list. Only when <gen>\config.json matches the pair actually installed,
+  # the app is still closed and the live file is the very one Python read (SHA-256): save it, then replace it (temp sibling, then Move with
+  # overwrite, so a failure leaves the live file in place). -> $null, or why it was not committed (retried at the next activation).
+  $cf = Join-Path $gdir 'config.json'
+  if (-not (Test-Path -LiteralPath $cf)) { return $null }
+  try {
+    $c = Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json
+    if ($c.pair -ne $pair) { return "config not changed: it was prepared for the $($c.pair) pair, the $pair pair is installed" }
+    if (@(Get-AppProcs).Count -gt 0) { return 'config not changed: the app is running' }
+    $live = Join-Path $AppDir 'claude_desktop_config.json'
+    if ((Get-FileHash -LiteralPath $live -Algorithm SHA256).Hash -ine $c.sha256) { return 'config not changed: it differs from the one that was read' }
+    $bkd = Join-Path $SidebarBackups $gen
+    New-Item -ItemType Directory -Path $bkd -Force | Out-Null
+    Copy-Item -LiteralPath $live -Destination (Join-Path $bkd 'claude_desktop_config.json') -Force
+    $tmp = "$live.sidebar-sync.tmp"
+    [IO.File]::WriteAllBytes($tmp, [Convert]::FromBase64String($c.b64))
+    [IO.File]::Move($tmp, $live, $true)
+    return $null
+  } catch { return "config not changed: $($_.Exception.Message)" }
+}
+function Start-SidebarVerify([string]$label, [string]$gen) {
+  # --verify detached: it outlives this script (up to 30 min of waiting for the app). It goes through cmd.exe via ShellExecute (no handle
+  # inheritance) with both streams redirected to files: a child started with Start-Process -Redirect* still inherits the dashboard's stdout pipe,
+  # and the dashboard's wait for this script's output then lasts as long as the child does (measured 2026-11-25).
+  try {
+    $cmd = Get-SidebarSyncCommand
+    if (-not $cmd) { return }
+    $gdir = Join-Path $SidebarWork $gen
+    $argv = @($cmd.args) + @('--verify', '--gen', $gen, '--target', $label, '--seats', $SeatRoot, '--app', $AppDir)
+    $line = '/d /c "{0} {1} > "{2}" 2> "{3}""' -f (Join-Args @($cmd.file)), (Join-Args $argv), (Join-Path $gdir 'verify.out'), (Join-Path $gdir 'verify.err')
+    Start-Process -FilePath cmd.exe -ArgumentList $line -WindowStyle Hidden | Out-Null
+  } catch { Write-Host "  (sidebar verify not started: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+}
+function Get-LastVerifyNote([string]$exceptGen) {
+  # the newest earlier check: ' last check: N differences - see <report>' when it found any
+  foreach ($g in @(Get-ChildItem -LiteralPath $SidebarWork -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{8}-\d{6}$' -and $_.Name -ne $exceptGen } | Sort-Object Name -Descending)) {
+    $v = Join-Path $g.FullName 'verify.txt'
+    if (Test-Path -LiteralPath $v) {
+      $m = [regex]::Match((Get-Content -LiteralPath $v -Raw), 'differences=(\d+)')
+      if ($m.Success) { if ([int]$m.Groups[1].Value -gt 0) { return " last check: $($m.Groups[1].Value) differences - see $(Join-Path $g.FullName 'report.txt')" } else { return '' } }
+    }
+  }
+  return ''
+}
+function Remove-OldGens([string]$dir) {
+  foreach ($old in @(Get-ChildItem -LiteralPath $dir -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match '^\d{8}-\d{6}$' } | Sort-Object Name -Descending | Select-Object -Skip $SidebarKeep)) {
+    try { Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction Stop } catch { Write-Host "Could not prune $($old.FullName): $($_.Exception.Message)" -ForegroundColor DarkYellow }
+  }
+}
+function Set-SidebarNote([string]$text, [string]$gdir, [string]$reportLine) {
+  # one line the dashboard shows; a reason that has no Python report gets a one-line report of its own
+  if ($reportLine) {
+    try {
+      New-Item -ItemType Directory -Path $gdir -Force | Out-Null
+      $r = Join-Path $gdir 'report.txt'
+      if (-not (Test-Path -LiteralPath $r)) { Set-Content -LiteralPath $r -Value $reportLine -Encoding UTF8 }
+    } catch {}
+  }
+  $script:SidebarNote = $text
+}
+
 function Invoke-SwitchRelaunch([string]$label) {
   # --switch <label> --relaunch. Closing first, then the ordinary switch with every one of its gates; the app is reopened
   # afterwards, on the new login, or on the old one when the switch refused (Invoke-Switch exits, so this runs in finally).
-  # Exit 3: switched, but the app could not be reopened.
+  # The live account is recorded before closing and checked again, under the seat lock, before anything is reopened (S68, S75, S76):
+  # a switched seat reopens only on the target's own login (a legacy capture without owner-uuid.txt, or an empty seat chosen to reach the
+  # sign-in prompt, keeps today's behaviour); a refused one only when the old profile is verified back in place and still the live login.
+  # The wait for the app is bounded; the lock is released in finally. Exit 3: switched, but the app did not come up.
   $wasRunning = @(Get-AppProcs).Count -gt 0
+  $recorded = Get-AppAccountUuid
   if (-not (Close-AppGracefully)) {
     Write-Host "ABORTED: the Claude app was still running $($script:CloseWaitSec) s after it was asked to close (if it lives in the system tray, quit it from the tray icon and run this again). Nothing was switched; it was not force-closed (that can tear the login storage)." -ForegroundColor Red
     exit 1
@@ -187,20 +355,60 @@ function Invoke-SwitchRelaunch([string]$label) {
   $script:SwitchDone = $false
   try { Invoke-Switch $label }
   finally {
-    if ($script:SwitchDone) {
-      if (Start-ClaudeApp) { Write-Host "Relaunched the Claude app on seat $(Resolve-Label $label)." -ForegroundColor Green }
-      else {      # the switch stands; only the reopening failed. Exit 3 so a caller (the dashboard) does not report a plain success
-        Write-Host "Switched to seat $(Resolve-Label $label), but the Claude app could not be reopened; open it from the Start menu." -ForegroundColor Red
-        exit 3
+    $lk = if ($script:SwitchDone -or $wasRunning) { Try-EnterSeatLock } else { $null }
+    try {
+      $note = if ($script:SidebarNote) { " $($script:SidebarNote)" } else { '' }
+      if ($script:SwitchDone) {
+        $owner = Get-SeatOwnerUuid (Resolve-Label $label)
+        $ok = $lk -and ((-not $owner) -or ((Get-AppAccountUuid) -eq $owner))
+        $up = $false
+        if ($ok -and (Start-ClaudeApp)) {
+          $deadline = (Get-Date).AddSeconds($script:StartWaitSec)
+          while (-not $up -and (Get-Date) -lt $deadline) { if (@(Get-AppProcs).Count -gt 0) { $up = $true } else { Start-Sleep -Milliseconds 500 } }
+        }
+        if ($up) { Write-Host "Relaunched the Claude app on seat $(Resolve-Label $label).$note" -ForegroundColor Green }
+        else {      # the switch stands; only the reopening failed. Exit 3 so a caller (the dashboard) does not report a plain success
+          Write-Host "Switched to seat $(Resolve-Label $label), but the Claude app could not be reopened; open it from the Start menu.$note" -ForegroundColor Red
+          exit 3
+        }
+      } elseif ($wasRunning) {
+        $ok = $lk -and $script:ProfileIntact -and ((Get-AppAccountUuid) -eq $recorded)
+        if ($ok -and (Start-ClaudeApp)) {
+          $deadline = (Get-Date).AddSeconds($script:StartWaitSec)
+          while ((Get-Date) -lt $deadline -and @(Get-AppProcs).Count -eq 0) { Start-Sleep -Milliseconds 500 }
+          Write-Host "Switch failed; relaunched the Claude app on its old login." -ForegroundColor Red
+        }
+        elseif (-not $ok) { Write-Host "Switch failed (the reason is above); the Claude app was NOT reopened because the old login could not be confirmed in place; open it from the Start menu once you have checked." -ForegroundColor Red }
+        else { Write-Host "Switch failed (the reason is above), and the Claude app could not be reopened; open it from the Start menu." -ForegroundColor Red }    # last line: a caller shows it, so it must say the switch failed
       }
-    } elseif ($wasRunning) {
-      if (Start-ClaudeApp) { Write-Host "Switch failed; relaunched the Claude app on its old login." -ForegroundColor Red }
-      else { Write-Host "Switch failed (the reason is above), and the Claude app could not be reopened; open it from the Start menu." -ForegroundColor Red }    # last line: a caller shows it, so it must say the switch failed
-    }
+    } finally { if ($lk) { $lk.Dispose() } }
   }
 }
-function Copy-Dir($src,$dst){ robocopy $src $dst /E /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null }
-function Mirror-Dir($src,$dst){ robocopy $src $dst /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null }
+function Copy-Dir($src,$dst){ robocopy $src $dst /E /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null; $script:RobocopyRc = $LASTEXITCODE }
+function Mirror-Dir($src,$dst){ robocopy $src $dst /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null; $script:RobocopyRc = $LASTEXITCODE }
+function Copy-SidebarPair([string]$from) {
+  # copy the two sidebar dirs from $from (a seat stash or a staging gen) into the live app dir; $false when either robocopy failed (>= 8)
+  $ok = $true
+  foreach ($d in $SidebarDirs) { if (Test-Path -LiteralPath "$from\$d") { Copy-Dir "$from\$d" "$AppDir\$d"; if ($script:RobocopyRc -ge 8) { $ok = $false } } }
+  $ok
+}
+function Remove-SidebarDirs {
+  # only ever the two dirs this switch's copy just created in empty paths
+  foreach ($d in $SidebarDirs) { if (Test-Path -LiteralPath "$AppDir\$d") { Remove-Item -LiteralPath "$AppDir\$d" -Recurse -Force -ErrorAction SilentlyContinue } }
+}
+function Invoke-AppHistorySync {
+  $sync = "$env:USERPROFILE\.grok\bin\sync-app-history.ps1"   # stays in .grok\bin (scheduled task points there)
+  if (Test-Path $sync) {
+    Write-Host "Syncing session history into the app index..." -ForegroundColor DarkGray
+    try { & $sync } catch { Write-Host "  (history sync skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+  }
+}
+function Invoke-AppSeatPublish {
+  $pub = Join-Path $PSScriptRoot 'app-seat-publish.ps1'
+  if (Test-Path $pub) {
+    try { & $pub | Out-Null } catch { Write-Host "  (app-seat publish skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+  }
+}
 
 function Invoke-Switch([string]$label) {
   if (-not $label) { Write-Host "Usage: --switch <label>" -ForegroundColor Red; exit 1 }
@@ -211,6 +419,7 @@ function Invoke-Switch([string]$label) {
   # seat was captured as. Catches any poisoned snapshot LOUDLY instead of logging you
   # into the wrong account.
   $owner = Get-SeatOwnerUuid $label
+  $snapUuid = ''
   if ($owner) {
     $snapUuid = try { (Get-Content (Join-Path $src 'config.json') -Raw | ConvertFrom-Json -AsHashtable)['lastKnownAccountUuid'] } catch { '' }
     if ($snapUuid -and $snapUuid -ne $owner) {
@@ -220,36 +429,122 @@ function Invoke-Switch([string]$label) {
     }
   }
   Assert-Closed
-  $seatLock = Enter-SeatLock
-  # Re-capture the login we're LEAVING into its own profile FIRST, so returning to it later
-  # doesn't force a re-sign-in. The seat to re-capture into is identified by the LIVE
-  # login's account uuid, never by .active: a manual in-app log-in/out desyncs .active,
-  # and a blind re-capture then writes the wrong account into a seat (that's exactly how
-  # seat A once ended up holding the Noshim login).
-  $liveUuid = Get-AppAccountUuid
-  $prev = Find-SeatByUuid $liveUuid
-  if ($prev -and $prev -ne $label) {
-    $pdst = Join-Path $SeatRoot $prev
-    foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$pdst\$f" -Force } }
-    foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Mirror-Dir "$AppDir\$d" "$pdst\$d" } }
-    "captured=$stamp account=$(Get-ProfileEmail $prev) uuid=$liveUuid label=$prev" | Set-Content "$pdst\meta.txt" -Encoding UTF8
-    Write-Host "Re-captured '$prev' (kept its login fresh -- no re-sign-in when you switch back)." -ForegroundColor DarkGray
-  } elseif (-not $prev) {
-    Write-Host "Live login (uuid $liveUuid) doesn't match any captured seat -- NOT re-capturing." -ForegroundColor DarkYellow
-    Write-Host "If you logged in manually and want this login saved, quit and run --capture <label> first." -ForegroundColor DarkYellow
-  }
-  $bk = Join-Path $SeatRoot ".swap-backups\$stamp"
-  New-Item -ItemType Directory -Path $bk -Force | Out-Null
-  # 1) back up current login (files copied, dirs MOVED aside = reversible, nothing deleted)
-  foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$bk\$f" -Force } }
-  foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Move-Item "$AppDir\$d" "$bk\$d" -Force } }
-  # 2) apply the chosen profile
-  foreach ($f in $LoginFiles) { if (Test-Path "$src\$f") { Copy-Item "$src\$f" "$AppDir\$f" -Force } }
-  foreach ($d in $LoginDirs)  { if (Test-Path "$src\$d") { Copy-Dir "$src\$d" "$AppDir\$d" } }
-  $label | Set-Content "$SeatRoot\.active" -Encoding UTF8
-  Write-Host "Switched the Claude app login to profile '$label' ($(Get-ProfileEmail $label))." -ForegroundColor Green
-  $seatLock.Dispose()
-  Write-Host "Previous login backed up at: $bk" -ForegroundColor DarkGray
+  $script:SeatLockHeld = Enter-SeatLock
+  $script:ProfileIntact = $true; $script:SidebarNote = ''
+  $bk = $null; $baselineOk = $false
+  try {
+    # Re-capture the login we're LEAVING into its own profile FIRST, so returning to it later
+    # doesn't force a re-sign-in. The seat to re-capture into is identified by the LIVE
+    # login's account uuid, never by .active: a manual in-app log-in/out desyncs .active,
+    # and a blind re-capture then writes the wrong account into a seat (that's exactly how
+    # seat A once ended up holding the Noshim login).
+    $liveUuid = Get-AppAccountUuid
+    $prev = Find-SeatByUuid $liveUuid
+    $same = [bool]($prev -and $prev -eq $label)
+    $gdir = Join-Path $SidebarWork $stamp
+    $stage = $null; $pair = $null
+    if ($same) {
+      # Reloading the older stash over the live profile (what this used to do) loses everything done since it was captured. Nothing is swapped;
+      # the history sync, the publish and .active below run as normal, so --rotate still advances.
+      Write-Host "Seat '$label' is already the live login: nothing to swap." -ForegroundColor DarkGray
+      $script:SidebarNote = 'Sidebar: nothing to sync.'
+      $label | Set-Content "$SeatRoot\.active" -Encoding UTF8
+    } else {
+      if ($prev) {
+        $created = Get-LiveCreation      # before the re-capture: the departure checkpoint compares it with what was installed
+        $pdst = Join-Path $SeatRoot $prev
+        $recapOk = $true
+        foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$pdst\$f" -Force } }
+        foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Mirror-Dir "$AppDir\$d" "$pdst\$d"; if ($script:RobocopyRc -ge 8) { $recapOk = $false } } }
+        "captured=$stamp account=$(Get-ProfileEmail $prev) uuid=$liveUuid label=$prev" | Set-Content "$pdst\meta.txt" -Encoding UTF8
+        Write-Host "Re-captured '$prev' (kept its login fresh -- no re-sign-in when you switch back)." -ForegroundColor DarkGray
+        if ($recapOk -and $created.ls -and $created.idb) {
+          try { Write-DepartureCheckpoint $prev $created } catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+        }
+      } else {
+        Write-Host "Live login (uuid $liveUuid) doesn't match any captured seat -- NOT re-capturing." -ForegroundColor DarkYellow
+        Write-Host "If you logged in manually and want this login saved, quit and run --capture <label> first." -ForegroundColor DarkYellow
+      }
+      # The target's baseline is invalid until its install succeeds (so any interruption below leaves it invalid). A departure is read against its
+      # own checkpoint, never this file, so this loses no pending edit.
+      try { Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') @{ valid = $false } } catch {}
+      if (-not $prev) { Set-SidebarNote "Sidebar: skipped (the live login is no captured seat) - see $(Join-Path $gdir 'report.txt')" $gdir 'skipped: the live login is no captured seat' }
+      elseif (-not $owner -or $snapUuid -ne $owner) { Set-SidebarNote "Sidebar: skipped (seat $label has no verified login to read) - see $(Join-Path $gdir 'report.txt')" $gdir "skipped: the stash of $label holds no login that matches its owner-uuid.txt" }
+      else {
+        $stage = Invoke-SidebarStage $prev $label $stamp
+        if ($stage.ran) { try { Publish-SidebarState $stage.gdir } catch { Write-Host "  (sidebar: state not published: $($_.Exception.Message))" -ForegroundColor DarkYellow } }
+      }
+      $bk = Join-Path $SeatRoot ".swap-backups\$stamp"
+      New-Item -ItemType Directory -Path $bk -Force | Out-Null
+      # 1) back up current login (files copied, dirs MOVED aside = reversible, nothing deleted). Every dir that existed must end up gone from the
+      # live path and present in the backup; otherwise what was moved goes back, and the switch stops (S62, S75).
+      Assert-Closed
+      foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$bk\$f" -Force } }
+      $moved = New-Object System.Collections.Generic.List[string]; $failed = $null
+      foreach ($d in @($LoginDirs | Where-Object { Test-Path -LiteralPath "$AppDir\$_" })) {
+        try { Move-Item -LiteralPath "$AppDir\$d" -Destination "$bk\$d" -Force -ErrorAction Stop } catch { $failed = $d; break }
+        if ((Test-Path -LiteralPath "$AppDir\$d") -or -not (Test-Path -LiteralPath "$bk\$d")) { $failed = $d; break }
+        $moved.Add($d)
+      }
+      if ($failed) {
+        foreach ($d in $moved) { try { Move-Item -LiteralPath "$bk\$d" -Destination "$AppDir\$d" -Force -ErrorAction Stop } catch {} }
+        $bad = @($LoginDirs | Where-Object { ($moved -contains $_ -or $_ -eq $failed) -and -not (Test-Path -LiteralPath "$AppDir\$_") })
+        if ($bad.Count -eq 0) {
+          $script:ProfileIntact = $true
+          Write-Host "REFUSED: could not move the current login ('$failed') aside; everything moved so far was put back. Nothing was switched." -ForegroundColor Red
+        } else {
+          $script:ProfileIntact = $false
+          Write-Host "FAILED: could not move the current login aside and could not put back: $($bad -join ', '). The previous login is in $bk -- restore those folders into $AppDir. The app was not reopened." -ForegroundColor Red
+        }
+        exit 1
+      }
+      # 2) apply the chosen profile. The two sidebar dirs come from the staging gen when it built them, else from the stash; if either staged copy
+      # fails both are removed (this copy created them in now-empty paths) and the stash pair goes in (S51, S63); if that fails too, stop (no relaunch).
+      foreach ($f in $LoginFiles) { if (Test-Path "$src\$f") { Copy-Item "$src\$f" "$AppDir\$f" -Force } }
+      foreach ($d in @($LoginDirs | Where-Object { $SidebarDirs -notcontains $_ })) { if (Test-Path "$src\$d") { Copy-Dir "$src\$d" "$AppDir\$d" } }
+      $stagedAvail = [bool]($stage -and $stage.ran -and (Test-Path -LiteralPath "$gdir\Local Storage") -and (Test-Path -LiteralPath "$gdir\IndexedDB") -and (Test-Path -LiteralPath "$gdir\baseline.json"))
+      if ($stagedAvail -and (Copy-SidebarPair $gdir)) { $pair = 'staged' }
+      else {
+        if ($stagedAvail) { Remove-SidebarDirs }
+        if (Copy-SidebarPair $src) { $pair = 'stash' }
+        else {
+          Remove-SidebarDirs
+          $script:ProfileIntact = $false
+          Write-Host "FAILED: could not copy the sidebar databases of seat '$label' in. The previous login is in $bk -- restore it into $AppDir. The app was not reopened." -ForegroundColor Red
+          exit 1
+        }
+      }
+      $label | Set-Content "$SeatRoot\.active" -Encoding UTF8
+      Write-Host "Switched the Claude app login to profile '$label' ($(Get-ProfileEmail $label))." -ForegroundColor Green
+      # 3) record what was installed, the target's baseline (valid only now), and the shared config
+      try { Write-JsonAtomic (Join-Path $src 'sidebar-installed.json') @{ created = (Get-LiveCreation) } } catch {}
+      try {
+        $bsrc = if ($pair -eq 'staged') { "$gdir\baseline.json" } elseif ($stage -and $stage.ran) { "$gdir\baseline-stash.json" } else { $null }
+        if ($bsrc -and (Test-Path -LiteralPath $bsrc)) {
+          Copy-Item -LiteralPath $bsrc -Destination (Join-Path $src 'sidebar-baseline.json.tmp') -Force
+          [IO.File]::Move((Join-Path $src 'sidebar-baseline.json.tmp'), (Join-Path $src 'sidebar-baseline.json'), $true)
+          $b = Read-JsonFile (Join-Path $src 'sidebar-baseline.json'); $baselineOk = [bool]($b -and $b['valid'] -eq $true)
+        }
+      } catch { Write-Host "  (sidebar: baseline not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+      $cfgWhy = if ($stage -and $stage.ran) { Commit-SidebarConfig $gdir $pair $stamp } else { $null }
+      if ($cfgWhy) { try { Add-Content -LiteralPath (Join-Path $gdir 'report.txt') -Value $cfgWhy } catch {} }
+      # the line the dashboard shows
+      if (-not $script:SidebarNote) {
+        $res = if ($stage -and $stage.ran) { Read-JsonFile (Join-Path $gdir 'result.json') } else { $null }
+        $rp = Join-Path $gdir 'report.txt'
+        if (-not $stage.ran) { Set-SidebarNote "Sidebar: skipped ($($stage.reason)) - see $rp" $gdir "skipped: $($stage.reason)" }
+        elseif (-not $res) { Set-SidebarNote "Sidebar: skipped (the stage left no result) - see $rp" $gdir 'skipped: the stage left no result' }
+        elseif ($res['status'] -eq 'skipped') { Set-SidebarNote "Sidebar: skipped ($($res['reason'])) - see $rp" $gdir '' }
+        elseif ($res['status'] -eq 'synced' -and $pair -ne 'staged') { Set-SidebarNote "Sidebar: skipped (the staged copy could not be installed; the seat's own was) - see $rp" $gdir '' }
+        elseif ($res['status'] -eq 'synced') { Set-SidebarNote "Sidebar: synced $($res['n']) pins." $gdir '' }
+        else { Set-SidebarNote 'Sidebar: nothing to sync.' $gdir '' }
+        $script:SidebarNote += (Get-LastVerifyNote $stamp)
+      }
+    }
+    Release-SeatLock
+    if ($bk) { Write-Host "Previous login backed up at: $bk" -ForegroundColor DarkGray }
+  } finally { Release-SeatLock }
+  if ($baselineOk) { Start-SidebarVerify $label $stamp }
   # Retention (owner-approved 2026-10-20): keep the newest 10 swap backups. With no limit this folder
   # reached 181 copies / 63 GB and filled C:. Only stamp-named dirs are touched, newest first, so the
   # backup just written above is always kept; a failed delete is reported, never fatal to the switch.
@@ -260,20 +555,15 @@ function Invoke-Switch([string]$label) {
     try { Remove-Item -LiteralPath $old.FullName -Recurse -Force -ErrorAction Stop }
     catch { Write-Host "Could not prune old swap backup $($old.Name): $($_.Exception.Message)" -ForegroundColor DarkYellow }
   }
+  Remove-OldGens $SidebarWork
+  Remove-OldGens $SidebarBackups
   # 3) make this account's app history show your CLI sessions
-  $sync = "$env:USERPROFILE\.grok\bin\sync-app-history.ps1"   # stays in .grok\bin (scheduled task points there)
-  if (Test-Path $sync) {
-    Write-Host "Syncing session history into the app index..." -ForegroundColor DarkGray
-    try { & $sync } catch { Write-Host "  (history sync skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow }
-  }
+  Invoke-AppHistorySync
   # 4) tell the box which seat the app is on now (heartbeat issue); never fatal to the switch
-  $pub = Join-Path $PSScriptRoot 'app-seat-publish.ps1'
-  if (Test-Path $pub) {
-    try { & $pub | Out-Null } catch { Write-Host "  (app-seat publish skipped: $($_.Exception.Message))" -ForegroundColor DarkYellow }
-  }
+  Invoke-AppSeatPublish
   Write-Host "To undo: --switch <previous-label>, or restore that backup folder into $AppDir." -ForegroundColor DarkGray
   $script:SwitchDone = $true
-  if (-not $Relaunch) { Write-Host "Now reopen the Claude desktop app." -ForegroundColor Cyan }
+  if (-not $Relaunch) { Write-Host "Now reopen the Claude desktop app.$(if ($script:SidebarNote) { ' ' + $script:SidebarNote })" -ForegroundColor Cyan }
 }
 
 # ---- flag parse ----

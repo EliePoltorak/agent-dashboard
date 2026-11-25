@@ -84,9 +84,9 @@ Invoke-SwitchRelaunch B
                       @{ name = 'switch refused'; body = 'exit 1'; want = 'Switch failed; relaunched the Claude app on its old login'; rc = 1 })) {
     $child = @"
 . '$script_'
-`$script:n = 0
-function Get-AppProcs { `$script:n++; if (`$script:n -eq 1) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
-function Start-Process { param(`$FilePath) Write-Host "LAUNCHED `$FilePath" }
+`$script:n = 0; `$script:StartWaitSec = 2
+function Get-AppProcs { `$script:n++; if (`$script:n -eq 1 -or `$script:launched) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Start-Process { param(`$FilePath) `$script:launched = `$true; Write-Host "LAUNCHED `$FilePath" }
 function Find-AppLauncher { @{ file = 'fake-claude.exe'; args = @() } }
 function Invoke-Switch { $($case.body) }
 Invoke-SwitchRelaunch B
@@ -98,9 +98,9 @@ Invoke-SwitchRelaunch B
   # switch ok but the app cannot be reopened (no launcher found): exit 3 and a line that says the switch stood, not a plain success
   $child = @"
 . '$script_'
-`$script:n = 0
-function Get-AppProcs { `$script:n++; if (`$script:n -eq 1) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
-function Start-Process { param(`$FilePath) Write-Host "LAUNCHED `$FilePath" }
+`$script:n = 0; `$script:StartWaitSec = 2
+function Get-AppProcs { `$script:n++; if (`$script:n -eq 1 -or `$script:launched) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Start-Process { param(`$FilePath) `$script:launched = `$true; Write-Host "LAUNCHED `$FilePath" }
 function Find-AppLauncher { `$null }
 function Invoke-Switch { `$script:SwitchDone = `$true }
 Invoke-SwitchRelaunch B
@@ -111,8 +111,8 @@ Invoke-SwitchRelaunch B
   # switch refused AND the app cannot be reopened: the refusal's exit code, and a last line that still says the switch failed
   $child = @"
 . '$script_'
-`$script:n = 0
-function Get-AppProcs { `$script:n++; if (`$script:n -eq 1) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+`$script:n = 0; `$script:StartWaitSec = 2
+function Get-AppProcs { `$script:n++; if (`$script:n -eq 1 -or `$script:launched) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
 function Find-AppLauncher { `$null }
 function Invoke-Switch { Write-Host 'REFUSED: seat B'; exit 1 }
 Invoke-SwitchRelaunch B
