@@ -363,8 +363,9 @@ live; the cache is the answer.
 1. **It reads usage off every real response.** The `anthropic-ratelimit-unified-*` headers,
    including the Fable `7d_oi` ones when a Fable request goes through, are written to the same
    `<label>\usage-cache[-fable].json` files a probe writes, tagged `src=proxy`. The watcher uses a
-   proxy reading younger than 2 min instead of probing, and the Fable ladder picks it up as a free
-   baseline. This closes the blind spells behind the 09-20/09-22/09-23 caps.
+   proxy reading younger than 2 min instead of probing (except a Fable rejection it has already
+   counted: each observation is counted once, on its own clock, so a second check probes live),
+   and the Fable ladder picks it up as a free baseline. This closes the blind spells behind the 09-20/09-22/09-23 caps.
 2. **A quota 429, or an explicit subscription-disabled 403, retries on the next seat.** When a
    window is `rejected`, or the body is an `oauth_org_not_allowed` / "subscription access disabled"
    403, the proxy runs `--check-rotate --now --source proxy` and retries the request once on

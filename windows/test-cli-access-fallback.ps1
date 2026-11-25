@@ -1191,6 +1191,14 @@ $rlTwice = Join-Path $Root '.rotate-log.txt'
 $logTwice = if (Test-Path -LiteralPath $rlTwice) { Get-Content -LiteralPath $rlTwice -Raw } else { '' }
 Check 'two checks of one proxy Fable rejection with no free seat trigger once' (([regex]::Matches($logTwice, 'FABLE window REJECTED')).Count -eq 1 -and ([regex]::Matches($logTwice, 'FABLE window CAPPED')).Count -eq 0) ("log=$logTwice")
 Check '... and the ladder is armed at its floor' ([int64]$stOnce.fableTs -ge ($tn - 5) -and [int]$stOnce.fableBase -eq 100) ("fableTs=$($stOnce.fableTs) base=$($stOnce.fableBase)")
+# A rejection the proxy observes after that check is a new observation, and still fires.
+Start-Sleep -Seconds 2
+$tNew = [int64][DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+@{ ts = $tNew; observed_ms = $tNew * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tNew + 3600) } } |
+  ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
+$null = Invoke-CheckRotate 0 $false $true 'test'
+$logNew = if (Test-Path -LiteralPath $rlTwice) { Get-Content -LiteralPath $rlTwice -Raw } else { '' }
+Check '... and a newer proxy Fable rejection after it still fires' (([regex]::Matches($logNew, 'FABLE window REJECTED')).Count -eq 2) ("log=$logNew")
 Reset-Case; Clear-AppIdentity; Set-Active 'A'; $script:pings = @()
 @{ ts = $tn; observed_ms = $tn * 1000; data = @{ label = 'A'; ok = $true; src = 'proxy'; http = 429; oi7_stat = 'rejected'; oi7_reset = [string]($tn + 3600) } } |
   ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path (Join-Path $Root 'A') 'usage-cache.json') -Encoding UTF8
