@@ -21,7 +21,7 @@
   holds a child gets a new id (J; that existing child is not relinked), a stale linked record and a linkless tip record, the copy at the tip with the link (L, L2, L3), a blank title (T), a blank-titled repo record cloned with its link
   (BT), blank-titled records only, the tip one used for new copies (BL), a titled linkless source taking the link a
   blank-titled record carries (GL), the link that resolves preferred over one naming a parent no seat holds (GR), a titled source's own dead link replaced by one that
-  resolves (GD), and its own startChain dropped when the grafted link brings none and its root is not held (GC), kept when it is (GC2), a
+  resolves (GD), and its own startChain dropped when the grafted link brings none and its root is not held (GC), kept when it is (GC2), dropped when only another seat holds it (GC3), a
   malformed id (M), the
   not-carried count (Z), and a worktree session carried with no repo project folder at all.
   Builds a tiny synthetic index under C:\Dev\Temp (the live index is not read) and runs the sync with
@@ -276,6 +276,15 @@ $g2A = "local_$([guid]::NewGuid())"; record $A $g2A $g2Cli $repo 'Titled child G
 $f = "$A\$g2A.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.startChain.firstSessionId = $g2GSid; $j.startChain.depth = 2; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
 $g2B = "local_$([guid]::NewGuid())"; record $B $g2B $g2Cli $repo '' $g2PSid
 $f = "$B\$g2B.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('startChain'); Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
+# GC3: like GC2, but the grandparent's transcript is not on this machine, so seat C never gets it: the copy drops the chain
+$g3Cli = [guid]::NewGuid().ToString(); $g3PCli = [guid]::NewGuid().ToString(); $g3GCli = [guid]::NewGuid().ToString()
+$g3PSid = "local_$([guid]::NewGuid())"; $g3GSid = "local_$([guid]::NewGuid())"
+transcript $pDir $g3PCli 7 'parent GC3'; transcript $pDir $g3Cli 7 'child GC3 whose chain root stays on seat A'
+record $A $g3GSid $g3GCli $repo 'Grandparent GC3' $null; record $A $g3PSid $g3PCli $repo 'Parent GC3' $null
+$g3A = "local_$([guid]::NewGuid())"; record $A $g3A $g3Cli $repo 'Titled child GC3' "local_$([guid]::NewGuid())"
+$f = "$A\$g3A.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.startChain.firstSessionId = $g3GSid; $j.startChain.depth = 2; Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
+$g3B = "local_$([guid]::NewGuid())"; record $B $g3B $g3Cli $repo '' $g3PSid
+$f = "$B\$g3B.json"; $j = Get-Content $f -Raw | ConvertFrom-Json; $j.PSObject.Properties.Remove('startChain'); Set-Content $f ($j | ConvertTo-Json -Compress -Depth 10) -NoNewline
 # Z: a substantive worktree transcript with no record anywhere (a CLI session): not counted as not carried
 transcript $wDir ([guid]::NewGuid().ToString()) 7 'cli session with no app record'
 # N: a repo session with a side-session-notes folder: its copy gets a new id (deleting it must never take the notes)
@@ -322,6 +331,8 @@ $gcP = @($rC | Where-Object { $_.cliSessionId -eq $gcPCli }); $gc = @($rC | Wher
 check "a grafted link whose record has no startChain drops the source's own startChain whose root no seat holds (GC)" ($gc.Count -eq 1 -and $gcP.Count -eq 1 -and $gc[0].title -eq 'Titled child GC' -and $gc[0].spawnedFrom.sessionId -eq $gcP[0].sessionId -and $null -eq $gc[0].startChain)
 $g2P = @($rC | Where-Object { $_.cliSessionId -eq $g2PCli }); $g2G = @($rC | Where-Object { $_.cliSessionId -eq $g2GCli }); $g2 = @($rC | Where-Object { $_.cliSessionId -eq $g2Cli })
 check "a grafted link whose record has no startChain keeps the source's own startChain when its root is held (GC2)" ($g2.Count -eq 1 -and $g2P.Count -eq 1 -and $g2G.Count -eq 1 -and $g2[0].spawnedFrom.sessionId -eq $g2P[0].sessionId -and $g2[0].startChain.firstSessionId -eq $g2G[0].sessionId)
+$g3P = @($rC | Where-Object { $_.cliSessionId -eq $g3PCli }); $g3 = @($rC | Where-Object { $_.cliSessionId -eq $g3Cli })
+check "a kept startChain whose root seat C never gets is dropped, not left dangling (GC3)" ($g3.Count -eq 1 -and $g3P.Count -eq 1 -and @($rC | Where-Object { $_.cliSessionId -eq $g3GCli }).Count -eq 0 -and $g3[0].spawnedFrom.sessionId -eq $g3P[0].sessionId -and $null -eq $g3[0].startChain)
 $gdP = @($rC | Where-Object { $_.cliSessionId -eq $gdPCli }); $gd = @($rC | Where-Object { $_.cliSessionId -eq $gdCli })
 check "a titled source whose own link names a parent no seat holds takes a link that resolves, remapped to seat C's parent" ($gd.Count -eq 1 -and $gdP.Count -eq 1 -and $gd[0].title -eq 'Titled child GD' -and $gd[0].spawnedFrom.sessionId -eq $gdP[0].sessionId -and $gd[0].startChain.firstSessionId -eq $gdP[0].sessionId)
 check 'a blank-titled worktree record is not copied' (@($rB | Where-Object { $_.cliSessionId -eq $tCli }).Count -eq 0)
