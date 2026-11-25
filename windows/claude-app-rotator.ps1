@@ -306,6 +306,7 @@ function Start-SidebarVerify([string]$label, [string]$gen) {
     $cmd = Get-SidebarSyncCommand
     if (-not $cmd) { return }
     $gdir = Join-Path $SidebarWork $gen
+    New-Item -ItemType Directory -Path $gdir -Force | Out-Null      # the redirects below need it
     $argv = @($cmd.args) + @('--verify', '--gen', $gen, '--target', $label, '--seats', $SeatRoot, '--app', $AppDir)
     $line = '/d /c "{0} {1} > "{2}" 2> "{3}""' -f (Join-Args @($cmd.file)), (Join-Args $argv), (Join-Path $gdir 'verify.out'), (Join-Path $gdir 'verify.err')
     Start-Process -FilePath cmd.exe -ArgumentList $line -WindowStyle Hidden | Out-Null
