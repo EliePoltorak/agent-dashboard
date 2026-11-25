@@ -61,7 +61,7 @@
   A kept (or pinned) session also brings its FAMILY: every session connected to it through records' spawnedFrom.sessionId
   (side sessions, what it was spawned from, their siblings and so on), whatever their length or age, if their transcripts
   are here. Sessions whose transcript is only in an app worktree folder of -Cwd are classified and kept like any other, with
-  or without a parent, but are not archived for age; they (transcripts only in projects\<enc>--claude-worktrees-*, records with cwd
+  or without a parent, but are not archived for age; they (transcripts only in projects folders named after <-Cwd>\.claude\worktrees\<name>, records with cwd
   = the worktree and originCwd = -Cwd) are carried the same way, only from such a worktree-cwd record (so they keep their own
   cwd), and are never fabricated: with no well-titled worktree record on any seat to clone they are skipped (counted when some seat has a record of them). A session whose transcript is in the repo folder
   is copied as before, from a cwd = -Cwd record only (a blank-titled one as a last resort, rather than fabricating).
@@ -1030,12 +1030,14 @@ foreach ($acct in $accts) {
             $lv = [string]$lo.$lpn; $lc2 = if ($lv) { $sidCli[$lv] } else { $null }
             if ($lc2 -and $seatSid.ContainsKey($lc2) -and $seatSid[$lc2] -ne $lv) { $lo.$lpn = $seatSid[$lc2] }
           }
-          # the destination folder's spelling of the workspace (else the shared one), not the source seat's: cwd only when it is the
-          # workspace itself (a worktree copy keeps its worktree folder, where its transcript is), originCwd whenever it names the workspace
+          # the destination folder's spelling of the workspace (else the shared one), not the source seat's: cwd in full when it is the
+          # workspace, only its repo part when it is a worktree folder (the copy keeps its worktree folder, where its transcript is), originCwd whenever it names the workspace
           $cloneSpelling = if ($destSpelling) { $destSpelling } else { $cwdSpelling[$wsGuid] }
           if ($cloneSpelling) {
             if (Test-IsWorkspace $cj.originCwd) { $cj.originCwd = $cloneSpelling }
             if (Test-IsWorkspace $cj.cwd) { $cj.cwd = $cloneSpelling }
+            elseif ($cj.cwd -is [string] -and $cj.cwd.StartsWith(($Cwd.TrimEnd('\') + '\'), [StringComparison]::OrdinalIgnoreCase)) {   # a worktree folder: the repo part in the same spelling
+              $cj.cwd = $cloneSpelling.TrimEnd('\') + '\' + $cj.cwd.Substring(($Cwd.TrimEnd('\') + '\').Length) }
           }
           # the resolved flags, not the source's: pass 1.5 may have re-read a source whose flag write failed
           if ($flagWant.ContainsKey($m.BaseName)) { foreach ($fk in 'isArchived', 'isStarred') { $cj | Add-Member -NotePropertyName $fk -NotePropertyValue ([bool]$flagWant[$m.BaseName][$fk]) -Force } }
