@@ -536,6 +536,57 @@ say "Sign in again" on its next switch-in. `-Status` / `-DryRun` / `-SelfTest`; 
 switch/capture waits for it (up to 90 s). Why it exists, and what it does NOT fix: the header of
 `claude-app-seat-keepalive.ps1`.
 
+## Sidebar pins follow you across seats
+
+When you switch app seats (`claude-account --switch <seat>`, `--rotate`, the dashboard's button), the sessions you pinned or unpinned on the
+seat you leave are pinned or unpinned on the seat you enter. **Pins only**; group assignments are not synced yet.
+
+**What syncs and when.** At the switch, with the app closed and the seat lock held, the rotator reads the seat being left (its edits since
+you entered it), merges them into one global pin intent per session, and builds the entered seat's pin list in a *staging copy* of that
+seat's two sidebar databases. The app keeps the pin list in three places and all three are written: IndexedDB
+(`store:pin-state:dframe-starred-code`), Local Storage (`LSS-persisted.starred-local-code-sessions`) and
+`%APPDATA%\Claude\claude_desktop_config.json` (`preferences.epitaxyPrefs`, shared by every seat). Session ids differ per seat (the history sync
+gives every copy a new one), so pins are matched through `cliSessionId`; a pin goes on the unarchived, newest copy the seat has.
+Only the staging copy is ever written; the seat's own stash is never modified, and on any failure the stash's own pair goes in, as before.
+The result is the last line of the switch output, which the dashboard shows: `Sidebar: synced N pins.`, `Sidebar: nothing to sync.` or
+`Sidebar: skipped (<reason>) - see <report>`.
+
+**Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent), per seat `sidebar-baseline.json`
+(its pins as installed; valid only after a successful install), `sidebar-installed.json` and `sidebar-departure.json` (written when you leave a
+seat, consumed by the next stage), `.sidebar-sync-work\<gen>\` (the staging copy, `report.txt`, `verify.txt`; newest 10 kept) and
+`.sidebar-sync-backups\<gen>\` (the config as it was before the rotator replaced it; newest 10 kept).
+
+**The check after launch.** After every switch with a valid baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
+waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences - see <report>` on
+the next switch's last line); it changes nothing.
+
+**Limits you can run into.**
+- *Reach.* A pin can only go on a session the entered seat already has a record for. The report counts the rest (`no copy on <seat>`); they get
+  their pin at the seat's next switch-in, once the history sync has copied them.
+- *Revert risk.* If the app drops a pin at launch (the check shows `DIFFERS`), the drop is read at the next departure as an unpin and spreads.
+  Pins survived a relaunch in the 2026-11-24 test; a pin made within 75 s of launch can show up as a difference too.
+- *Edits that cannot be trusted are not synced.* A seat whose sidebar databases were recreated (or whose baseline is invalid or missing)
+  contributes nothing; the report says `edits made on D were not synced: redo them`. Nothing is ever invented from an old stash, so an old
+  stash cannot resurrect a pin you removed.
+- *Unreadable seats* (for example a seat whose pin state is not a plain one-byte string) are skipped and reported, never written.
+- Same-seat `--switch X` when X is already the live login now swaps nothing (it used to reload the older stash over the live profile, losing
+  everything since it was captured). The history sync, the heartbeat publish and `.active` still run, so `--rotate` still advances.
+- The shared `claude_desktop_config.json` is rewritten only if it round-trips byte for byte through JSON with 2-space indent, still has the
+  SHA-256 the stage read, and the app is still closed; otherwise it is left alone and the report says why (retried at the next switch).
+
+**Dry run** (works with the app open; reads the live seat from a snapshot copy; writes nothing):
+`py -3 -I windows\sidebar-sync.py --dry-run --target <seat>` prints the pin changes with titles, plus the skipped, no-copy, pinned-elsewhere and
+not-synced lines.
+
+**Reset steps** (a seat's sidebar got corrupted, or you want it to start clean): quit the app, then
+`py -3 -I windows\sidebar-sync.py --forget <seat>` (invalidates that seat's baseline and drops its pending departure; its next departure
+contributes nothing and its pins sync again after the next switch in). To forget everything, delete `.sidebar-sync-state.json`: the next
+switch rebuilds it from every readable seat (a pin on any seat wins).
+
+Tests: `py -3 -I windows\test-sidebar-sync.py` (engine), `windows\test-app-relaunch.ps1` (the rotator's part, with a stub for python),
+`windows\test-sidebar-sync-sandbox.py` (on copies of the real seats, in `C:\Dev\Temp\sidebar-sync-sandbox`), and the owner-run
+`windows\test-sidebar-sync-journey.ps1` (closes and reopens the app; run it from a plain terminal).
+
 ## Desktop app session history (`claude-sync-history`)
 
 The **CLI** (`claude --resume`) sees every session, because all accounts share one
@@ -640,9 +691,9 @@ as a first run; delete it to start again (the next run counts a flag set on any 
 with the app closed, archives every old session of this workspace once more (unpinned, with a local transcript, no `autoArchiveExempt` record), un-archived ones included, because deleting it
 also forgets which sessions were archived for age).
 
-Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own
-storage, so a pin flag copied to a seat's record may not show as pinned there.
-Tracked in Hameishiv/claude-rotator#10 (issue #10).
+Sidebar groups are not synced (issue #10, part 2). The sidebar's own pinned list is: at a seat switch
+(`claude-account --switch`), see *Sidebar pins follow you across seats* above. The `isStarred` flag on a record is a different thing
+from the sidebar pin; this sync copies the flag only.
 
 Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
 appears to set when you un-archive a session it archived by itself; that field is not copied, so on

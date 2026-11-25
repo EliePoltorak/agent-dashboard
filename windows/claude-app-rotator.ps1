@@ -33,6 +33,8 @@ USAGE  (run in normal PowerShell, app CLOSED for capture/switch/rotate)
 
   After a successful --switch/--rotate this also runs sync-app-history.ps1, so the
   account you land on shows your CLI sessions in its history. Then reopen the app.
+  It also syncs the sidebar PINS: those you changed on the seat you leave are pinned/unpinned on the seat you enter
+  (sidebar-sync.py; README-claude-rotator.md, "Sidebar pins follow you across seats"). The last line says what happened.
 
 TYPICAL SETUP
   1) Log into account A in the app. Quit app. Run: --capture A
@@ -596,7 +598,7 @@ if ($MyInvocation.InvocationName -eq '.') { return }
 New-Item -ItemType Directory -Path $SeatRoot -Force | Out-Null
 
 switch ($mode) {
-  'help' { Get-Content $PSCommandPath -TotalCount 46 | Select-Object -Skip 1; break }
+  'help' { Get-Content $PSCommandPath -TotalCount 48 | Select-Object -Skip 1; break }
 
   'status' {
     $procs = @(Get-AppProcs)

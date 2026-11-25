@@ -115,7 +115,7 @@
     transcript are left alone.
   - Archive/pin flags (isArchived, isStarred) are copied across seats only while the app is closed;
     changed records are backed up to ~/.claude-app-seats\.flag-sync-backups\<ts>\ (newest 10 kept).
-    Sidebar groups and the pin list are not synced (claude-rotator issue #10).
+    Sidebar groups are not synced; the sidebar pin LIST is synced at the seat switch by sidebar-sync.py (agent-dashboard issue #10).
   - One run at a time (~/.claude-app-seats\.sync-history.lock): an interactive run waits up to 3 min for it;
     -Quiet (the scheduled task) skips at once. The flag step runs only when -Cwd has transcripts.
   - Classification is cached in ~/.claude-app-seats\.sync-classify-cache.json keyed by file
@@ -577,8 +577,9 @@ if (-not $wsGuid -and -not $Quiet) {
 # (below; with a state file that predates its record->session map, an unreadable record holds every session and nothing is saved). First run, or a session no record was
 # seen for before: set on any seat -> set on all. Records are matched across seats by
 # cliSessionId, whatever their cwd. Each folder's archived-sessions.idx is kept in step with its records
-# (after pass 2). The sidebar pin LIST and groups are NOT synced: the app keeps
-# them in each seat's own Local Storage and rewrites claude_desktop_config.json from there.
+# (after pass 2). The sidebar pin LIST is NOT synced here: the app keeps it in three stores (IndexedDB, Local Storage and the shared
+# claude_desktop_config.json), and claude-app-rotator.ps1 syncs it at the seat switch through sidebar-sync.py (agent-dashboard issue #10).
+# Sidebar groups are not synced at all yet.
 # Old sessions are archived here too (AUTO-ARCHIVE in the header), so they get the same writes and baseline.
 # Runs only while the app is closed: the live app holds its records in memory and rewrites them,
 # so a flag we set under it would be lost and then read back as the user's own change ($appUp, above pass 1).
