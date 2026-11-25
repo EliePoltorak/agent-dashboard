@@ -60,7 +60,7 @@ transcript $wDir $cCli 2 'side session in a worktree'
 transcript $wDir $zCli 7 'worktree session no record names'
 record $A $pSid $pCli $repo 'Parent session' $null
 record $A $cSid $cCli $wt 'Side session in worktree' $pSid
-record $B "local_$([guid]::NewGuid())" $oCli $repo 'Unrelated session on seat B' $null   # B tracks the workspace already
+record $B "local_$([guid]::NewGuid())" $oCli $repo.ToLowerInvariant() 'Unrelated session on seat B' $null   # B tracks the workspace already, spelled in lower case
 record $C "local_$([guid]::NewGuid())" $pCli $repo 'Parent session' $null                  # C holds the parent under another id
 Set-Content "$D\$pSid.json" 'not json {' -NoNewline                                         # D: an unreadable file named like the parent's id
 $junkHash = (Get-FileHash "$D\$pSid.json").Hash
@@ -94,6 +94,7 @@ check 'seat B gets the worktree side session' ($bc.Count -eq 1)
 check 'the parent gets a new session id on seat B' ($bp.Count -eq 1 -and $bp[0].sessionId -ne $pSid)
 check 'the worktree side session gets a new id on seat B (worktree leases are keyed by session id)' ($bc.Count -eq 1 -and $bc[0].sessionId -ne $cSid)
 check 'the side session keeps its worktree cwd' ($bc.Count -eq 1 -and $bc[0].cwd -eq $wt)
+check "the worktree copy keeps its worktree cwd and takes seat B's spelling of the repo as originCwd (RS)" ($bc.Count -eq 1 -and $bc[0].cwd -ceq $wt -and $bc[0].originCwd -ceq $repo.ToLowerInvariant())
 check "the side session's parent link resolves on seat B" ($bc.Count -eq 1 -and @($rB | Where-Object { $_.sessionId -eq $bc[0].spawnedFrom.sessionId }).Count -eq 1)
 check 'seat C gets the side session' (@($rC | Where-Object { $_.cliSessionId -eq $cCli }).Count -eq 1)
 check 'seat C gets no second parent' (@($rC | Where-Object { $_.cliSessionId -eq $pCli }).Count -eq 1)

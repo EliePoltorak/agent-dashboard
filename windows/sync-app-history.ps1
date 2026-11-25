@@ -241,15 +241,17 @@ if ($enc.Length -gt 200) {
 }
 $byName = [ordered]@{}   # basename -> its transcript: one per session id, so every lookup keyed by id sees one file
 if (Test-Path -LiteralPath $projDir) { foreach ($f in @(Get-ChildItem -LiteralPath $projDir -File -Filter '*.jsonl')) { $byName[$f.BaseName] = $f } }
-# Side sessions started in an app worktree of -Cwd keep their transcripts in sibling folders <enc>--claude-worktrees-<name>.
+# Side sessions started in an app worktree of -Cwd keep their transcripts in sibling folders named after <-Cwd>\.claude\worktrees\<name>.
 # shortcut: the CLI cuts a folder name at 200 characters and adds a hash, so a worktree folder whose name is cut before the
 # "--claude-worktrees-" prefix (a -Cwd over about 177 encoded characters) can't be matched here; its sessions are not carried.
 # A session resumed in both the repo and a worktree has a transcript in each folder: the repo copy is the one read, as
 # before worktrees were listed (classify, age, pass 1.5 all see what they always saw). A worktree copy is read only for a
 # session with no repo copy (the newest such copy), and only that makes it a worktree session (never fabricated, new id).
 $wtCli = New-Object 'System.Collections.Generic.HashSet[string]'   # basenames of the worktree-only transcripts
+# encoded from the joined path, so a drive or share root (whose -Cwd keeps its trailing separator) gets no extra '-'
+$wtPrefix = ($Cwd.TrimEnd('\') + '\.claude\worktrees\') -creplace '[^A-Za-z0-9]', '-'
 if ($enc.Length -le 200) {
-  foreach ($wd in @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith("$enc--claude-worktrees-", [StringComparison]::OrdinalIgnoreCase) })) {
+  foreach ($wd in @(Get-ChildItem -LiteralPath $projRoot -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name.StartsWith($wtPrefix, [StringComparison]::OrdinalIgnoreCase) })) {
     try { $wfs = @(Get-ChildItem -LiteralPath $wd.FullName -File -Filter '*.jsonl') }
     catch { Write-Warning "could not list $($wd.FullName) ($($_.Exception.Message)); its sessions are left alone this run"; continue }
     foreach ($wf in $wfs) {
