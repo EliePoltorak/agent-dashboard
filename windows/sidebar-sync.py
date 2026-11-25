@@ -279,8 +279,9 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
                 plan.not_synced.append('%s is unreadable (%s): its pins are unknown until it is switched to' % (s, sp.why if sp else 'no stash'))
                 continue
             cur = set(sp.pins)
-            for cli in views[s].by_cli:
-                pins[cli] = pins.get(cli, False) or bool(views[s].sids(cli) & cur)
+            for cli in views[s].by_cli:          # only pins are recorded: an unpinned cli stays unknown, so a seat that could not be read keeps its pin
+                if views[s].sids(cli) & cur:
+                    pins[cli] = True
     tp = stash_pins.get(target)
     plan.target_pins = tp
     if tp is None or not tp.ok:
@@ -303,8 +304,9 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
                         new = [x for x in new if x != r.sid]
                         plan.removes.append((r.sid, r.title))
         else:
-            pins[cli] = bool({r.sid for r in copies} & curset)       # observed intent (S65)
-            plan.unknown += 1
+            plan.unknown += 1                                        # unknown: the target keeps its own value; a pin is recorded as observed intent (S65)
+            if {r.sid for r in copies} & curset:
+                pins[cli] = True
     plan.no_copy = sum(1 for cli, want in pins.items() if want and cli not in tview.by_cli)
     plan.old_list, plan.new_list = cur, new
     plan.state = {'version': STATE_VERSION, 'gen': gen, 'pins': pins}
