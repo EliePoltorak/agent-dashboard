@@ -126,8 +126,16 @@ soonest weekly renewal first — and names the winner.
 excluded outright, not merely ranked last — Fable runs merge-pr's Gate C. A cap still counts when
 the live probe answered without reading it: a non-2xx carrying none of `status`, `s5_stat`,
 `w7_stat` or `s5_util` (for Fable: none of `oi7_stat` or `oi7_util`). The cap kept in the seat's
-`usage-cache[-fable].json` then counts until its own reset, or until a reading replaces the file (a
-2xx, or a non-2xx carrying one of those fields; see `Test-CapCached`). A Fable probe that fails
+`usage-cache[-fable].json` then counts until its own reset. Without a usable reset, it counts for up
+to seven days from the cached reading. A new reading can replace it sooner (a 2xx, or a non-2xx
+carrying one of those fields). The proxy saves a Fable rejection to `usage-cache-fable.json` even
+when the response has no Fable utilization. The last measured utilization keeps its original
+timestamp, unless that timestamp is in the future (a clock set back), when the rejection is saved alone. A proxy Fable rejection kept in the default cache (an older proxy's only copy, the backup when
+the Fable cache write was skipped, a Fable-only response nested under the default reading, or one stored at the top level
+because the seat had no readable default reading), with or without utilization, survives default-model refreshes
+until a newer Fable reading supersedes it. A proxy Fable allowance kept the same way supersedes an
+older Fable cache rejection.
+A Fable probe that fails
 (any unknown reading, e.g. the network, a model-catalog HTTP or parse error, no token) still reads
 as not-capped, as any unknown Fable reading does (see the inference note below; #20).
 
@@ -234,6 +242,7 @@ Why this is cheap: a **capped** account 429s instantly and spends nothing, so th
 costs anything is "high but not yet capped". A quiet day costs **zero** Fable tokens; a seat parked
 at 90% costs 48 probes/day (~1.5k tokens), and at the 15-min floor at most 96/day (~3k).
 An armed Fable probe that is refused outright (a 403 subscription refusal) rotates the active seat at once, through the same access trigger as a refused Haiku probe.
+A Fable rejection that comes with no utilization rotates the active seat too: an armed probe's 429, or a cap found in the cache on any tick, armed or not (a status-only rejection the baseline cannot show, or the default cache's proxy Fable reading). Each observation is counted once, and the baseline then counts as the cap (100%), so the ladder stays armed at its 15-minute floor and re-probes a seat it could not leave.
 
 ⚠ **No safety net, by explicit choice.** While disarmed nothing re-reads Fable, so a seat that
 climbs past the arming line with no rotation and no manual `--usage`/`--status`/`--best` in between
@@ -354,8 +363,9 @@ live; the cache is the answer.
 1. **It reads usage off every real response.** The `anthropic-ratelimit-unified-*` headers,
    including the Fable `7d_oi` ones when a Fable request goes through, are written to the same
    `<label>\usage-cache[-fable].json` files a probe writes, tagged `src=proxy`. The watcher uses a
-   proxy reading younger than 2 min instead of probing, and the Fable ladder picks it up as a free
-   baseline. This closes the blind spells behind the 09-20/09-22/09-23 caps.
+   proxy reading younger than 2 min instead of probing (except a Fable rejection it has already
+   counted: each observation is counted once, on its own clock, so a second check probes live),
+   and the Fable ladder picks it up as a free baseline. This closes the blind spells behind the 09-20/09-22/09-23 caps.
 2. **A quota 429, or an explicit subscription-disabled 403, retries on the next seat.** When a
    window is `rejected`, or the body is an `oauth_org_not_allowed` / "subscription access disabled"
    403, the proxy runs `--check-rotate --now --source proxy` and retries the request once on
