@@ -568,6 +568,61 @@ def test_logic(tmp):
         rc = SS.main(['--forget', 'C', '--seats', w.seats, '--app', w.app])
     check('--forget invalidates the baseline and drops the pending departure', rc == 0 and json.load(open(os.path.join(w.seats, 'C', SS.BASELINE))) == {'valid': False} and not os.path.exists(os.path.join(w.seats, 'C', SS.DEPARTURE)))
 
+    # result.json names target, generation and pair; a generation is used once; the no-copy session is named in the report
+    w = two(fresh())
+    w.state({'cli1': True})
+    w.rec('ac', 'local_c9', 'cli9', title='Only on C')
+    w.state({'cli1': True, 'cli9': True})
+    g = w.stage('C', 'D', 'gen-a')
+    check('result.json names the target, the generation and the pair that exists', g.result['target'] == 'D' and g.result['gen'] == 'gen-a' and g.result['pair'] == 'staged' and g.staged, str(g.result))
+    check('the report names the session the target has no copy of', 'no copy: Only on C (cli9)' in g.f('report.txt'), g.f('report.txt'))
+    again = w.stage('C', 'D', 'gen-a')
+    check('a generation that already has a result is refused (exit 1), its files are not touched', again.rc == 1 and g.f('result.json')['gen'] == 'gen-a')
+    w.install(g, 'D')
+    g2 = w.stage('C', 'D', 'gen-b')
+    check('a stage with nothing to stage says pair stash', g2.result['pair'] == 'stash' and g2.result['gen'] == 'gen-b' and not g2.staged)
+
+    # bootstrap is resumable per seat: a killed stage keeps the seats it finished, the next run reads only the rest, and only a complete scan proposes state
+    w = World(fresh())
+    for nm in 'ABCD':
+        w.seat(nm, 'a' + nm.lower(), [])
+        w.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
+    w.set_pins('A', ['local_a1'])
+    reads = []
+    real_read, boom = SS.read_pins, [True]
+
+    def counting(ls, idb):
+        reads.append(ls)
+        if boom[0] and len(reads) == 3:
+            raise KeyboardInterrupt('killed at the deadline')
+        return real_read(ls, idb)
+    SS.read_pins = counting
+    try:
+        try:
+            w.stage('B', 'D', 'gb1')
+        except KeyboardInterrupt:
+            pass
+        gdir = os.path.join(w.seats, SS.WORK, 'gb1')
+        boot = json.load(open(os.path.join(w.seats, SS.BOOT)))
+        check('killed bootstrap: no state proposed, no result; the seats it finished are cached', not os.path.exists(os.path.join(gdir, 'state.json')) and not os.path.exists(os.path.join(gdir, 'result.json'))
+              and sorted(boot['seats']) == ['A', 'B'] and all('pins' in v for v in boot['seats'].values()), str(boot['seats'].keys()))
+        boom[0] = False
+        del reads[:]
+        g = w.stage('B', 'D', 'gb2')
+        check('the next run reads only the seats that were not finished', len([r for r in reads if SS.WORK not in r]) == 2 and g.rc == 0 and g.f('state.json')['pins'] == {'cli1': True} and g.pins() == ['local_d1'], str(len(reads)) + g.out)
+        w.install(g, 'D')
+        w.set_pins('A', [])                      # a seat's databases changed: its cache entry no longer matches (fingerprint), it is re-read
+        os.unlink(os.path.join(w.seats, SS.STATE))
+        del reads[:]
+        w.stage('B', 'D', 'gb3')
+        rs_ = sorted(os.path.basename(os.path.dirname(os.path.dirname(r))) for r in reads if SS.WORK not in r)
+        check('a seat whose databases changed is re-read (A edited, D reinstalled); unchanged ones come from the cache', rs_ == ['A', 'D'], str(rs_))
+    finally:
+        SS.read_pins = real_read
+    w.state({'cli1': True})
+    w.stage('B', 'D', 'gb4')
+    check('once a state exists the bootstrap cache is dropped', not os.path.exists(os.path.join(w.seats, SS.BOOT)))
+
     # dry run writes nothing and reports
     w = two(fresh())
     w.state({'cli1': True})
