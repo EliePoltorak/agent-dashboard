@@ -197,9 +197,21 @@ def load_state(path):
         if not isinstance(j, dict) or j.get('version') != STATE_VERSION or not isinstance(j.get('pins'), dict) \
                 or not all(isinstance(v, bool) for v in j['pins'].values()):
             raise ValueError('unknown shape')
+        if 'consumed' in j and not (isinstance(j['consumed'], dict) and all(isinstance(k, str) and isinstance(v, str) for k, v in j['consumed'].items())):
+            raise ValueError('unknown shape of the consumed record')
         return j
     except (OSError, ValueError) as e:
         raise Skip('the sidebar state file is unreadable (%s)' % e)
+
+
+def checkpoint_entries(obj):
+    """The per-activation entries of a departure checkpoint: {"entries": [{baseline, created}, ...]}, oldest first; the older single {baseline, created}
+    form is one entry; anything else (None = unreadable) is None."""
+    if isinstance(obj, dict) and isinstance(obj.get('entries'), list):
+        return obj['entries']
+    if isinstance(obj, dict) and 'baseline' in obj:
+        return [obj]
+    return None
 
 
 def departure_changes(view, base_pins, cur_pins, state_pins):
@@ -254,17 +266,23 @@ class Plan:
         self.target_pins = None      # Pins of the target's stash
 
 
-def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
+def _consumed(acked, plan):
+    c = dict(acked or {})
+    c.update({s: sha for s, sha in plan.consumed})
+    return c
+
+
+def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen, acked=None):
     """The whole decision, from already-read inputs.
-    seats {seat: acct}; views {seat: View}; state dict|None; checkpoints {seat: (obj|None, sha256)}; stash_pins {seat: Pins};
-    -> Plan."""
+    seats {seat: acct}; views {seat: View}; state dict|None; checkpoints {seat: (entries|None, sha256)}; stash_pins {seat: Pins}; acked {seat: sha256}
+    already acknowledged by the state; -> Plan. plan.state.consumed = the acknowledgement of every checkpoint read here plus the still-present older ones."""
     plan = Plan()
     tview = views[target]
     state_pins = dict(state['pins']) if state else {}
     pins = dict(state_pins)
     order = [s for s in sorted(checkpoints) if s != leaving] + ([leaving] if leaving in checkpoints else [])
     for s in order:
-        chk, sha = checkpoints[s]
+        entries, sha = checkpoints[s]
         plan.consumed.append((s, sha))
         if state is None:
             continue                                       # bootstrap reads the stashes directly, below
@@ -273,14 +291,22 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
             plan.not_synced_seats.append(s)
             plan.not_synced.append('edits made on %s were not synced: %s; redo them' % (s, sp.why if sp else 'its stash is missing'))
             continue
-        why = check_departure(chk, sp)
-        if why:
+        if entries is None:
             plan.not_synced_seats.append(s)
-            plan.not_synced.append('edits made on %s were not synced: %s; redo them' % (s, why))
+            plan.not_synced.append('edits made on %s were not synced: its departure record is unreadable; redo them' % s)
             continue
-        ch = departure_changes(views[s], set(chk['baseline']['pins']), set(sp.pins), state_pins)
-        pins.update(ch)
-        state_pins.update(ch)
+        bad = []
+        for e in entries:                  # one entry per activation, oldest first; each is read against ITS OWN baseline and install time
+            why = check_departure(e, sp)
+            if why:
+                bad.append(why)
+                continue
+            ch = departure_changes(views[s], set(e['baseline']['pins']), set(sp.pins), state_pins)
+            pins.update(ch)
+            state_pins.update(ch)
+        if bad:
+            plan.not_synced_seats.append(s)
+            plan.not_synced.append('edits made on %s were not synced: %s; redo them' % (s, '; '.join(sorted(set(bad)))))
     if state is None:                                      # bootstrap: each cli's pin state from every readable stash; pinned wins
         for s in sorted(seats):
             sp = stash_pins.get(s)
@@ -295,7 +321,7 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
     plan.target_pins = tp
     if tp is None or not tp.ok:
         plan.skips.append('the target seat %s: %s' % (target, tp.why if tp else 'no stash'))
-        plan.state = {'version': STATE_VERSION, 'gen': gen, 'pins': pins}
+        plan.state = {'version': STATE_VERSION, 'gen': gen, 'pins': pins, 'consumed': _consumed(acked, plan)}
         return plan
     cur = list(tp.pins)
     new = list(cur)
@@ -320,7 +346,7 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
     plan.no_copy_items = sorted((cli, titles.get(cli, cli)) for cli, want in pins.items() if want and cli not in tview.by_cli)
     plan.no_copy = len(plan.no_copy_items)
     plan.old_list, plan.new_list = cur, new
-    plan.state = {'version': STATE_VERSION, 'gen': gen, 'pins': pins}
+    plan.state = {'version': STATE_VERSION, 'gen': gen, 'pins': pins, 'consumed': _consumed(acked, plan)}
     return plan
 
 
@@ -329,8 +355,8 @@ def compute(seats, views, state, checkpoints, stash_pins, leaving, target, gen):
 class Lock:
     """Context manager: a file created with O_CREAT|O_EXCL (O_TEMPORARY where it exists: deleted when the handle closes, even on a kill)."""
 
-    def __init__(self, path, wait=20):
-        self.path, self.wait, self.fd = path, wait, None
+    def __init__(self, path, wait=20, why='another sidebar sync is running'):
+        self.path, self.wait, self.fd, self.why = path, wait, None, why
 
     def __enter__(self):
         end = time.time() + self.wait
@@ -340,7 +366,7 @@ class Lock:
                 return self
             except FileExistsError:
                 if time.time() >= end:
-                    raise Skip('another sidebar sync is running')
+                    raise Skip(self.why)
                 time.sleep(0.5)
             except OSError as e:
                 raise Skip('cannot take the sidebar sync lock (%s)' % e)
@@ -470,19 +496,23 @@ def cached_pins(prog, seat, dirs):
     return pins
 
 
-def gather(seats_root, app_dir, seats, target, bootstrap, extra=None, prog=None, leaving='', known=None):
+def gather(seats_root, app_dir, seats, target, bootstrap, extra=None, prog=None, leaving='', known=None, acked=None):
     """views, stash pins and checkpoints. Pins and records are read only for the seats the decision needs: the target and every seat with a
     pending departure, or every seat when there is no state yet (bootstrap). `extra` = {seat: (ls_dir, idb_dir)} replaces a seat's stash
-    dirs (dry run's live snapshot). `known` = {seat: Pins} already read by this stage (the target's, read first): not read again."""
+    dirs (dry run's live snapshot). `known` = {seat: Pins} already read by this stage (the target's, read first): not read again. `acked` = the state's
+    {seat: sha256} of checkpoints an earlier switch consumed: a checkpoint file still holding exactly that content is not read again."""
     views, stash, chks = {}, {}, {}
     for s in seats:
         d = os.path.join(seats_root, s)
         cp = os.path.join(d, DEPARTURE)
         if os.path.exists(cp):
+            sha = sha256_file(cp)
+            if (acked or {}).get(s) == sha:
+                continue                                     # consumed by a verified switch earlier; the file is only waiting to be deleted
             try:
-                chks[s] = (jread(cp), sha256_file(cp))
+                chks[s] = (checkpoint_entries(jread(cp)), sha)
             except (OSError, ValueError):
-                chks[s] = (None, sha256_file(cp))
+                chks[s] = (None, sha)
     for s, acct in seats.items():
         if s == leaving and not (bootstrap or s == target or s in chks or s in (extra or {})):
             views[s] = cached_view(prog, app_dir, s, acct) if prog is not None else read_view(app_dir, acct)      # records only: the report names its pins
@@ -616,21 +646,25 @@ def run_stage(a):
         # FIRST, before anything that can Skip, wait or run long: the stash pair's baseline and its config outcome. They need only the target's own pin
         # list (read once here and reused below), no records and no locks, so a stash-pair install gets a valid baseline whatever happens later,
         # even when this stage is Skipped or killed (the rotator reads stash-result.json for exactly that case).
-        tp = read_pins(*seat_dirs(os.path.join(seats_root, a.target)))
+        bootp = os.path.join(seats_root, BOOT)
+        prog = Progress(bootp) if not os.path.exists(os.path.join(seats_root, STATE)) else None       # the cache only serves a bootstrap
+        tdirs = seat_dirs(os.path.join(seats_root, a.target))
+        tp = cached_pins(prog, a.target, tdirs) if prog is not None else read_pins(*tdirs)
+        if prog is not None:
+            prog.save()                 # the target is recorded the moment it is read: a stage that dies later still made progress
         write_text(os.path.join(gdir, 'baseline-stash.json'), jdump(baseline_obj(gen, tp.pins, tp.manifest) if tp.ok else {'valid': False}))
         stash_cfg = (prepare_config(app_dir, tp.pins, gdir, 'config-stash.json', 'stash') if tp.ok else 'refused: the target seat was not read', 'stash')
         config_outcome, config_pair = stash_cfg
         write_text(os.path.join(gdir, 'stash-result.json'), jdump({'target': a.target, 'gen': gen, 'config': stash_cfg[0], 'config_pair': 'stash'}))
         with Lock(os.path.join(seats_root, SYNC_LOCK)), HistLock(os.path.join(seats_root, HIST_LOCK)):
             state = load_state(os.path.join(seats_root, STATE))
-            bootp = os.path.join(seats_root, BOOT)
             if state is not None and os.path.exists(bootp):         # the progress cache only serves a bootstrap
                 try:
                     os.unlink(bootp)
                 except OSError:
                     pass
-            views, stash, chks = gather(seats_root, app_dir, seats, a.target, state is None, prog=Progress(bootp) if state is None else None, leaving=a.leaving, known={a.target: tp})
-            plan = compute(seats, views, state, chks, stash, a.leaving, a.target, gen)
+            views, stash, chks = gather(seats_root, app_dir, seats, a.target, state is None, prog=prog if state is None else None, leaving=a.leaving, known={a.target: tp}, acked=(state or {}).get('consumed'))
+            plan = compute(seats, views, state, chks, stash, a.leaving, a.target, gen, (state or {}).get('consumed'))
             write_text(os.path.join(gdir, 'state.json'), jdump(plan.state))
             write_text(os.path.join(gdir, 'consumed.txt'), ''.join('%s\t%s\n' % c for c in plan.consumed))
             n = len(plan.adds) + len(plan.removes)
@@ -732,16 +766,15 @@ def run_dry(a):
                 print('dry run: the live databases could not be copied (%s): the departure is not read' % e)
         with HistLock(os.path.join(a.seats, HIST_LOCK), wait=5):
             state = load_state(os.path.join(a.seats, STATE))
-            views, stash, chks = gather(a.seats, a.app, seats, a.target, state is None, extra=extra, leaving=leaving)
+            views, stash, chks = gather(a.seats, a.app, seats, a.target, state is None, extra=extra, leaving=leaving, acked=(state or {}).get('consumed'))
             if leaving in extra:        # the checkpoint the rotator would write now: its pending baseline if any, else the seat's own
                 sd = os.path.join(a.seats, leaving)
                 try:
-                    pend = chks.get(leaving, (None, ''))[0]
-                    base = pend['baseline'] if isinstance(pend, dict) and 'baseline' in pend else jread(os.path.join(sd, BASELINE))
-                    chks[leaving] = ({'baseline': base, 'created': live_created(a.app)}, 'dry')
+                    pend = chks.get(leaving, ([], ''))[0] or []
+                    chks[leaving] = (list(pend) + [{'baseline': jread(os.path.join(sd, BASELINE)), 'created': live_created(a.app)}], 'dry')
                 except (OSError, ValueError, KeyError):
                     chks[leaving] = (None, 'dry')
-            plan = compute(seats, views, state, chks, stash, leaving, a.target, 'dry')
+            plan = compute(seats, views, state, chks, stash, leaving, a.target, 'dry', (state or {}).get('consumed'))
             sys.stdout.write(report_text(plan, a.target, leaving, dry=True))
             if state is None:
                 print('(no sidebar state yet: the first switch reads every seat\'s pins)')
@@ -847,11 +880,16 @@ def run_forget(a):
         print('forget: %s is not a seat' % a.forget)
         return 1
     d = os.path.join(a.seats, a.forget)
-    write_text(os.path.join(d, BASELINE), jdump({'valid': False}))
     try:
-        os.unlink(os.path.join(d, DEPARTURE))
-    except FileNotFoundError:
-        pass
+        with Lock(os.path.join(a.seats, '.seat-write.lock'), wait=0, why='a seat switch, capture or keep-alive holds the seat lock'):
+            write_text(os.path.join(d, BASELINE), jdump({'valid': False}))
+            try:
+                os.unlink(os.path.join(d, DEPARTURE))
+            except FileNotFoundError:
+                pass
+    except Skip as e:
+        print('forget refused: %s; try again when it has finished' % e)
+        return 1
     print('forgot the sidebar baseline of seat %s (its next departure contributes nothing; its pins sync again after the next switch in)' % a.forget)
     return 0
 

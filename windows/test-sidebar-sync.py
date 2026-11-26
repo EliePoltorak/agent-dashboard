@@ -279,7 +279,7 @@ class World:
         g = os.path.join(self.seats, SS.WORK, gen)
         return Gen(g, rc, out.getvalue())
 
-    def install(self, gen, target):
+    def install(self, gen, target, delete=True):
         """What the rotator does after a good stage: the staged pair (if any) replaces the seat's dirs, the baseline and state are published,
         consumed checkpoints removed."""
         g = gen.dir
@@ -293,7 +293,7 @@ class World:
             shutil.copy(os.path.join(g, 'baseline-stash.json'), os.path.join(d, SS.BASELINE))
         if os.path.exists(os.path.join(g, 'state.json')):
             shutil.copy(os.path.join(g, 'state.json'), os.path.join(self.seats, SS.STATE))
-        if os.path.exists(os.path.join(g, 'consumed.txt')):
+        if delete and os.path.exists(os.path.join(g, 'consumed.txt')):
             for line in open(os.path.join(g, 'consumed.txt')).read().splitlines():
                 s, h = line.split('\t')
                 p = os.path.join(self.seats, s, SS.DEPARTURE)
@@ -666,11 +666,11 @@ def test_logic(tmp):
         gdir = os.path.join(w.seats, SS.WORK, 'gb1')
         boot = json.load(open(os.path.join(w.seats, SS.BOOT)))
         check('killed bootstrap: no state proposed, no result; the seats it finished are cached (pins and records), the stash baseline was already written', not os.path.exists(os.path.join(gdir, 'state.json')) and not os.path.exists(os.path.join(gdir, 'result.json'))
-              and sorted(boot['seats']) == ['A', 'B'] and all('pins' in v and 'view' in v for v in boot['seats'].values()) and os.path.exists(os.path.join(gdir, 'baseline-stash.json')), str(boot['seats'].keys()))
+              and sorted(boot['seats']) == ['A', 'B', 'D'] and all('pins' in v for v in boot['seats'].values()) and os.path.exists(os.path.join(gdir, 'baseline-stash.json')), str(boot['seats'].keys()))
         boom[0] = False
         del reads[:]
         g = w.stage('B', 'D', 'gb2')
-        check('the next run reads only the seats that were not finished', len([r for r in reads if SS.WORK not in r]) == 2 and g.rc == 0 and g.f('state.json')['pins'] == {'cli1': True} and g.pins() == ['local_d1'], str(len(reads)) + g.out)
+        check('the next run reads only the seats that were not finished (the target comes from the cache too)', len([r for r in reads if SS.WORK not in r]) == 1 and g.rc == 0 and g.f('state.json')['pins'] == {'cli1': True} and g.pins() == ['local_d1'], str(len(reads)) + g.out)
         w.install(g, 'D')
         w.set_pins('A', [])                      # a seat's databases changed: its cache entry no longer matches (fingerprint), it is re-read
         os.unlink(os.path.join(w.seats, SS.STATE))
@@ -705,6 +705,98 @@ def test_logic(tmp):
     w.state({'cli1': True})
     w.stage('B', 'D', 'gb4')
     check('once a state exists the bootstrap cache is dropped', not os.path.exists(os.path.join(w.seats, SS.BOOT)))
+
+    # ---- r4: departure evidence by activation; consumption acknowledged inside the state; no stale pin after a refused switch
+    w = two(fresh())
+    w.state({'cli1': False})
+    b = w.baseline('C', [])
+    w.set_pins('C', ['local_c1'])
+    w.checkpoint('C', b)
+    g = w.stage('C', 'D', 'ga1')                       # the switch is then REFUSED: nothing is promoted, the checkpoint stays
+    check('a stage proposes the state only as a candidate in its gen dir: the published state and the checkpoint are untouched',
+          g.f('state.json')['pins'] == {'cli1': True} and json.load(open(os.path.join(w.seats, SS.STATE)))['pins'] == {'cli1': False} and os.path.exists(os.path.join(w.seats, 'C', SS.DEPARTURE)))
+    w.set_pins('C', [])                                # the user unpins it again on the original seat
+    w.checkpoint('C', b)
+    g = w.stage('C', 'D', 'ga2')                       # the retry
+    check('refused switch, then the unpin on the original seat, then the retry: no stale pin', g.f('state.json')['pins'] == {'cli1': False} and g.result['status'] == 'nothing', str(g.f('state.json')))
+
+    # the acknowledgement lives in the state: a checkpoint file left behind after a verified promotion is not applied again
+    w = two(fresh())
+    w.state({'cli1': False})
+    w.checkpoint('C', w.baseline('C', []))
+    w.set_pins('C', ['local_c1'])
+    g = w.stage('C', 'D', 'gk1')
+    ack = g.f('state.json')['consumed']
+    check('the candidate state acknowledges exactly the checkpoint it consumed (by content hash)', list(ack) == ['C'] and ack['C'] == SS.sha256_file(os.path.join(w.seats, 'C', SS.DEPARTURE)), str(ack))
+    w.install(g, 'D', delete=False)                    # promoted, but the file deletion did not happen (a crash between the two steps)
+    w.set_pins('C', [])
+    g = w.stage('C', 'D', 'gk2')
+    check('a consumed checkpoint that is still on disk is not read again (no double application)', g.f('consumed.txt') == '' and g.f('state.json')['pins'] == {'cli1': True}, g.f('consumed.txt') + str(g.f('state.json')))
+
+    # two consecutive staging failures, then back: the older activation's edits are not lost
+    w = World(fresh())
+    w.seat('A', 'aa', [])
+    w.seat('B', 'ab', [])
+    for nm, ac in (('a', 'aa'), ('b', 'ab')):
+        w.rec(ac, 'local_%s1' % nm, 'cli1')
+        w.rec(ac, 'local_%s2' % nm, 'cli2')
+    w.state({'cli1': False, 'cli2': False})
+    b1 = w.baseline('A', [])                                              # activation 1 of A (created 111/222)
+    b2 = dict(w.baseline('A', ['local_a1'], gen='g2'), created={'ls': 333, 'idb': 444})   # activation 2: the stash pair re-installed, with its own install time
+    w.set_pins('A', ['local_a1', 'local_a2'])                             # cli1 pinned during activation 1, cli2 during activation 2
+    e1 = {'baseline': b1, 'created': {'ls': 111, 'idb': 222}}
+    e2 = {'baseline': b2, 'created': {'ls': 333, 'idb': 444}}
+    json.dump({'entries': [e1, e2]}, open(os.path.join(w.seats, 'A', SS.DEPARTURE), 'w'))
+    g = w.stage('A', 'B', 'gt1')
+    check('two activations without a published stage: BOTH entries are read, each against its own baseline and install time; no edit is lost or rejected',
+          g.f('state.json')['pins'] == {'cli1': True, 'cli2': True} and not g.f('report.txt').count('not synced'), str(g.f('state.json')) + g.f('report.txt'))
+    old_form = {'baseline': b2, 'created': {'ls': 111, 'idb': 222}}       # the old refresh: the old baseline with the NEW install time was rejected
+    json.dump(old_form, open(os.path.join(w.seats, 'A', SS.DEPARTURE), 'w'))
+    g = w.stage('A', 'B', 'gt2')
+    check('an entry whose own install time does not match its baseline is reported not synced', 'not synced' in g.f('report.txt') and g.result['not_synced'] == ['A'], g.f('report.txt'))
+
+    # item 3: a stage that dies after the target was read still recorded the target in the progress file
+    w = World(fresh())
+    for nm in 'ABCD':
+        w.seat(nm, 'a' + nm.lower(), [])
+        w.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
+    reads3, real3, die = [], SS.read_pins, [True]
+
+    def dying(ls, idb):
+        reads3.append(ls)
+        if die[0] and len(reads3) == 2:
+            raise KeyboardInterrupt('killed at the deadline')
+        return real3(ls, idb)
+    SS.read_pins = dying
+    try:
+        try:
+            w.stage('A', 'D', 'gp1')
+        except KeyboardInterrupt:
+            pass
+        boot3 = json.load(open(os.path.join(w.seats, SS.BOOT)))
+        check('a stage killed right after the target: the target is already in the progress file (decoded pins)', 'D' in boot3['seats'] and 'pins' in boot3['seats']['D'], str(boot3['seats'].keys()))
+        die[0] = False
+        del reads3[:]
+        w.stage('A', 'D', 'gp2')
+        check('the next attempt does not read the target again (it comes from the cache)', not any(os.sep + 'D' + os.sep in r for r in reads3 if SS.WORK not in r), str(reads3))
+    finally:
+        SS.read_pins = real3
+
+    # item 4: --forget takes the seat lock and refuses when it is held
+    w = two(fresh())
+    w.baseline('C', ['x'])
+    lk = os.open(os.path.join(w.seats, '.seat-write.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            rc = SS.main(['--forget', 'C', '--seats', w.seats, '--app', w.app])
+        check('--forget refuses while a switch holds the seat lock and changes nothing', rc == 1 and 'refused' in out.getvalue() and json.load(open(os.path.join(w.seats, 'C', SS.BASELINE)))['valid'] is True, out.getvalue())
+    finally:
+        os.close(lk)
+        os.unlink(os.path.join(w.seats, '.seat-write.lock'))
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = SS.main(['--forget', 'C', '--seats', w.seats, '--app', w.app])
+    check('--forget works when the lock is free and releases it', rc == 0 and not os.path.exists(os.path.join(w.seats, '.seat-write.lock')))
 
     # dry run writes nothing and reports
     w = two(fresh())
@@ -743,7 +835,15 @@ def test_logic(tmp):
     check('verify: the baseline carries a different gen -> superseded', 'superseded' in open(os.path.join(w.seats, SS.WORK, 'other', 'verify.txt')).read())
 
 
+def idle_priority():
+    """Owner rule 10e: the test and every child it starts run at IDLE priority."""
+    if os.name == 'nt':
+        import ctypes
+        ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), 0x00000040)
+
+
 def main():
+    idle_priority()
     tmp = tempfile.mkdtemp(prefix='sidebar-sync-test-')
     try:
         test_ldb(tmp)
