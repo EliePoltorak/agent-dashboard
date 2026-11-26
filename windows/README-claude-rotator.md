@@ -550,13 +550,17 @@ gives every copy a new one), so pins are matched through `cliSessionId`; a pin g
 Only the staging copy is ever written; the seat's own stash is never modified, and on any failure the stash's own pair goes in, as before.
 The result is the last line of the switch output, which the dashboard shows: `Sidebar: synced N pins.`, `Sidebar: nothing to sync.` or
 `Sidebar: partial (<reason>) - see <report>` (the pins were installed but the shared config was refused or could not be updated, so this
-activation's baseline is left invalid and its departure is not read as your edits) or `Sidebar: skipped (<reason>) - see <report>`.
+activation's baseline is left invalid and its departure is not read as your edits) or `Sidebar: skipped (<reason>) - see <report>`. When a departure could not be read the line says so (`...; edits on D not synced - see <report>`).
 
 **Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent), per seat `sidebar-baseline.json`
-(its pins as installed; valid only after a successful install), `sidebar-installed.json` and `sidebar-departure.json` (written when you leave a
-seat, consumed by the next stage), `.sidebar-sync-bootstrap.json` (the first scan's per-seat progress, so a scan that times out resumes instead of restarting),
+(its pins as installed, with the creation time of the databases just installed; valid only after a successful install) and `sidebar-departure.json`
+(written when you leave a seat, consumed by the next stage), `.sidebar-sync-bootstrap.json` (the first scan's per-seat progress, so a scan that times out resumes instead of restarting),
 `.sidebar-sync-work\<gen>\` (one generation per switch, named `<stamp>-<pid/random>`, allocated under the seat lock; the staging copy, `report.txt`, `verify.txt`; newest 10 kept) and
 `.sidebar-sync-backups\<gen>\` (the config as it was before the rotator replaced it; newest 10 kept).
+
+**The stash pair comes first.** The stage's very first step writes the stash pair's own baseline, its config outcome (`config-stash.json`) and
+`stash-result.json`, before anything that can wait, skip or run long. A stage that is skipped, times out or is killed still leaves the entered seat
+with a valid baseline, so what you change there is read at its departure, instead of being forfeited and then reversed at the next entry.
 
 **Baseline order.** The stage reports an explicit config outcome for the pair that is installed (`match`, `prepared` or `refused: <why>`). The rotator
 writes the target's candidate baseline with `valid:false`, settles the config (commits it when `prepared`), and only when the outcome is `match` or
@@ -564,17 +568,20 @@ committed rewrites the baseline `valid:true`; an interruption anywhere leaves it
 
 **One lock.** `--switch <seat> --relaunch` takes the seat lock before the app is closed and keeps it through the switch and the wait for the
 app to start (the history sync runs inside it too); a switch waiting behind it re-checks that the app is closed and that the target's login is
-the right account before it touches anything. `--capture` does its own app-closed, live-account and duplicate-owner checks inside its lock for the
+the right account before it touches anything. Before it launches the app, `--relaunch` also takes the history sync's own lock (`.sync-history.lock`, waiting up to 30 s) and holds it until the app
+is detected; if a sync still holds it, the app is not opened under it: the last line says `reopening deferred: history sync busy` and the exit code is 3.
+`--capture` does its own app-closed, live-account and duplicate-owner checks inside its lock for the
 same reason. Under `--relaunch` the history sync runs `-Quiet` (it skips at once if another run holds its lock; the scheduled task covers it) and the
-box heartbeat is published after the app is up and the lock is released.
+box heartbeat is started after the app is up and the lock is released, off the critical path: the `Claude app-seat heartbeat` scheduled task when it
+exists, else the publisher detached with its output in `.app-seat-publish.out`. A plain `--switch` publishes synchronously, as before.
 
 **The check after launch.** After every switch with a valid baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
 waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences - see <report>` on
 the next switch's last line); it changes nothing.
 
 **Limits you can run into.**
-- *Reach.* A pin can only go on a session the entered seat already has a record for. The report counts the rest (`no copy on <seat>`); they get
-  their pin at the seat's next switch-in, once the history sync has copied them.
+- *Reach.* A pin can only go on a session the entered seat already has a record for. The report names the rest (`no copy on <seat>`: pinned once
+  this seat has a copy); the history sync runs after the stage, so a session started since its last run arrives a switch later.
 - *Revert risk.* If the app drops a pin at launch (the check shows `DIFFERS`), the drop is read at the next departure as an unpin and spreads.
   Pins survived a relaunch in the 2026-11-24 test; a pin made within 75 s of launch can show up as a difference too.
 - *Edits that cannot be trusted are not synced.* A seat whose sidebar databases were recreated (or whose baseline is invalid or missing)
