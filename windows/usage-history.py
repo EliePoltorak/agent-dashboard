@@ -5686,6 +5686,16 @@ def selftest():
         sb_ = "Relaunched the Claude app on seat D. Sidebar: skipped (the stage did not finish in 60 s) - see C:\\Users\\User\\.claude-app-seats\\.sidebar-sync-work\\20261125-101010\\report.txt"
         assert switch_outcome(0, "Switched.\r\n" + sb_ + "\r\n")["text"] == "Done: " + sb_ and len("Done: " + sb_) < 200
         assert switch_outcome(0, sb_ + "\r\n  indented detail\r\n")["text"] == "Done: " + sb_
+        # a compound line as the rotator now writes it: the notice that needs attention FIRST, no report path in it (the path is on an indented line before it)
+        rp_ = "  sidebar report: C:\\Users\\User\\.claude-app-seats\\.sidebar-sync-work\\20261126-101010-1a2b3c4d\\report.txt"
+        cl_ = "Sidebar: edits on C not synced; skipped (the staged copy could not be installed; seat D's own pins were used). Relaunched the Claude app on seat D."
+        o_ = switch_outcome(0, "Switched the Claude app login to profile 'D'.\r\n" + rp_ + "\r\n" + cl_ + "\r\n")
+        assert o_ == {"outcome": "ok", "text": "Done: " + cl_} and len(o_["text"]) < 200 and "edits on C not synced" in o_["text"], o_
+        # the worst case: a long partial reason that the cap cuts. The notice is at the START, so it survives; nothing actionable sits behind a path
+        long_ = ("Sidebar: edits on C, E not synced; partial (config not changed (refused: config not changed ([Errno 2] No such file or directory: "
+                 "'C:\\Users\\User\\AppData\\Roaming\\Claude\\claude_desktop_config.json'))) last check: 3 differences Relaunched the Claude app on seat D.")
+        o_ = switch_outcome(0, rp_ + "\r\n" + long_ + "\r\n")
+        assert len(long_) > 200 and o_["text"].startswith("Done: Sidebar: edits on C, E not synced; partial") and len(o_["text"]) <= 206, o_
         # Store.switch: runs the argv for the action, logs without tokens, rebuilds (which re-reads in_use)
         globals()["APPLOG"] = os.path.join(ld, "log.txt")
         fs = Store.__new__(Store)
