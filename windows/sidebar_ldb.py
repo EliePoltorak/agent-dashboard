@@ -475,33 +475,39 @@ def idb_pin_key(db):
     return hits[0] if len(hits) == 1 else None
 
 
-def idb_json(value):
-    """The JSON text inside a V8-serialized one-byte string IndexedDB value (after the version varint and the envelope)."""
-    i = value.find(b'\xff\x10"')
+V8_VERSIONS = (0x0f, 0x10)       # the wire-format versions seen on real seats (seat A writes 0x0f, B-F 0x10); any other is refused by name
+
+
+def _v8_tail(value):
+    """-> (i, version, j): the V8 one-byte string that is the whole tail of `value` starts after `\\xff <version> "` at i, its text at j. LdbError (naming
+    an unsupported version) otherwise."""
+    i = value.find(b'\xff')
     while i != -1:
-        try:
-            ln, j = varint(value, i + 3)
-        except LdbError:
-            return None
-        if j + ln == len(value):
-            return value[j:].decode('latin-1')
-        i = value.find(b'\xff\x10"', i + 1)
-    return None
+        if i + 2 < len(value) and value[i + 2] == 0x22:
+            try:
+                ln, j = varint(value, i + 3)
+            except LdbError:
+                ln = j = None
+            if j is not None and j + ln == len(value):
+                if value[i + 1] not in V8_VERSIONS:
+                    raise LdbError('IndexedDB value uses V8 wire version 0x%02x, which is not supported (0x%s are)' % (value[i + 1], ', 0x'.join('%02x' % v for v in V8_VERSIONS)))
+                return i, value[i + 1], j
+        i = value.find(b'\xff', i + 1)
+    raise LdbError('IndexedDB value is not a one-byte V8 string')
+
+
+def idb_json(value):
+    """The JSON text inside a V8-serialized one-byte string IndexedDB value (after the version varint and the envelope). LdbError if it is not one."""
+    i, ver, j = _v8_tail(value)
+    return value[j:].decode('latin-1')
 
 
 def idb_replace(old, new_json):
-    """`old` with its V8 one-byte string replaced by new_json (ASCII only); key, version prefix and envelope kept. LdbError otherwise."""
+    """`old` with its V8 one-byte string replaced by new_json (ASCII only); key, version prefix, envelope and the string's own header (including its
+    wire version byte) kept. LdbError otherwise."""
     try:
         b = new_json.encode('ascii')
     except UnicodeEncodeError:
         raise LdbError('non-ASCII text in an IndexedDB value: not staged')
-    i = old.find(b'\xff\x10"')
-    while i != -1:
-        try:
-            ln, j = varint(old, i + 3)
-        except LdbError:
-            raise LdbError('IndexedDB value is not a V8 string')
-        if j + ln == len(old):
-            return old[:i + 3] + uvarint(len(b)) + b
-        i = old.find(b'\xff\x10"', i + 1)
-    raise LdbError('IndexedDB value is not a one-byte V8 string')
+    i, ver, j = _v8_tail(old)
+    return old[:i + 3] + uvarint(len(b)) + b

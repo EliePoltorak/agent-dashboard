@@ -258,16 +258,15 @@ class World:
     def drop_rec(self, acct, sid, org=ORG):
         os.unlink(os.path.join(self.app, 'claude-code-sessions', acct, org, sid + '.json'))
 
-    def baseline(self, name, pins, manifest=(1, 1), valid=True, gen='g0'):
+    def baseline(self, name, pins, manifest=(1, 1), valid=True, gen='g0', created=True):
         b = {'valid': True, 'gen': gen, 'pins': pins, 'manifest': {'ls': manifest[0], 'idb': manifest[1]}} if valid else {'valid': False}
+        if valid and created:
+            b['created'] = {'ls': 111, 'idb': 222}          # CreationTime of the live databases right after the install (written by the rotator)
         json.dump(b, open(os.path.join(self.seats, name, SS.BASELINE), 'w'))
         return b
 
-    def checkpoint(self, name, baseline, created=None, installed=None, no_installed=False):
-        inst = {'created': {'ls': 111, 'idb': 222}} if installed is None else installed
+    def checkpoint(self, name, baseline, created=None):
         c = {'baseline': baseline, 'created': created or {'ls': 111, 'idb': 222}}
-        if not no_installed:
-            c['installed'] = inst
         json.dump(c, open(os.path.join(self.seats, name, SS.DEPARTURE), 'w'))
 
     def state(self, pins):
@@ -341,6 +340,24 @@ def two(tmp_root):
     return w
 
 
+def test_v8_versions():
+    js = '{"state":{"starredIds":["local_x"]},"version":0,"updatedAt":1786903504263}'
+    hdr_a = bytes.fromhex('05ff15fe' + '00' * 12 + 'ff0f22')                      # seat A's real header: version 0x0f
+    val_a = hdr_a + L.uvarint(len(js)) + js.encode()
+    check('V8 version 0x0f (seat A) is read', L.idb_json(val_a) == js)
+    new_a = L.idb_replace(val_a, js.replace('local_x', 'local_yy'))
+    check('V8 version 0x0f replace keeps the original header bytes, only the string changes', new_a.startswith(hdr_a) and L.idb_json(new_a).count('local_yy') == 1 and new_a[:len(hdr_a)] == hdr_a)
+    val_b = bytes.fromhex('c84bff15fe' + '00' * 12 + 'ff1022') + L.uvarint(len(js)) + js.encode()
+    check('V8 version 0x10 (seats B-F) is still read and replaced', L.idb_json(val_b) == js and L.idb_replace(val_b, '{}').startswith(bytes.fromhex('c84bff15fe' + '00' * 12 + 'ff1022')))
+    val_x = bytes.fromhex('05ff15fe' + '00' * 12 + 'ff1122') + L.uvarint(len(js)) + js.encode()
+    try:
+        L.idb_json(val_x)
+        why = ''
+    except L.LdbError as e:
+        why = str(e)
+    check('any other V8 version is refused and named in the reason (idb_json and idb_replace)', '0x11' in why and raises(lambda: L.idb_replace(val_x, '{}'), L.LdbError), why)
+
+
 def test_logic(tmp):
     n = [0]
 
@@ -377,7 +394,7 @@ def test_logic(tmp):
     check('departure unpin (the last remaining pin) reaches the target; an unmapped foreign pin is kept in both stores', g.staged and g.pins() == ['local_foreign'] and g.f('state.json')['pins'] == {'cli1': False}, str(g.pins()) + g.out)
 
     # invalid / missing / recreated baseline contribute nothing; no resurrection from an old stash
-    cases = [('invalid baseline', dict(valid=False), {}), ('missing installed record', {}, dict(no_installed=True)),
+    cases = [('invalid baseline', dict(valid=False), {}), ('baseline without the install\'s creation time', dict(created=False), {}),
              ('created differs (S78: same manifest number)', {}, dict(created={'ls': 111, 'idb': 999})),
              ('manifest lower than at activation', dict(manifest=(5, 5)), {})]
     for name, bk, ck in cases:
@@ -478,6 +495,46 @@ def test_logic(tmp):
     g = w.stage('C', 'D')
     check('unknown cli: the target keeps its pin and it is recorded as observed intent', g.result['status'] == 'nothing' and g.f('state.json')['pins'] == {'cli1': True})
 
+    # F1a: the stash pair's baseline + config outcome are produced first and kept when the stage is Skipped
+    w = two(fresh())
+    w.set_pins('D', ['local_d1'])
+    open(os.path.join(w.seats, SS.STATE), 'w').write('{broken')
+    cfgp = os.path.join(w.app, 'claude_desktop_config.json')
+    open(cfgp, 'wb').write(json.dumps({'preferences': {'epitaxyPrefs': {'starred-local-code-sessions': ['stale']}}}, indent=2, ensure_ascii=False).encode('utf-8'))
+    g = w.stage('C', 'D', 'gs1')
+    sr = g.f('stash-result.json')
+    check('a Skipped stage still leaves the stash pair\'s baseline (valid, the target\'s own pins), its config outcome and stash-result.json', g.result['status'] == 'skipped' and g.f('baseline-stash.json')['valid'] is True
+          and g.f('baseline-stash.json')['pins'] == ['local_d1'] and sr['target'] == 'D' and sr['gen'] == 'gs1' and sr['config'] == 'prepared' and g.f('config-stash.json')['pair'] == 'stash'
+          and g.result['config'] == 'prepared' and g.result['config_pair'] == 'stash' and g.f('state.json') is None and g.f('consumed.txt') is None, str(g.result) + str(sr))
+
+    # F1c: a departure that could not be read is on the line the dashboard shows
+    w = two(fresh())
+    w.state({'cli1': False})
+    w.set_pins('C', ['local_c1'])
+    w.checkpoint('C', w.baseline('C', [], valid=False))
+    g = w.stage('C', 'D', 'gn1')
+    check('a departure that was not synced is on the Sidebar line, not only in report.txt', g.result['not_synced'] == ['C'] and 'Sidebar: nothing to sync; edits on C not synced - see ' in g.out and g.out.strip().endswith('report.txt'), g.out)
+    w.state({'cli1': False})
+    check('summary line forms', SS.summary_line({'status': 'synced', 'n': 2, 'not_synced': ['C', 'E']}, 'R') == 'Sidebar: synced 2 pins; edits on C, E not synced - see R'
+          and SS.summary_line({'status': 'synced', 'n': 1}, 'R') == 'Sidebar: synced 1 pins.')
+
+    # F1b: the target's stash is read ONCE per stage (staging reuses it)
+    w = two(fresh())
+    w.state({'cli1': True})
+    reads = []
+    real_rp = SS.read_pins
+
+    def counting_rp(ls, idb):
+        reads.append(ls)
+        return real_rp(ls, idb)
+    SS.read_pins = counting_rp
+    try:
+        g = w.stage('C', 'D', 'gr1')
+    finally:
+        SS.read_pins = real_rp
+    stash_reads = [r for r in reads if SS.WORK not in r and os.sep + 'D' + os.sep in r]
+    check('the target stash is read once in a staging stage (the staged copy is verified separately)', g.staged and len(stash_reads) == 1, str(reads))
+
     # unreadable state file -> no staging, reported, nothing consumed
     w = two(fresh())
     open(os.path.join(w.seats, SS.STATE), 'w').write('{broken')
@@ -556,7 +613,7 @@ def test_logic(tmp):
     cfg['preferences']['epitaxyPrefs']['starred-local-code-sessions'] = []
     open(cp, 'wb').write(json.dumps(cfg, indent=2, ensure_ascii=False).encode('utf-8'))
     g = w.stage('C', 'D', 'g3')
-    check('no pin change but a stale config: a config-only repair, pair stash', g.f('config.json')['pair'] == 'stash' and not g.staged)
+    check('no pin change but a stale config: a config-only repair, prepared for the stash pair in config-stash.json', g.f('config-stash.json')['pair'] == 'stash' and g.f('config.json') is None and not g.staged and g.result['config'] == 'prepared' and g.result['config_pair'] == 'stash', str(g.result))
     open(cp, 'wb').write(b'{"preferences": {"epitaxyPrefs": {"starred-local-code-sessions": []}}}')
     g = w.stage('C', 'D', 'g4')
     check('a config that does not round-trip byte for byte is never rewritten, and the outcome is an explicit refusal (not an omission)', g.f('config.json') is None and 'config not changed' in g.f('report.txt') and g.result['config'].startswith('refused: config not changed'), str(g.result))
@@ -597,7 +654,7 @@ def test_logic(tmp):
 
     def counting(ls, idb):
         reads.append(ls)
-        if boom[0] and len(reads) == 3:
+        if boom[0] and len(reads) == 4:          # the target's own read comes first, then A, B, and the kill lands on C
             raise KeyboardInterrupt('killed at the deadline')
         return real_read(ls, idb)
     SS.read_pins = counting
@@ -608,8 +665,8 @@ def test_logic(tmp):
             pass
         gdir = os.path.join(w.seats, SS.WORK, 'gb1')
         boot = json.load(open(os.path.join(w.seats, SS.BOOT)))
-        check('killed bootstrap: no state proposed, no result; the seats it finished are cached', not os.path.exists(os.path.join(gdir, 'state.json')) and not os.path.exists(os.path.join(gdir, 'result.json'))
-              and sorted(boot['seats']) == ['A', 'B'] and all('pins' in v for v in boot['seats'].values()), str(boot['seats'].keys()))
+        check('killed bootstrap: no state proposed, no result; the seats it finished are cached (pins and records), the stash baseline was already written', not os.path.exists(os.path.join(gdir, 'state.json')) and not os.path.exists(os.path.join(gdir, 'result.json'))
+              and sorted(boot['seats']) == ['A', 'B'] and all('pins' in v and 'view' in v for v in boot['seats'].values()) and os.path.exists(os.path.join(gdir, 'baseline-stash.json')), str(boot['seats'].keys()))
         boom[0] = False
         del reads[:]
         g = w.stage('B', 'D', 'gb2')
@@ -638,14 +695,13 @@ def test_logic(tmp):
         SS.read_pins = real_read
     # a failed read is never cached
     w2 = World(fresh())
-    w2.seat('A', 'aa', [])
-    w2.seat('B', 'ab', [])
-    w2.rec('aa', 'local_a1', 'cli1')
-    w2.rec('ab', 'local_b1', 'cli1')
+    for nm in 'ABC':
+        w2.seat(nm, 'a' + nm.lower(), [])
+        w2.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
     w2.set_pins('A', ['local_a1'], idb_key=False)                    # A's IndexedDB has no pin state: unreadable
-    w2.stage('B', 'B', 'gc1')
+    w2.stage('B', 'C', 'gc1')
     boot2 = json.load(open(os.path.join(w2.seats, SS.BOOT)))
-    check('a failed read is not cached (only successful reads are), and no record cache exists', 'A' not in boot2['seats'] and 'B' in boot2['seats'] and all(set(v) <= {'pins'} for v in boot2['seats'].values()), str(boot2))
+    check('a failed read is not cached (only successful reads are); records are cached, content-keyed', 'pins' not in boot2['seats']['A'] and 'pins' in boot2['seats']['B'] and 'view' in boot2['seats']['A'], str(boot2['seats'].keys()))
     w.state({'cli1': True})
     w.stage('B', 'D', 'gb4')
     check('once a state exists the bootstrap cache is dropped', not os.path.exists(os.path.join(w.seats, SS.BOOT)))
@@ -691,6 +747,7 @@ def main():
     tmp = tempfile.mkdtemp(prefix='sidebar-sync-test-')
     try:
         test_ldb(tmp)
+        test_v8_versions()
         test_logic(tmp)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
