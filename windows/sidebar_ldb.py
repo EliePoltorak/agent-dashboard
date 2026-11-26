@@ -384,6 +384,47 @@ def read_db(d):
     return {k: v for k, (s, v) in read_snapshot(d).entries.items()}
 
 
+def frame_record(data, pos=0):
+    """The log-file bytes of ONE logical record `data` written at file offset `pos` (32 KB block framing, CRCs masked)."""
+    first, out = True, bytearray()
+    while True:
+        left = BLOCK - pos % BLOCK
+        if left < 7:
+            out += b'\x00' * left
+            pos += left
+            continue
+        cnt = min(len(data), left - 7)
+        last = cnt == len(data)
+        typ = (1 if last else 2) if first else (4 if last else 3)
+        frag = data[:cnt]
+        out += struct.pack('<IHB', mask_crc(crc32c(bytes([typ]) + frag)), cnt, typ) + frag
+        pos += 7 + cnt
+        data = data[cnt:]
+        first = False
+        if last:
+            return bytes(out)
+
+
+def create_db(d, puts):
+    """Create a NEW, minimal leveldb directory `d` holding `puts` [(key, value)] (one log, one batch, no tables): synthetic fixtures for tests, so no real
+    profile data is ever copied. Refuses a directory that already has files."""
+    os.makedirs(d, exist_ok=True)
+    if os.listdir(d):
+        raise LdbError('refusing to create a database in a non-empty directory')
+    batch = struct.pack('<QI', 1, len(puts))
+    for k, v in puts:
+        batch += b'\x01' + uvarint(len(k)) + k + uvarint(len(v)) + v
+    cmp_name = b'leveldb.BytewiseComparator'
+    edit = uvarint(1) + uvarint(len(cmp_name)) + cmp_name + uvarint(2) + uvarint(3) + uvarint(3) + uvarint(4) + uvarint(4) + uvarint(len(puts))
+    with open(os.path.join(d, '000003.log'), 'wb') as f:
+        f.write(frame_record(batch))
+    with open(os.path.join(d, 'MANIFEST-000002'), 'wb') as f:
+        f.write(frame_record(edit))
+    with open(os.path.join(d, 'CURRENT'), 'wb') as f:
+        f.write(b'MANIFEST-000002\n')
+    open(os.path.join(d, 'LOCK'), 'wb').close()
+
+
 # ---- guarded writer (staging copies only) ----------------------------------------------------------------------------------
 
 def append_batch(d, puts):
@@ -407,24 +448,7 @@ def append_batch(d, puts):
     batch = struct.pack('<QI', seq, len(puts))
     for k, v in puts:
         batch += b'\x01' + uvarint(len(k)) + k + uvarint(len(v)) + v
-    size = os.path.getsize(path)
-    pos, data, first, out = size, batch, True, bytearray()
-    while True:
-        left = BLOCK - pos % BLOCK
-        if left < 7:
-            out += b'\x00' * left
-            pos += left
-            continue
-        cnt = min(len(data), left - 7)
-        last = cnt == len(data)
-        typ = (1 if last else 2) if first else (4 if last else 3)
-        frag = data[:cnt]
-        out += struct.pack('<IHB', mask_crc(crc32c(bytes([typ]) + frag)), cnt, typ) + frag
-        pos += 7 + cnt
-        data = data[cnt:]
-        first = False
-        if last:
-            break
+    out = frame_record(batch, os.path.getsize(path))
     with open(path, 'ab') as f:
         f.write(out)
         f.flush()

@@ -201,6 +201,11 @@ def test_ldb(tmp):
     check('a CRC error is a torn tail: reader says not clean, writer refuses', not L.read_snapshot(d).clean and raises(lambda: L.append_batch(d, [(b'k', b'v')]), L.LdbError))
     check('missing live table is an error', raises(lambda: L.read_snapshot(_missing_table(tmp)), L.LdbError))
 
+    d = os.path.join(tmp, 'dbc')            # create_db: synthetic fixtures built with the module's own writer
+    L.create_db(d, [(b'a', b'1'), (b'b', b'2')])
+    L.append_batch(d, [(b'c', b'3')])
+    check('create_db: a new synthetic database reads back, takes an appended batch, and a non-empty directory is refused',
+          L.read_db(d) == {b'a': b'1', b'b': b'2', b'c': b'3'} and raises(lambda: L.create_db(d, [(b'x', b'y')]), L.LdbError))
     # V8 one-byte string replace
     old = b'\xc8K\xff\x15\xfe' + b'\x00' * 12 + b'\xff\x10"' + L.uvarint(3) + b'abc'
     new = L.idb_replace(old, '{"x":' + '1' * 200 + '}')
