@@ -286,10 +286,11 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   '{"valid":true,"gen":"g0","pins":["old"],"manifest":{"ls":1,"idb":1}}' | Set-Content "$sc\.claude-app-seats\C\sidebar-baseline.json"
     $r = Invoke-Scenario $sc "Write-DepartureCheckpoint 'C' (Get-LiveCreation)" @{}
   $cj = Get-Content "$sc\.claude-app-seats\C\sidebar-departure.json" -Raw | ConvertFrom-Json
-  Check 'checkpoint = baseline + created (no separate installed record)' ($cj.baseline.gen -eq 'g0' -and $null -eq $cj.installed -and $cj.created.ls -gt 0 -and $cj.created.idb -gt 0) $r.out
+  Check 'checkpoint = one entry {baseline, created} (no separate installed record)' (@($cj.entries).Count -eq 1 -and $cj.entries[0].baseline.gen -eq 'g0' -and $null -eq $cj.installed -and $cj.entries[0].created.ls -gt 0 -and $cj.entries[0].created.idb -gt 0) $r.out
   '{"valid":false}' | Set-Content "$sc\.claude-app-seats\C\sidebar-baseline.json"
   $r = Invoke-Scenario $sc "Write-DepartureCheckpoint 'C' (Get-LiveCreation)" @{}
-  Check 'an unconsumed checkpoint KEEPS its old baseline when refreshed (S72)' ((Get-Content "$sc\.claude-app-seats\C\sidebar-departure.json" -Raw | ConvertFrom-Json).baseline.gen -eq 'g0') $r.out
+  $cj2 = Get-Content "$sc\.claude-app-seats\C\sidebar-departure.json" -Raw | ConvertFrom-Json
+  Check 'an unconsumed checkpoint KEEPS its older entry (with its own baseline) and adds the new departure as another entry (S72)' (@($cj2.entries).Count -eq 2 -and $cj2.entries[0].baseline.gen -eq 'g0' -and $cj2.entries[1].baseline.valid -eq $false) $r.out
 
   # 3) stash pair when python produced no staged copy; baseline-stash used; config pair mismatch is not committed
   $sc = New-Scenario 's3'; $env:STUB_LOG = Join-Path $sc 'stub.log'

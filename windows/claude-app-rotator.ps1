@@ -289,7 +289,7 @@ function Write-DepartureCheckpoint([string]$seat, $created) {
   for ($i = 0; $i -lt $entries.Count; $i++) {
     $k = Get-CreatedKey $entries[$i]['baseline']
     if ($key) { if ($k -eq $key) { $at = $i } }
-    elseif (-not $k -and $i -eq $entries.Count - 1) { $at = $i }
+    elseif (-not $k -and $entries[$i]['baseline']['valid'] -ne $true -and $i -eq $entries.Count - 1) { $at = $i }      # only an INVALID previous entry collapses; older edits stay in their own entry
   }
   if ($at -ge 0) { $entries[$at] = $entry } else { [void]$entries.Add($entry) }
   Write-JsonAtomic $cp @{ entries = @($entries) }
