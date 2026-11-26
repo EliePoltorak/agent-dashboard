@@ -186,6 +186,7 @@ $SidebarBackups = Join-Path $SeatRoot '.sidebar-sync-backups'
 $SidebarKeep    = 10
 $script:StageTimeoutSec = 60
 $script:StartWaitSec    = 30
+$script:HistoryLockWaitSec = 30     # --relaunch: how long to wait for a running history sync before deferring the reopening
 $script:SeatLockHeld    = $null
 $script:LockOwnedByRelaunch = $false   # --relaunch holds ONE lock from before the app is closed to after it is up again; Invoke-Switch then neither takes nor releases it
 $GenPattern = '^\d{8}-\d{6}(-[0-9a-f]{4,12})?$'
@@ -193,6 +194,36 @@ $script:ProfileIntact   = $true      # after a refusal: is the old login verifie
 $script:SidebarNote     = ''         # 'Sidebar: ...' appended to the last line, which the dashboard shows
 $script:RobocopyRc      = 0
 
+function Enter-HistoryLock([int]$sec) {
+  # The existing .sync-history.lock, opened exactly the way sync-app-history.ps1 opens it (OpenOrCreate, ReadWrite, FileShare.None). Held while the app
+  # is launched, so a history sync cannot be mid-write of archive/pin flags as the app loads them. -> the stream, $null when a sync still holds it after
+  # $sec seconds, or $true when the lock file cannot be opened for any other reason (nothing is running that holds it).
+  $p = Join-Path $SeatRoot '.sync-history.lock'
+  $end = (Get-Date).AddSeconds($sec)
+  while ($true) {
+    try { return [IO.File]::Open($p, 'OpenOrCreate', 'ReadWrite', 'None') }
+    catch [IO.IOException] {
+      if (($_.Exception.HResult -band 0xFFFF) -notin 32, 33) { return $true }
+      if ((Get-Date) -ge $end) { return $null }
+      Start-Sleep -Milliseconds 500
+    }
+    catch { return $true }
+  }
+}
+function Start-AppSeatHeartbeat {
+  # --relaunch only, after the lock is released: the box heartbeat is started OFF the critical path. The existing scheduled task when it is registered;
+  # else the publisher detached through cmd (ShellExecute, no handle inheritance) with its output in a file. Either way this script's last line stays
+  # the relaunch + sidebar result; a missed start waits for the task's own 5-minute run.
+  try {
+    if (Get-ScheduledTask -TaskName 'Claude app-seat heartbeat' -ErrorAction SilentlyContinue) { Start-ScheduledTask -TaskName 'Claude app-seat heartbeat' -ErrorAction Stop; return }
+  } catch {}
+  try {
+    $pub = Join-Path $PSScriptRoot 'app-seat-publish.ps1'
+    if (-not (Test-Path -LiteralPath $pub)) { return }
+    $line = '/d /c "{0} > "{1}" 2>&1"' -f (Join-Args @('pwsh', '-NoProfile', '-File', $pub)), (Join-Path $SeatRoot '.app-seat-publish.out')
+    Start-Process -FilePath cmd.exe -ArgumentList $line -WindowStyle Hidden | Out-Null
+  } catch {}
+}
 function Release-SwitchLock { if (-not $script:LockOwnedByRelaunch) { Release-SeatLock } }
 function New-SwitchGen {
   # One generation per switch, allocated UNDER the seat lock: the second-resolution stamp plus a pid/random suffix, and New-Item (no -Force) fails
@@ -233,7 +264,7 @@ function Get-LiveCreation {
   $o
 }
 function Write-DepartureCheckpoint([string]$seat, $created) {
-  # <seat>\sidebar-departure.json = {baseline, installed, created}, written after a good re-capture. An unconsumed one keeps its OLD baseline:
+  # <seat>\sidebar-departure.json = {baseline, created}, written after a good re-capture (the baseline carries the creation time of the install it belongs to). An unconsumed one keeps its OLD baseline:
   # the seat has run on its stash pair since, so that baseline is still the right comparison and both sets of edits are read together.
   $d = Join-Path $SeatRoot $seat; $cp = Join-Path $d 'sidebar-departure.json'
   $baseline = $null
@@ -244,7 +275,7 @@ function Write-DepartureCheckpoint([string]$seat, $created) {
     $baseline = Read-JsonFile (Join-Path $d 'sidebar-baseline.json')
     if ($null -eq $baseline) { $baseline = @{ valid = $false } }
   }
-  Write-JsonAtomic $cp @{ baseline = $baseline; installed = (Read-JsonFile (Join-Path $d 'sidebar-installed.json')); created = $created }
+  Write-JsonAtomic $cp @{ baseline = $baseline; created = $created }
 }
 function Get-SidebarSyncCommand {
   # @{ file; args } for sidebar-sync.py (the real python.exe, not the py launcher, so stopping the PID stops the work), or $null.
@@ -273,6 +304,17 @@ function Invoke-SidebarStage([string]$prev, [string]$label, [string]$gen) {
   } catch { return @{ ran = $false; reason = "the stage could not run: $($_.Exception.Message)"; gdir = $gdir } }
   @{ ran = $true; reason = ''; gdir = $gdir }
 }
+function Read-StageFile([string]$gdir, [string]$name, [string]$label, [string]$gen) {
+  # a stage file counts only when it names THIS switch's target and generation
+  $j = Read-JsonFile (Join-Path $gdir $name)
+  if ($j -and $j['target'] -eq $label -and $j['gen'] -eq $gen) { $j } else { $null }
+}
+function Add-NotSynced([string]$note, $res, [string]$rp) {
+  # a departure that could not be read is part of the line the dashboard shows, not only of report.txt
+  $ns = if ($res -and $res['not_synced']) { @($res['not_synced']) } else { @() }
+  if ($ns.Count -eq 0) { return $note }
+  "$($note.TrimEnd('.')); edits on $($ns -join ', ') not synced - see $rp"
+}
 function Publish-SidebarState([string]$gdir) {
   # Only after a stage that exited 0 in time, under the seat lock: the proposed global state replaces the published one (atomic), and each
   # checkpoint the stage read is deleted if it is still the one it hashed. A stage that never finished publishes and consumes nothing.
@@ -292,13 +334,12 @@ function Publish-SidebarState([string]$gdir) {
     }
   }
 }
-function Commit-SidebarConfig([string]$gdir, [string]$pair, [string]$gen) {
+function Commit-SidebarConfig([string]$cf, [string]$pair, [string]$gen) {
   # The shared claude_desktop_config.json carries a third copy of the pin list. Called only after the target's baseline was SAVED, and only when
   # the stage prepared a config (<gen>\config.json exists; no file = the config already matched). Replaced only when it was prepared for the pair
   # actually installed, the app is still closed and the live file is the very one Python read (SHA-256): saved first, then replaced (temp sibling,
   # then Move with overwrite, so a failure leaves the live file in place).
   # -> @{ state = 'committed' | 'failed' | 'otherpair'; why }. 'failed' = it was needed for the installed pair and could not be updated.
-  $cf = Join-Path $gdir 'config.json'
   try {
     $c = Get-Content -LiteralPath $cf -Raw | ConvertFrom-Json
     if ($c.pair -ne $pair) { return @{ state = 'otherpair'; why = "config not changed: it was prepared for the $($c.pair) pair, the $pair pair is installed" } }
@@ -382,10 +423,18 @@ function Invoke-SwitchRelaunch([string]$label) {
       if ($script:SwitchDone) {
         $owner = Get-SeatOwnerUuid (Resolve-Label $label)
         $ok = (-not $owner) -or ((Get-AppAccountUuid) -eq $owner)
-        $up = $false
-        if ($ok -and (Start-ClaudeApp)) {
-          $deadline = (Get-Date).AddSeconds($script:StartWaitSec)
-          while (-not $up -and (Get-Date) -lt $deadline) { if (@(Get-AppProcs).Count -gt 0) { $up = $true } else { Start-Sleep -Milliseconds 500 } }
+        $up = $false; $deferred = $false
+        $hl = if ($ok) { Enter-HistoryLock $script:HistoryLockWaitSec } else { $null }
+        try {
+          if ($ok -and $null -eq $hl) { $deferred = $true }          # a history sync is still writing: the app is not opened under it
+          elseif ($ok -and (Start-ClaudeApp)) {
+            $deadline = (Get-Date).AddSeconds($script:StartWaitSec)
+            while (-not $up -and (Get-Date) -lt $deadline) { if (@(Get-AppProcs).Count -gt 0) { $up = $true } else { Start-Sleep -Milliseconds 500 } }
+          }
+        } finally { if ($hl -is [IO.FileStream]) { $hl.Dispose() } }
+        if ($deferred) {
+          Write-Host "Switched to seat $(Resolve-Label $label); reopening deferred: history sync busy; open the app from the Start menu once it has finished.$note" -ForegroundColor Red
+          exit 3
         }
         if ($up) { $publishAfter = $true; Write-Host "Relaunched the Claude app on seat $(Resolve-Label $label).$note" -ForegroundColor Green }
         else {      # the switch stands; only the reopening failed. Exit 3 so a caller (the dashboard) does not report a plain success
@@ -404,7 +453,7 @@ function Invoke-SwitchRelaunch([string]$label) {
       }
     }
   } finally { $script:LockOwnedByRelaunch = $false; Release-SeatLock }
-  if ($publishAfter) { Invoke-AppSeatPublish }       # the app is up and the lock is free: never inside the critical section
+  if ($publishAfter) { Start-AppSeatHeartbeat }       # the app is up and the lock is free: started off the critical path, never run inside it
 }
 function Copy-Dir($src,$dst){ robocopy $src $dst /E /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null; $script:RobocopyRc = $LASTEXITCODE }
 function Mirror-Dir($src,$dst){ robocopy $src $dst /MIR /R:0 /W:0 /NFL /NDL /NJH /NJS /NC /NS /NP | Out-Null; $script:RobocopyRc = $LASTEXITCODE }
@@ -509,12 +558,17 @@ function Invoke-Switch([string]$label) {
       elseif (-not $owner -or $snapUuid -ne $owner) { Set-SidebarNote "Sidebar: skipped (seat $label has no verified login to read) - see $(Join-Path $gdir 'report.txt')" $gdir "skipped: the stash of $label holds no login that matches its owner-uuid.txt" }
       else {
         $stage = Invoke-SidebarStage $prev $label $gen
+        # The stash pair's own baseline + config outcome are written FIRST by the stage (stash-result.json): usable for a stash-pair install even when the
+        # stage was skipped, timed out or killed afterwards.
+        $stage.stashRes = Read-StageFile $gdir 'stash-result.json' $label $gen
+        $stage.result = $null
         if ($stage.ran) {
-          # the result must name THIS switch's target and generation; anything else is not ours: nothing is published, installed or consumed
-          $res0 = Read-JsonFile (Join-Path $gdir 'result.json')
-          if (-not $res0 -or $res0['target'] -ne $label -or $res0['gen'] -ne $gen) { $stage = @{ ran = $false; reason = 'the stage result does not belong to this switch'; gdir = $gdir } }
+          # the result must name THIS switch's target and generation; anything else is not ours: nothing is published, installed or consumed.
+          # It is validated ONCE here and kept in memory: nothing below re-reads it.
+          $res0 = Read-StageFile $gdir 'result.json' $label $gen
+          if (-not $res0) { $stage.ran = $false; $stage.reason = 'the stage result does not belong to this switch' }
           else {
-            $stage.pair = $res0['pair']
+            $stage.result = $res0; $stage.pair = $res0['pair']
             try { Publish-SidebarState $stage.gdir } catch { Write-Host "  (sidebar: state not published: $($_.Exception.Message))" -ForegroundColor DarkYellow }
           }
         }
@@ -561,32 +615,34 @@ function Invoke-Switch([string]$label) {
       }
       $label | Set-Content "$SeatRoot\.active" -Encoding UTF8
       Write-Host "Switched the Claude app login to profile '$label' ($(Get-ProfileEmail $label))." -ForegroundColor Green
-      # 3) record what was installed, the target's baseline and the shared config. The candidate baseline is written FIRST with valid:false, so an
-      # interruption anywhere below leaves it invalid (S66); the stage's explicit config outcome for the installed pair is then settled (match,
-      # prepared -> commit, or refused); and only when it is match or committed is the candidate rewritten with valid:true. A refused or failed
-      # config, after a staged install or where it was needed for the stash install, leaves the stores disagreeing: the baseline stays invalid, so
-      # whatever the app reconciles at launch is never read as a user edit at the next departure, and the note says partial.
-      try { Write-JsonAtomic (Join-Path $src 'sidebar-installed.json') @{ created = (Get-LiveCreation) } } catch {}
+      # 3) record the target's baseline and the shared config. The candidate baseline is written FIRST with valid:false (and the creation time of the
+      # live databases just installed, which a departure later compares), so an interruption anywhere below leaves it invalid (S66); the config
+      # outcome for the INSTALLED pair, an explicit one from the stage's own validated files and never a default, is then settled (match, prepared ->
+      # commit, or refused); and only when it is match or committed is the candidate rewritten with valid:true. A refused or failed config leaves the
+      # stores disagreeing: the baseline stays invalid, so whatever the app reconciles at launch is never read as a user edit at the next departure,
+      # and the note says partial. The stash pair has its own files and outcome (stash-result.json, baseline-stash.json, config-stash.json).
+      if ($pair -eq 'staged') { $sres = $stage.result; $bsrc = "$gdir\baseline.json"; $cfgFile = "$gdir\config.json" }
+      else { $sres = $stage.stashRes; $bsrc = "$gdir\baseline-stash.json"; $cfgFile = "$gdir\config-stash.json" }
       $candidate = $null
       try {
-        $bsrc = if ($pair -eq 'staged') { "$gdir\baseline.json" } elseif ($stage -and $stage.ran) { "$gdir\baseline-stash.json" } else { $null }
-        $b0 = if ($bsrc -and (Test-Path -LiteralPath $bsrc)) { Read-JsonFile $bsrc } else { $null }
-        if ($b0 -and $b0['valid'] -eq $true) {
+        $created2 = Get-LiveCreation
+        $b0 = if ($sres -and (Test-Path -LiteralPath $bsrc)) { Read-JsonFile $bsrc } else { $null }
+        if ($b0 -and $b0['valid'] -eq $true -and $created2.ls -and $created2.idb) {
+          $b0['created'] = $created2
           $b0['valid'] = $false
           Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') $b0
           $b0['valid'] = $true
           $candidate = $b0
         }
       } catch { Write-Host "  (sidebar: baseline not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow; $candidate = $null }
-      $cfg = @{ state = 'match'; why = '' }; $partial = $null
-      $res0 = if ($stage -and $stage.ran) { Read-JsonFile (Join-Path $gdir 'result.json') } else { $null }
-      if ($res0 -and $candidate) {
-        $co = [string]$res0['config']; $cpair = [string]$res0['config_pair']
-        if ($cpair -ne $pair) { $cfg = @{ state = 'otherpair'; why = "config not changed: its outcome is for the $cpair pair, the $pair pair is installed" } }
+      $cfg = @{ state = 'none'; why = '' }; $partial = $null
+      if ($sres -and $candidate) {
+        $co = [string]$sres['config']; $cpair = [string]$sres['config_pair']
+        if ($cpair -ne $pair) { $cfg = @{ state = 'failed'; why = "config not changed: its outcome is for the $cpair pair, the $pair pair is installed" } }
         elseif ($co -eq 'match') { $cfg = @{ state = 'match'; why = '' } }
-        elseif ($co -eq 'prepared') { $cfg = Commit-SidebarConfig $gdir $pair $gen }
+        elseif ($co -eq 'prepared') { $cfg = Commit-SidebarConfig $cfgFile $pair $gen; if ($cfg.state -ne 'committed') { $cfg.state = 'failed' } }
         else { $cfg = @{ state = 'failed'; why = $(if ($co) { "config not changed ($co)" } else { 'config not changed: the stage reported no config outcome' }) } }
-      } elseif ($res0 -and $res0['config'] -eq 'prepared') {
+      } elseif ($sres -and $sres['config'] -eq 'prepared') {
         $cfg = @{ state = 'failed'; why = 'config not changed: the baseline was not saved' }
       }
       if ($cfg.why) { try { Add-Content -LiteralPath (Join-Path $gdir 'report.txt') -Value $cfg.why } catch {} }
@@ -595,18 +651,17 @@ function Invoke-Switch([string]$label) {
         try { Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') $candidate; $baselineOk = $true }
         catch { Write-Host "  (sidebar: baseline not validated: $($_.Exception.Message))" -ForegroundColor DarkYellow }
       }
-      if ($stage -and $stage.ran -and $pair -eq 'staged' -and -not $baselineOk -and -not $partial -and $cfg.state -ne 'otherpair') { $partial = 'the baseline could not be saved' }
+      if ($stage -and $stage.ran -and $pair -eq 'staged' -and -not $baselineOk -and -not $partial) { $partial = 'the baseline could not be saved' }
       # the line the dashboard shows
       if (-not $script:SidebarNote) {
-        $res = if ($stage -and $stage.ran) { Read-JsonFile (Join-Path $gdir 'result.json') } else { $null }
+        $res = if ($stage -and $stage.ran) { $stage.result } else { $null }
         $rp = Join-Path $gdir 'report.txt'
         if (-not $stage.ran) { Set-SidebarNote "Sidebar: skipped ($($stage.reason)) - see $rp" $gdir "skipped: $($stage.reason)" }
-        elseif (-not $res) { Set-SidebarNote "Sidebar: skipped (the stage left no result) - see $rp" $gdir 'skipped: the stage left no result' }
-        elseif ($partial) { Set-SidebarNote "Sidebar: partial ($partial) - see $rp" $gdir '' }
-        elseif ($res['status'] -eq 'skipped') { Set-SidebarNote "Sidebar: skipped ($($res['reason'])) - see $rp" $gdir '' }
-        elseif ($res['status'] -eq 'synced' -and $pair -ne 'staged') { Set-SidebarNote "Sidebar: skipped (the staged copy could not be installed; the seat's own was) - see $rp" $gdir '' }
-        elseif ($res['status'] -eq 'synced') { Set-SidebarNote "Sidebar: synced $($res['n']) pins." $gdir '' }
-        else { Set-SidebarNote 'Sidebar: nothing to sync.' $gdir '' }
+        elseif ($partial) { Set-SidebarNote (Add-NotSynced "Sidebar: partial ($partial) - see $rp" $res $rp) $gdir '' }
+        elseif ($res['status'] -eq 'skipped') { Set-SidebarNote (Add-NotSynced "Sidebar: skipped ($($res['reason'])) - see $rp" $res $rp) $gdir '' }
+        elseif ($res['status'] -eq 'synced' -and $pair -ne 'staged') { Set-SidebarNote (Add-NotSynced "Sidebar: skipped (the staged copy could not be installed; the seat's own was) - see $rp" $res $rp) $gdir '' }
+        elseif ($res['status'] -eq 'synced') { Set-SidebarNote (Add-NotSynced "Sidebar: synced $($res['n']) pins." $res $rp) $gdir '' }
+        else { Set-SidebarNote (Add-NotSynced 'Sidebar: nothing to sync.' $res $rp) $gdir '' }
         $script:SidebarNote += (Get-LastVerifyNote $gen)
       }
     }
