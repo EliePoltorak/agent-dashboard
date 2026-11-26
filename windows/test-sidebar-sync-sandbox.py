@@ -128,7 +128,7 @@ def main():
             shutil.copytree(os.path.join(app, *rel), os.path.join(ldir, *rel))
         man = SS.read_pins(*SS.seat_dirs(ldir)).manifest
         cr = SS.live_created(app)
-        chk = {'baseline': {'valid': True, 'gen': 'g0', 'pins': lpins.pins[1:], 'manifest': man}, 'installed': {'created': cr}, 'created': cr}
+        chk = {'baseline': {'valid': True, 'gen': 'g0', 'pins': lpins.pins[1:], 'manifest': man, 'created': cr}, 'created': cr}
         json.dump(chk, open(os.path.join(ldir, SS.DEPARTURE), 'w'))
         before[leaving] = tree_hash(ldir)
         r = stage('g2')
