@@ -557,6 +557,7 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG }
   Check 'a switch whose install fails (both pairs): exit 1, the published state is untouched and the departure checkpoint is still there (nothing consumed)' ($r.rc -eq 1 -and $r.out -match 'FAILED: could not copy the sidebar databases' -and -not (Test-Path "$sc\.claude-app-seats\.sidebar-sync-state.json") -and (Test-Path "$sc\.claude-app-seats\C\sidebar-departure.json")) "rc=$($r.rc) $($r.out)"
   $sc = New-Scenario 'r4c'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  '{"entries":[{"baseline":{"valid":false},"created":null}]}' | Set-Content "$sc\.claude-app-seats\C\sidebar-departure.json"      # a pending checkpoint (the locked file also fails the re-capture, so none is written now)
   $lockf = "$sc\AppData\Claude\Session Storage\marker.txt"
   $body = "`$fs = [IO.File]::Open('$lockf', 'Open', 'Read', 'None')`ntry { Invoke-Switch 'D' } finally { `$fs.Dispose() }"
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
