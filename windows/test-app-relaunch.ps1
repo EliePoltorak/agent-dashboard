@@ -304,13 +304,13 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
 
   # 4) one staged copy failing: the stash PAIR and its baseline go in, a `pair: staged` config is NOT committed (S74); both failing: stop, no relaunch
   $sc = New-Scenario 's4'; $env:STUB_LOG = Join-Path $sc 'stub.log'
-  $body = '$orig = ${function:Copy-Dir}; function Copy-Dir($s, $d) { & $orig $s $d; if ($s -like ''*sidebar-sync-work*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-Switch 'D'"
+  $body = '$orig = ${function:Mirror-Dir}; function Mirror-Dir($s, $d) { & $orig $s $d; if ($s -like ''*sidebar-sync-work*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-Switch 'D'"
   $r = Invoke-Scenario $sc $body @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG; STUB_CONFIG = '1' }
   $st = Join-Path $sc '.claude-app-seats'; $app = Join-Path $sc 'AppData\Claude'
   Check 'staged IndexedDB copy fails: BOTH sidebar dirs come from the stash, and the stash pair gets ITS OWN valid baseline and config outcome (the staged config is not committed)' ((Rdf "$app\$ls") -eq 'D-stash' -and (Rdf "$app\$idb") -eq 'D-stash' -and (Rdf "$st\D\sidebar-baseline.json") -match '"valid":true' -and (Rdf "$st\D\sidebar-baseline.json") -match '"pins":\["stash"\]') $r.out
   Check 'staged copy failed: the staged-pair config is not committed (S74), the note says skipped' ((Rdf "$app\claude_desktop_config.json") -eq '{"old":true}' -and $r.out -match 'Sidebar: skipped \(the staged copy could not be installed') $r.out
   $sc = New-Scenario 's4b'; $env:STUB_LOG = Join-Path $sc 'stub.log'
-  $body = '$orig = ${function:Copy-Dir}; function Copy-Dir($s, $d) { & $orig $s $d; if ($d -like ''*IndexedDB*'') { $script:RobocopyRc = 8 } }' + "`nInvoke-SwitchRelaunch 'D'"
+  $body = '$orig = ${function:Mirror-Dir}; function Mirror-Dir($s, $d) { & $orig $s $d; if ($d -like ''*IndexedDB.new'') { $script:RobocopyRc = 8 } }' + "`nInvoke-SwitchRelaunch 'D'"
   $r = Invoke-Scenario $sc ("function Get-AppProcs { if (`$script:launched -or `$script:n++ -lt 1) { [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]::Zero } } }`n" + $body) @{ STUB_MODE = 'staged'; STUB_LOG = $env:STUB_LOG }
   Check 'both sidebar copies fail: exit nonzero naming the backup, no relaunch' ($r.rc -eq 1 -and $r.out -match 'FAILED: could not copy the sidebar databases' -and $r.out -match 'swap-backups' -and $r.out -notmatch 'LAUNCHED' -and $r.out -match 'NOT reopened') "rc=$($r.rc) $($r.out)"
 

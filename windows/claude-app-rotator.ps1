@@ -714,7 +714,8 @@ function Invoke-Switch([string]$label) {
       $cfg = @{ state = 'none'; why = '' }; $partial = $null
       if ($sres -and $candidate) {
         $co = [string]$sres['config']; $cpair = [string]$sres['config_pair']
-        if ($cpair -ne $pair) { $cfg = @{ state = 'failed'; why = "config not changed: its outcome is for the $cpair pair, the $pair pair is installed" } }
+        if (-not $co -or -not $cpair) { $cfg = @{ state = 'failed'; why = 'config not changed: the stage reported no config outcome' } }
+        elseif ($cpair -ne $pair) { $cfg = @{ state = 'failed'; why = "config not changed: its outcome is for the $cpair pair, the $pair pair is installed" } }
         elseif ($co -eq 'match') { $cfg = @{ state = 'match'; why = '' } }
         elseif ($co -eq 'prepared') { $cfg = Commit-SidebarConfig $cfgFile $pair $gen; if ($cfg.state -ne 'committed') { $cfg.state = 'failed' } }
         else { $cfg = @{ state = 'failed'; why = $(if ($co) { "config not changed ($co)" } else { 'config not changed: the stage reported no config outcome' }) } }
