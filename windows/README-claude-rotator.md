@@ -549,8 +549,9 @@ seat's two sidebar databases. The app keeps the pin list in three places and all
 gives every copy a new one), so pins are matched through `cliSessionId`; a pin goes on the unarchived, newest copy the seat has.
 Only the staging copy is ever written; the seat's own stash is never modified, and on any failure the stash's own pair goes in, as before.
 The result is the last line of the switch output, which the dashboard shows: `Sidebar: synced N pins.`, `Sidebar: nothing to sync.` or
-`Sidebar: partial (<reason>) - see <report>` (the pins were installed but the shared config was refused or could not be updated, so this
-activation's baseline is left invalid and its departure is not read as your edits) or `Sidebar: skipped (<reason>) - see <report>`. When a departure could not be read the line says so (`...; edits on D not synced - see <report>`).
+`Sidebar: partial (<reason>)` (the pins were installed but the shared config was refused or could not be updated, so this
+activation's baseline is left invalid and its departure is not read as your edits) or `Sidebar: skipped (<reason>)`. The line carries no paths (the dashboard shows only 200 characters of it): the report path is printed on an
+indented `sidebar report:` line just before it, and a note that needs attention goes FIRST on the last line. When a departure could not be read the line says so (`...; edits on D not synced - see <report>`).
 
 **Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent), per seat `sidebar-baseline.json`
 (its pins as installed, with the creation time of the databases just installed; valid only after a successful install) and `sidebar-departure.json`
@@ -561,6 +562,18 @@ activation's baseline is left invalid and its departure is not read as your edit
 **The stash pair comes first.** The stage's very first step writes the stash pair's own baseline, its config outcome (`config-stash.json`) and
 `stash-result.json`, before anything that can wait, skip or run long. A stage that is skipped, times out or is killed still leaves the entered seat
 with a valid baseline, so what you change there is read at its departure, instead of being forfeited and then reversed at the next entry.
+
+**Departure evidence and promotion.** What you changed on a seat is kept in `sidebar-departure.json` as one *entry per activation* (that activation's
+baseline, with the creation time of the databases installed then, and the creation time seen at departure), so a seat entered again before a stage was
+published never has older edits re-paired with newer times. The stage only *proposes* the new global state (`<gen>\state.json`, which also lists the
+checkpoints it consumed by content hash). The rotator promotes it to `.sidebar-sync-state.json` (temp file, then rename) and deletes the consumed
+checkpoints only after the install is verified; a refused or failed switch promotes nothing and leaves every checkpoint in place. A checkpoint the state
+already acknowledges is never applied twice, even if its deletion did not happen.
+
+**Whole-or-nothing install.** Each sidebar database dir (staged or the seat's own) is mirrored into an empty `<dir>.new` sibling, its file set is checked
+against the source exactly, and only then renamed into place; a staged file cannot survive a fallback to the stash, and the baseline is valid only after
+that check passed. The stage and verify children are started at Idle priority; the app itself is launched as before. A refused switch reopens the old login
+through the same history-locked launch as a successful one.
 
 **Baseline order.** The stage reports an explicit config outcome for the pair that is installed (`match`, `prepared` or `refused: <why>`). The rotator
 writes the target's candidate baseline with `valid:false`, settles the config (commits it when `prepared`), and only when the outcome is `match` or
@@ -576,7 +589,7 @@ box heartbeat is started after the app is up and the lock is released, off the c
 exists, else the publisher detached with its output in `.app-seat-publish.out`. A plain `--switch` publishes synchronously, as before.
 
 **The check after launch.** After every switch with a valid baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
-waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences - see <report>` on
+waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences` on
 the next switch's last line); it changes nothing.
 
 **Limits you can run into.**
