@@ -136,14 +136,41 @@ function Enter-SeatLock {
   Write-Host "BLOCKED: $p is held (the seat keep-alive is refreshing a seat). Re-run in a minute." -ForegroundColor Red
   exit 1
 }
-$script:CloseWaitSec = 30
+$script:CloseWaitSec = 90     # the app quits within ~15 s; its crash reporter (same exe) lingers up to ~50 s more (measured 2026-11-27)
+function Send-AppEndSession([int[]]$Ids) {
+  # Asks the app to quit the way Windows does at log-off: WM_QUERYENDSESSION, then WM_ENDSESSION (ENDSESSION_CLOSEAPP, as the
+  # Restart Manager sends it) to every top-level window of those PIDs, hidden ones included. A plain window close only hides
+  # the app to the tray, and a tray-hidden app has no MainWindowHandle at all (verified on a second app instance, 2026-11-27).
+  # The app quits through its own shutdown path, as at every restart; nothing is force-killed. -> $false if a window refused.
+  if (-not ('RotatorEndSession' -as [type])) {
+    Add-Type @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class RotatorEndSession {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
+  [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr r);
+  public static bool Send(int[] ids) {
+    var want = new HashSet<uint>(); foreach (var i in ids) want.Add((uint)i);
+    var hs = new List<IntPtr>();
+    EnumWindows((h, l) => { uint pid; GetWindowThreadProcessId(h, out pid); if (want.Contains(pid)) hs.Add(h); return true; }, IntPtr.Zero);
+    bool ok = true; IntPtr r;
+    foreach (var h in hs) if (SendMessageTimeout(h, 0x11, IntPtr.Zero, (IntPtr)1, 2, 5000, out r) != IntPtr.Zero && r == IntPtr.Zero) ok = false;
+    foreach (var h in hs) SendMessageTimeout(h, 0x16, (IntPtr)(ok ? 1 : 0), (IntPtr)1, 2, 5000, out r);
+    return ok;
+  }
+}
+'@
+  }
+  [RotatorEndSession]::Send($Ids)
+}
 function Close-AppGracefully {
-  # --relaunch: ask every app window to close, then wait. Never force-kills: a kill mid-write can tear
+  # --relaunch: ask the app to quit (Send-AppEndSession), then wait. Never force-kills: a kill mid-write can tear
   # the login storage this script is about to move aside. Returns $true once no app process is left.
   $p = @(Get-AppProcs)
   if ($p.Count -eq 0) { return $true }
   Write-Host "Closing the Claude app (PIDs $($p.Id -join ', '))..." -ForegroundColor DarkGray
-  foreach ($w in @($p | Where-Object { $_.MainWindowHandle -ne 0 })) { [void]$w.CloseMainWindow() }
+  [void](Send-AppEndSession @($p.Id))
   $deadline = (Get-Date).AddSeconds($script:CloseWaitSec)
   while ((Get-Date) -lt $deadline -and @(Get-AppProcs).Count) { Start-Sleep -Milliseconds 500 }
   return (@(Get-AppProcs).Count -eq 0)

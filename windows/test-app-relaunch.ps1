@@ -41,6 +41,7 @@ try {
     $o
   }
   function Stop-Process { $script:killed += 1 }
+  function Send-AppEndSession([int[]]$Ids) { $script:closed += $Ids; $true }
   function Start-Process { param($FilePath, $ArgumentList) $script:started += , @($FilePath, @($ArgumentList)) }
   $script:CloseWaitSec = 1
 
@@ -50,7 +51,7 @@ try {
   $t0 = Get-Date
   $r = Close-AppGracefully
   Check 'stuck app: Close-AppGracefully returns $false' ($r -eq $false)
-  Check 'stuck app: CloseMainWindow only on the windowed PID' (($script:closed -join ',') -eq '101') "closed=$($script:closed -join ',')"
+  Check 'stuck app: asked every app PID to quit, hidden ones too' (($script:closed -join ',') -eq '101,102') "closed=$($script:closed -join ',')"
   Check 'stuck app: nothing force-killed' ($script:killed.Count -eq 0)
   Check 'stuck app: waited about CloseWaitSec' (((Get-Date) - $t0).TotalSeconds -ge 0.9)
 
@@ -62,6 +63,7 @@ try {
 . '$script_'
 `$script:CloseWaitSec = 1
 function Get-AppProcs { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o }
+function Send-AppEndSession { `$true }
 function Stop-Process { Write-Host 'KILLED' }
 function Start-Process { Write-Host 'LAUNCHED' }
 function Invoke-Switch { Write-Host 'SWITCHED' }
@@ -86,6 +88,7 @@ Invoke-SwitchRelaunch B
 . '$script_'
 `$script:n = 0; `$script:StartWaitSec = 2
 function Get-AppProcs { `$script:n++; if (`$script:n -eq 1 -or `$script:launched) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Send-AppEndSession { `$true }
 function Start-Process { param(`$FilePath) `$script:launched = `$true; Write-Host "LAUNCHED `$FilePath" }
 function Find-AppLauncher { @{ file = 'fake-claude.exe'; args = @() } }
 function Invoke-Switch { $($case.body) }
@@ -100,6 +103,7 @@ Invoke-SwitchRelaunch B
 . '$script_'
 `$script:n = 0; `$script:StartWaitSec = 2
 function Get-AppProcs { `$script:n++; if (`$script:n -eq 1 -or `$script:launched) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Send-AppEndSession { `$true }
 function Start-Process { param(`$FilePath) `$script:launched = `$true; Write-Host "LAUNCHED `$FilePath" }
 function Find-AppLauncher { `$null }
 function Invoke-Switch { `$script:SwitchDone = `$true }
@@ -113,6 +117,7 @@ Invoke-SwitchRelaunch B
 . '$script_'
 `$script:n = 0; `$script:StartWaitSec = 2
 function Get-AppProcs { `$script:n++; if (`$script:n -eq 1 -or `$script:launched) { `$o = [pscustomobject]@{ Id = 7; MainWindowHandle = [IntPtr]1 }; `$o | Add-Member ScriptMethod CloseMainWindow { `$true }; `$o } }
+function Send-AppEndSession { `$true }
 function Find-AppLauncher { `$null }
 function Invoke-Switch { Write-Host 'REFUSED: seat B'; exit 1 }
 Invoke-SwitchRelaunch B
