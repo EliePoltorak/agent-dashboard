@@ -503,7 +503,7 @@ a Claude session.
 |---|---|
 | `claude-account --status` | App state, live account + account UUID, captured profiles |
 | `claude-account --switch <label>` | Back up the current login, load profile `<label>` |
-| `claude-account --switch <label> --relaunch` | Close the running app first (asks its windows to close, waits up to 30 s, and aborts without force-closing if it is still running, telling you to quit it from the system tray if that is where it lives), switch, then reopen the installed app (the Squirrel `claude.exe` the Start-menu shortcut runs, else `Update.exe --processStart claude.exe`, else the MSIX package). A refused switch reopens the app on its old login. If the switch stood but the app could not be reopened it says so and exits 3. Tests: `test-app-relaunch.ps1` |
+| `claude-account --switch <label> --relaunch` | Close the running app first (asks it to quit the way Windows does at log-off, WM_QUERYENDSESSION then WM_ENDSESSION to every app window, hidden ones included, because a plain window close only hides the app to the tray; each window gets up to 5 s to answer, and a window that refuses or does not answer, or no app window at all, cancels the quit at once; like a Windows restart, this quit does not save cookies the app set in its last ~30 s; then waits up to 90 s, since the app's crash reporter outlives it by up to a minute; aborts without force-closing if it is still running), switch, then reopen the installed app (the Squirrel `claude.exe` the Start-menu shortcut runs, else `Update.exe --processStart claude.exe`, else the MSIX package). A refused switch reopens the app on its old login. If the switch stood but the app could not be reopened it says so and exits 3. Tests: `test-app-relaunch.ps1` |
 | `claude-account --rotate [label]` | Cycle to the next profile (or switch straight to `<label>`) |
 | `claude-account --capture <label>` | Save the CURRENT app login as profile `<label>` |
 | `claude-account --list` / `--help` | List profiles / print help |
@@ -535,6 +535,124 @@ say "Sign in again" on its next switch-in. `-Status` / `-DryRun` / `-SelfTest`; 
 `~\.claude-app-seats\.keepalive-log.txt`. It shares `.seat-write.lock` with `claude-account`, so a
 switch/capture waits for it (up to 90 s). Why it exists, and what it does NOT fix: the header of
 `claude-app-seat-keepalive.ps1`.
+
+## Sidebar pins follow you across seats
+
+When you switch app seats (`claude-account --switch <seat>`, `--rotate`, the dashboard's button), the sessions you pinned or unpinned on the
+seat you leave are pinned or unpinned on the seat you enter. **Pins only**; group assignments are not synced yet.
+
+**What syncs and when.** At the switch, with the app closed and the seat lock held, the rotator reads the seat being left (its edits since
+you entered it), merges them into one global pin intent per session, and builds the entered seat's pin list in a *staging copy* of that
+seat's two sidebar databases. The app keeps the pin list in three places and all three are written: IndexedDB
+(`store:pin-state:dframe-starred-code`), Local Storage (`LSS-persisted.starred-local-code-sessions`) and
+`%APPDATA%\Claude\claude_desktop_config.json` (`preferences.epitaxyPrefs`, shared by every seat). Session ids differ per seat (the history sync
+gives every copy a new one), so pins are matched through `cliSessionId`; a pin goes on the unarchived, newest copy the seat has.
+Only the staging copy is ever written; the seat's own stash is never modified, and on any failure the stash's own pair goes in, as before.
+The result is the last line of the switch output, which the dashboard shows: `Sidebar: synced N pins.`, `Sidebar: nothing to sync.` or
+`Sidebar: partial (<reason>)` (the pins were installed but the shared config was refused or could not be updated, so no baseline is written for
+this activation and its departure is not read as your edits) or `Sidebar: skipped (<reason>)`. The note is cut at 80 characters (the full reason is in `report.txt`)
+and carries no paths (the dashboard shows only 200 characters of the line): the report path is printed on an
+indented `sidebar report:` line just before it, and a note that needs attention goes FIRST on the last line. When a departure could not be read the line says so (`...; edits on D not synced - see <report>`).
+
+**Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent: version 2, `pins`, and per seat the last departure
+merged or dismissed, `{dep, base, observed}`), per seat `sidebar-baseline.json` (its pins as installed, with the creation time of the databases just installed;
+written once, after the install) and `sidebar-departure.json` (ONE marker per seat, replaced every time you leave it),
+`.sidebar-sync-work\<gen>\` (one generation per switch, named `<stamp>-<pid/random>`, allocated under the seat lock; the staging copy, `report.txt`, `verify.txt`; newest 10 kept) and
+`.sidebar-sync-backups\<gen>\` (the config as it was before the rotator replaced it; newest 10 kept).
+
+**No first-switch scan.** Pins spread as each seat is entered: the first stage that reads a seat merges that seat's edits into the global intent, so a
+pin made on a seat reaches the others one switch at a time. Nothing scans every seat up front.
+**First-visit prerequisite.** A seat's edits are read at its departure against the baseline written when it was entered, and a seat that has never been
+entered through a switch has no baseline, so its first departure reads nothing. On a fresh setup, switch to another seat and back once before relying on
+(or testing) a pin made on the first one; `windows\test-sidebar-sync-journey.ps1` does this itself (its step 0) and checks the baseline before it asks you
+to pin anything.
+
+**The stash pair comes first.** The stage's very first step writes the stash pair's own baseline, its config outcome (`config-stash.json`) and
+`stash-result.json`, before anything that can wait, skip or run long. A stage that is skipped, times out or is killed still leaves the entered seat
+with its baseline, so what you change there is read at its departure, instead of being forfeited and then reversed at the next entry. When the
+entered seat's pending marker belongs to the baseline already on disk, the stash install continues that lineage (same `gen` and pins, only `created` refreshed).
+
+**Departure evidence.** Leaving a seat writes its marker `{dep, at, baseline, created}` after a good re-capture: the baseline file of that seat verbatim and
+the creation time of the live databases. (Before the mirror the marker is written in a dismissed form `{dep}`, so a crash mid-mirror means "no merge".)
+The stage merges a marker once, by its `dep`, and the state records that; the state is written by Python in one atomic replace after the decision and
+BEFORE any staged copy is built, so a stage that is killed afterwards cannot make the next stage merge the same marker again. A marker whose baseline is
+not the lineage already merged is checked against its own pins; an invalid one (databases recreated, no baseline, config refused at entry) is dismissed and reported.
+If the dismissed marker cannot be written, the seat is not mirrored at all: its stash and its old marker stay as they were, and the line says
+`edits on <seat> not synced`. Pending markers are applied in the order of `at`, not seat name. The rotator publishes no state and deletes nothing, but it writes the departing seat's marker (dismissed first, full after the re-capture) before anything is moved, so a refused or failed switch still leaves that marker in place; the seat's next departure replaces it.
+
+**Known limits** (what the marker design does not close; each fails closed or is reported, none is silent):
+- *Two visits, one delta.* A seat left, entered again on its own stash, and left again before a stage merged the first departure has one marker, the
+  newer; the two visits are merged as one delta at the later timestamp. The rotator says so on the last line (`edits on <seat> from two visits merged; check
+  its pins`). Keeping every visit apart would need per-visit records, which the design rules out.
+- *An invalid departure is not synced.* A departure whose databases were recreated, with no baseline, or whose config was refused at entry, contributes nothing and
+  is reported (unchanged policy).
+- *A kill between the rename and the baseline write* (inside one switch) loses the edits of that one activation.
+- *An unmerged marker, the same seat entered again, then an invalid departure* loses the edits of the first activation. It takes two failed stages around one
+  seat plus an invalid departure.
+- *A drop the check never saw.* The check that takes an app-dropped pin out of the baseline only helps when it completed for that activation. If it did not (the
+  app was opened more than 30 minutes after a plain `--switch`, the seat was left within about 75 s, python was missing, the snapshot was unreadable, or the seat lock
+  was busy for 30 s), a pin the app dropped still counts as your unpin at the next departure.
+- *An unpin made within about 75 s of launch* is taken as an app drop: it is not spread, the pin comes back at the seat's next entry, and the check reports it
+  (`missing after launch, not treated as unpins`).
+
+**Whole-or-nothing install.** Each sidebar database dir (staged or the seat's own) is mirrored into an empty `<dir>.new` sibling, its file set is checked
+against the source exactly, and only then renamed into place; a staged file cannot survive a fallback to the stash, and the baseline is valid only after
+that check passed; the baseline is written only after it. Before anything is moved, a target that has an owner must show a readable `config.json` with that account's uuid, or the switch is refused. After the install, the live login must be that account's, or the switch fails
+(the previous login is in `.swap-backups\<gen>`). The login files (`config.json` and friends) are copied with errors stopping the switch. The stage and verify children are started at Idle priority; the app itself is launched as before. A refused switch reopens the old login
+through the same history-locked launch as a successful one.
+
+**Baseline order.** The stage reports an explicit config outcome for the pair that is installed (`match`, `prepared` or `refused: <why>`). The rotator
+settles the config (commits it when `prepared`), and only when the outcome is `match` or committed writes the target's baseline, once, atomically.
+Until then the old baseline stays; its `created` no longer matches the new databases, so an interruption (or a refused config) at any point means
+whatever the app reconciles at launch is never read as your edits at the next departure.
+
+**One lock.** `--switch <seat> --relaunch` takes the seat lock before the app is closed and keeps it through the switch and the wait for the
+app to start (the history sync runs inside it too); a switch waiting behind it re-checks that the app is closed and that the target's login is
+the right account before it touches anything. Before it launches the app, `--relaunch` also takes the history sync's own lock (`.sync-history.lock`, waiting up to 30 s) and holds it until the app
+is detected; if a sync still holds it, the app is not opened under it: the last line says `reopening deferred: history sync busy` and the exit code is 3.
+`--capture` does its own app-closed, live-account and duplicate-owner checks inside its lock for the
+same reason. Under `--relaunch` the history sync runs `-Quiet` (it skips at once if another run holds its lock; the scheduled task covers it) and the
+box heartbeat is started after the app is up and the lock is released, off the critical path: the `Claude app-seat heartbeat` scheduled task when it
+exists, else the publisher detached with its output in `.app-seat-publish.out`. A plain `--switch` publishes synchronously, as before.
+
+**The check after launch.** After every switch that wrote a baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
+waits 75 s, and compares the three pin stores with the pins it installed. It reports (`verify.txt`, and `last check: N differences` on
+the next switch's last line). Its one write: when an installed pin is missing from Local Storage or IndexedDB (the app dropped it at launch), it takes that pin
+out of the seat's baseline (`pins`, and `dropped` records it), under the seat lock and only while this install is still the live one, so the next departure does
+not read the drop as your unpin (the departure merge subtracts `dropped` from what it compares against); it names the pin in `verify.txt` and `report.txt`
+as `missing after launch, not treated as unpins`. It never creates a baseline, and when the lock is busy or the install was superseded it writes nothing and says `not narrowed`.
+It compares against the install record `<gen>\install.json` (this switch's gen, the installed pair's pins, the databases' creation times), not the baseline, whose gen and
+pins can belong to an older lineage that a stash-pair install continued; it is superseded only when the app is no longer on the seat's login or a later install rewrote the baseline.
+
+**Limits you can run into.**
+- *Reach.* A pin can only go on a session the entered seat already has a record for. The report names the rest (`no copy on <seat>`: pinned once
+  this seat has a copy); the history sync runs after the stage, so a session started since its last run arrives a switch later.
+- *Revert risk.* If the app drops a pin at launch (the check shows `DIFFERS`), the check keeps the drop out of the baseline, so it is not read as an unpin
+  and does not spread (see Known limits for when the check does not complete). Pins survived a relaunch in the 2026-11-24 test; a pin made within 75 s of
+  launch can show up as a difference too.
+- *Edits that cannot be trusted are not synced.* A seat whose sidebar databases were recreated (or whose baseline is missing)
+  contributes nothing; the report says `edits made on D were not synced: redo them`. Nothing is ever invented from an old stash, so an old
+  stash cannot resurrect a pin you removed.
+- *Unreadable seats* (for example a seat whose pin state is not a plain one-byte string) are skipped and reported, never written.
+- Same-seat `--switch X` when X is already the live login now swaps nothing (it used to reload the older stash over the live profile, losing
+  everything since it was captured). The history sync, the heartbeat publish and `.active` still run, so `--rotate` still advances.
+- The shared `claude_desktop_config.json` is rewritten only if it round-trips byte for byte through JSON with 2-space indent, still has the
+  SHA-256 the stage read, and the app is still closed; otherwise it is left alone and the report says why (retried at the next switch).
+
+**Dry run** (works with the app open; reads the live seat from a snapshot copy; writes nothing):
+`py -3 -I windows\sidebar-sync.py --dry-run --target <seat>` prints the pin changes with titles, plus the skipped, no-copy, pinned-elsewhere and
+not-synced lines.
+
+**Reset steps** (a seat's sidebar got corrupted, or you want it to start clean): quit the app, then
+`py -3 -I windows\sidebar-sync.py --forget <seat>` (drops that seat's baseline and its departure marker; its next departure
+contributes nothing and its pins sync again after the next switch in). To forget everything, run `py -3 -I windows\sidebar-sync.py --reset` (app closed; it refuses
+while a switch, capture or keep-alive holds the seat lock): it deletes every seat's baseline and departure marker, and the global state file last. The next
+stage starts again from the entered seat's own pins and each seat's edits are merged as you leave it. Do not delete `.sidebar-sync-state.json` by hand: with the markers
+left in place, every old departure is merged again.
+
+Tests: `py -3 -I windows\test-sidebar-sync.py` (engine), `windows\test-app-relaunch.ps1` (the rotator's part, with a stub for python),
+`windows\test-sidebar-sync-sandbox.py` (on synthetic seats built with the engine's own writer, nothing real is read, in a fresh directory under `C:\Dev\Temp\sidebar-sync-sandbox`), and the owner-run
+`windows\test-sidebar-sync-journey.ps1` (closes and reopens the app; run it from a plain terminal).
 
 ## Desktop app session history (`claude-sync-history`)
 
@@ -640,9 +758,9 @@ as a first run; delete it to start again (the next run counts a flag set on any 
 with the app closed, archives every old session of this workspace once more (unpinned, with a local transcript, no `autoArchiveExempt` record), un-archived ones included, because deleting it
 also forgets which sessions were archived for age).
 
-Sidebar groups and the sidebar's own pinned list are not synced: the app keeps them in each seat's own
-storage, so a pin flag copied to a seat's record may not show as pinned there.
-Tracked in Hameishiv/claude-rotator#10 (issue #10).
+Sidebar groups are not synced (issue #10, part 2). The sidebar's own pinned list is: at a seat switch
+(`claude-account --switch`), see *Sidebar pins follow you across seats* above. The `isStarred` flag on a record is a different thing
+from the sidebar pin; this sync copies the flag only.
 
 Only `isArchived` and `isStarred` are synced. Records can also carry `autoArchiveExempt`, which the app
 appears to set when you un-archive a session it archived by itself; that field is not copied, so on

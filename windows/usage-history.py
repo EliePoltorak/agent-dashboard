@@ -5669,6 +5669,38 @@ def selftest():
         assert run_switch(a_, gone) == ({"outcome": "error", "text": "The rotator could not run: FileNotFoundError."}, None)
         p_ = P_(0, b"", slow=True)
         assert run_switch(a_, pop(p_)) == ({"outcome": "running", "text": SWITCH_RUNNING}, p_) and p_.calls == [("communicate", 120)]       # no kill, no terminate
+        # a rotator that leaves a detached child holding NO pipes (the sidebar sync's --verify, which waits for the app for up to 30 min) must not hold
+        # run_switch: it returns with the rotator, while that child is still running (a child holding the stdout pipe would make communicate wait for it)
+        done_ = os.path.join(ld, "detached-done.txt")
+        kid_ = "import time; time.sleep(25); open(%r, 'w').close()" % done_
+        rot_ = ("import subprocess, sys; subprocess.Popen([sys.executable, '-c', %r], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+                "close_fds=True); print('Relaunched the Claude app on seat B. Sidebar: nothing to sync.')" % kid_)
+        r_, p_ = run_switch([sys.executable, "-c", rot_])
+        assert r_ == {"outcome": "ok", "text": "Done: Relaunched the Claude app on seat B. Sidebar: nothing to sync."} and p_ is None and not os.path.exists(done_), (r_, p_)
+        for _ in range(100):                                   # the child did keep running: it finishes on its own (nothing is killed)
+            if os.path.exists(done_):
+                break
+            time.sleep(0.5)
+        assert os.path.exists(done_), "the detached child never finished"
+        # the sidebar sync's result rides on the last unindented line, which the dashboard shows (200 characters)
+        sb_ = "Relaunched the Claude app on seat D. Sidebar: skipped (the stage did not finish in 60 s) - see C:\\Users\\User\\.claude-app-seats\\.sidebar-sync-work\\20261125-101010\\report.txt"
+        assert switch_outcome(0, "Switched.\r\n" + sb_ + "\r\n")["text"] == "Done: " + sb_ and len("Done: " + sb_) < 200
+        assert switch_outcome(0, sb_ + "\r\n  indented detail\r\n")["text"] == "Done: " + sb_
+        # a compound line as the rotator now writes it: the notice that needs attention FIRST, no report path in it (the path is on an indented line before it)
+        rp_ = "  sidebar report: C:\\Users\\User\\.claude-app-seats\\.sidebar-sync-work\\20261126-101010-1a2b3c4d\\report.txt"
+        cl_ = "Sidebar: edits on C not synced; skipped (the staged copy could not be installed; seat D's own pins were used). Relaunched the Claude app on seat D."
+        o_ = switch_outcome(0, "Switched the Claude app login to profile 'D'.\r\n" + rp_ + "\r\n" + cl_ + "\r\n")
+        assert o_ == {"outcome": "ok", "text": "Done: " + cl_} and len(o_["text"]) < 200 and "edits on C not synced" in o_["text"], o_
+        # the worst case: a long partial reason that the cap cuts. The notice is at the START, so it survives; nothing actionable sits behind a path
+        long_ = ("Sidebar: edits on C, E not synced; partial (config not changed (refused: config not changed ([Errno 2] No such file or directory: "
+                 "'C:\\Users\\User\\AppData\\Roaming\\Claude\\claude_desktop_config.json'))) last check: 3 differences Relaunched the Claude app on seat D.")
+        o_ = switch_outcome(0, rp_ + "\r\n" + long_ + "\r\n")
+        assert len(long_) > 200 and o_["text"].startswith("Done: Sidebar: edits on C, E not synced; partial") and len(o_["text"]) <= 206, o_
+        # exit 3 (the switch stood, the app was not reopened): the capped note (80 characters, Format-LastLine) plus the instruction still fit the 200 cap, so "open the app yourself" survives
+        note80_ = "Sidebar: edits on C, E not synced; partial (config not changed (refus..."
+        e3_ = note80_ + " Switched to seat D; reopening deferred: history sync busy, open the app yourself."
+        o_ = switch_outcome(3, rp_ + "\r\n" + e3_ + "\r\n")
+        assert len(note80_) <= 80 and o_["text"] == "Failed (exit 3): " + e3_ and len(o_["text"]) < 200 and o_["text"].endswith("open the app yourself."), o_
         # Store.switch: runs the argv for the action, logs without tokens, rebuilds (which re-reads in_use)
         globals()["APPLOG"] = os.path.join(ld, "log.txt")
         fs = Store.__new__(Store)
