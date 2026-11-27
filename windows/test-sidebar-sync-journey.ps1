@@ -11,6 +11,8 @@ check (.sidebar-sync-work\<gen>\verify.txt for the right seat and gen), then rea
 prints them next to your answer. The result block at the end is what goes into the PR comment. The PR stays a draft until it passes.
 
 Steps:
+  0  initialization: one switch to -To and back to -From, so the origin seat HAS a sidebar baseline (a seat's first departure has none, and its edit would
+     not be read); the journey checks that baseline before it asks you to pin anything
   1  picks a session that has a copy on both seats and is unpinned on both, and names it
   2  on -From you pin it; switch to -To; you confirm it is pinned there; the three stores agree
   3  on -To you unpin it; switch back to -From; you confirm it is unpinned there
@@ -77,7 +79,18 @@ Say "Journey: pins must follow you from seat $From to seat $To and back. Seats c
 Say 'Make sure nothing in the app is mid-task: it will be closed and reopened several times.' 'Yellow'
 if (-not (Ask 'Start?')) { return }
 
-# ---- step 0: both seats must be reachable; the app must be on -From
+# ---- step 0: initialization. The sync reads a seat's edits at its departure against the baseline written when the seat was entered. On a fresh setup
+# the origin seat has none yet, so the first pin made on it would be skipped and step 2 would fail even though the sync works as designed.
+Say "Step 0. Initialization: switching to seat $To and back to seat $From once, so seat $From gets its sidebar baseline. Do not touch the app." 'White'
+$null = Switch-To $To
+$g0 = Switch-To $From
+$null = Wait-Verify $From $g0
+$bj = try { Get-Content (Join-Path (Join-Path $seats $From) 'sidebar-baseline.json') -Raw | ConvertFrom-Json } catch { $null }
+$hasBase = [bool]($bj -and $bj.created -and ($bj.PSObject.Properties.Name -contains 'pins'))
+Record "step 0: seat $From has a sidebar baseline after the initialization switch" $hasBase $(if ($bj) { "gen $($bj.gen)" } else { 'no readable sidebar-baseline.json' })
+if (-not $hasBase) { Say "Seat $From has no baseline: its first departure would not be read, so the journey stops. See the switch output above for the sidebar line." 'Red'; return }
+
+# ---- step 1: both seats must be reachable; the app must be on -From
 $info = (Invoke-Sync @('--journey', 'pick', '--leaving', $From, '--target', $To)) | ConvertFrom-Json
 if (-not $info.pick) { Say 'No session has a copy on both seats and is unpinned on both; unpin one in the app and run again.' 'Red'; return }
 $cli = $info.pick.cli
