@@ -121,6 +121,7 @@ Invoke-SwitchRelaunch B
   Check 'stuck app: --relaunch aborts with exit 1' ($LASTEXITCODE -eq 1 -and $out -match 'ABORTED') "rc=$LASTEXITCODE out=$out"
   Check 'stuck app: no switch, no kill, no launch' ($out -cnotmatch 'SWITCHED|KILLED|LAUNCHED') $out
   Check 'stuck app: the abort says to quit it from the tray and retry' ($out -match 'system tray' -and $out -match 'tray icon') $out
+  Check 'stuck app: the reason is on the abort line itself (the dashboard shows only the last line)' ($out -match 'ABORTED: the Claude app did not quit: PIDs 7 still running') $out
 
   # an app that closes: returns $true
   $script:closed = @()
