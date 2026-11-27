@@ -279,7 +279,7 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $mk2 = Get-Content "$sc\.claude-app-seats\C\sidebar-departure.json" -Raw | ConvertFrom-Json
   Check 'no FULL marker when a live sidebar database is missing: only the dismissed form {dep} is left (the stage dismisses and reports it)' ($mk2.dep -and $mk2.PSObject.Properties.Name -notcontains 'baseline') $r.out
   $sc = New-Scenario 's2b'
-  $r = Invoke-Scenario $sc "Write-DepartureMarker 'C' @{ dep = 'g1' }; Write-DepartureMarker 'C' @{ dep = 'g2'; at = 5; baseline = $null; created = @{ ls = 1; idb = 2 } }" @{}
+  $r = Invoke-Scenario $sc "Write-DepartureMarker 'C' @{ dep = 'g1' }; Write-DepartureMarker 'C' @{ dep = 'g2'; at = 5; baseline = `$null; created = @{ ls = 1; idb = 2 } }" @{}
   $mj = Get-Content "$sc\.claude-app-seats\C\sidebar-departure.json" -Raw | ConvertFrom-Json
   Check 'a departure marker is REPLACED, never appended: one object, the latest dep, no entries list' ($mj.dep -eq 'g2' -and $mj.at -eq 5 -and $mj.PSObject.Properties.Name -notcontains 'entries' -and $mj.created.ls -eq 1) (Get-Content "$sc\.claude-app-seats\C\sidebar-departure.json" -Raw)
 
