@@ -549,35 +549,42 @@ seat's two sidebar databases. The app keeps the pin list in three places and all
 gives every copy a new one), so pins are matched through `cliSessionId`; a pin goes on the unarchived, newest copy the seat has.
 Only the staging copy is ever written; the seat's own stash is never modified, and on any failure the stash's own pair goes in, as before.
 The result is the last line of the switch output, which the dashboard shows: `Sidebar: synced N pins.`, `Sidebar: nothing to sync.` or
-`Sidebar: partial (<reason>)` (the pins were installed but the shared config was refused or could not be updated, so this
-activation's baseline is left invalid and its departure is not read as your edits) or `Sidebar: skipped (<reason>)`. The line carries no paths (the dashboard shows only 200 characters of it): the report path is printed on an
+`Sidebar: partial (<reason>)` (the pins were installed but the shared config was refused or could not be updated, so no baseline is written for
+this activation and its departure is not read as your edits) or `Sidebar: skipped (<reason>)`. The note is cut at 80 characters (the full reason is in `report.txt`)
+and carries no paths (the dashboard shows only 200 characters of the line): the report path is printed on an
 indented `sidebar report:` line just before it, and a note that needs attention goes FIRST on the last line. When a departure could not be read the line says so (`...; edits on D not synced - see <report>`).
 
-**Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent), per seat `sidebar-baseline.json`
-(its pins as installed, with the creation time of the databases just installed; valid only after a successful install) and `sidebar-departure.json`
-(written when you leave a seat, consumed by the next stage), `.sidebar-sync-bootstrap.json` (the first scan's per-seat progress, so a scan that times out resumes instead of restarting),
+**Where things are** (under `~\.claude-app-seats`): `.sidebar-sync-state.json` (the global intent: version 2, `pins`, and per seat the last departure
+merged or dismissed, `{dep, base, observed}`), per seat `sidebar-baseline.json` (its pins as installed, with the creation time of the databases just installed;
+written once, after the install) and `sidebar-departure.json` (ONE marker per seat, replaced every time you leave it),
 `.sidebar-sync-work\<gen>\` (one generation per switch, named `<stamp>-<pid/random>`, allocated under the seat lock; the staging copy, `report.txt`, `verify.txt`; newest 10 kept) and
 `.sidebar-sync-backups\<gen>\` (the config as it was before the rotator replaced it; newest 10 kept).
 
+**No first-switch scan.** Pins spread as each seat is entered: the first stage that reads a seat merges that seat's edits into the global intent, so a
+pin made on a seat reaches the others one switch at a time. Nothing scans every seat up front.
+
 **The stash pair comes first.** The stage's very first step writes the stash pair's own baseline, its config outcome (`config-stash.json`) and
 `stash-result.json`, before anything that can wait, skip or run long. A stage that is skipped, times out or is killed still leaves the entered seat
-with a valid baseline, so what you change there is read at its departure, instead of being forfeited and then reversed at the next entry.
+with its baseline, so what you change there is read at its departure, instead of being forfeited and then reversed at the next entry. When the
+entered seat's pending marker belongs to the baseline already on disk, the stash install continues that lineage (same `gen` and pins, only `created` refreshed).
 
-**Departure evidence and promotion.** What you changed on a seat is kept in `sidebar-departure.json` as one *entry per activation* (that activation's
-baseline, with the creation time of the databases installed then, and the creation time seen at departure), so a seat entered again before a stage was
-published never has older edits re-paired with newer times. The stage only *proposes* the new global state (`<gen>\state.json`, which also lists the
-checkpoints it consumed by content hash). The rotator promotes it to `.sidebar-sync-state.json` (temp file, then rename) and deletes the consumed
-checkpoints only after the install is verified; a refused or failed switch promotes nothing and leaves every checkpoint in place. A checkpoint the state
-already acknowledges is never applied twice, even if its deletion did not happen.
+**Departure evidence.** Leaving a seat writes its marker `{dep, at, baseline, created}` after a good re-capture: the baseline file of that seat verbatim and
+the creation time of the live databases. (Before the mirror the marker is written in a dismissed form `{dep}`, so a crash mid-mirror means "no merge".)
+The stage merges a marker once, by its `dep`, and the state records that; the state is written by Python in one atomic replace after the decision and
+BEFORE any staged copy is built, so a stage that is killed afterwards cannot make the next stage merge the same marker again. A marker whose baseline is
+not the lineage already merged is checked against its own pins; an invalid one (databases recreated, no baseline, config refused at entry) is dismissed and reported.
+Pending markers are applied in the order of `at`, not seat name. The rotator publishes and deletes nothing: a refused or failed switch leaves the markers as they are.
 
 **Whole-or-nothing install.** Each sidebar database dir (staged or the seat's own) is mirrored into an empty `<dir>.new` sibling, its file set is checked
 against the source exactly, and only then renamed into place; a staged file cannot survive a fallback to the stash, and the baseline is valid only after
-that check passed. The stage and verify children are started at Idle priority; the app itself is launched as before. A refused switch reopens the old login
+that check passed; the baseline is written only after it. After the install, a seat that has an owner must be that account's login, or the switch fails
+(the previous login is in `.swap-backups\<gen>`). The login files (`config.json` and friends) are copied with errors stopping the switch. The stage and verify children are started at Idle priority; the app itself is launched as before. A refused switch reopens the old login
 through the same history-locked launch as a successful one.
 
 **Baseline order.** The stage reports an explicit config outcome for the pair that is installed (`match`, `prepared` or `refused: <why>`). The rotator
-writes the target's candidate baseline with `valid:false`, settles the config (commits it when `prepared`), and only when the outcome is `match` or
-committed rewrites the baseline `valid:true`; an interruption anywhere leaves it invalid.
+settles the config (commits it when `prepared`), and only when the outcome is `match` or committed writes the target's baseline, once, atomically.
+Until then the old baseline stays; its `created` no longer matches the new databases, so an interruption (or a refused config) at any point means
+whatever the app reconciles at launch is never read as your edits at the next departure.
 
 **One lock.** `--switch <seat> --relaunch` takes the seat lock before the app is closed and keeps it through the switch and the wait for the
 app to start (the history sync runs inside it too); a switch waiting behind it re-checks that the app is closed and that the target's login is
@@ -588,7 +595,7 @@ same reason. Under `--relaunch` the history sync runs `-Quiet` (it skips at once
 box heartbeat is started after the app is up and the lock is released, off the critical path: the `Claude app-seat heartbeat` scheduled task when it
 exists, else the publisher detached with its output in `.app-seat-publish.out`. A plain `--switch` publishes synchronously, as before.
 
-**The check after launch.** After every switch with a valid baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
+**The check after launch.** After every switch that wrote a baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
 waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences` on
 the next switch's last line); it changes nothing.
 
@@ -597,7 +604,7 @@ the next switch's last line); it changes nothing.
   this seat has a copy); the history sync runs after the stage, so a session started since its last run arrives a switch later.
 - *Revert risk.* If the app drops a pin at launch (the check shows `DIFFERS`), the drop is read at the next departure as an unpin and spreads.
   Pins survived a relaunch in the 2026-11-24 test; a pin made within 75 s of launch can show up as a difference too.
-- *Edits that cannot be trusted are not synced.* A seat whose sidebar databases were recreated (or whose baseline is invalid or missing)
+- *Edits that cannot be trusted are not synced.* A seat whose sidebar databases were recreated (or whose baseline is missing)
   contributes nothing; the report says `edits made on D were not synced: redo them`. Nothing is ever invented from an old stash, so an old
   stash cannot resurrect a pin you removed.
 - *Unreadable seats* (for example a seat whose pin state is not a plain one-byte string) are skipped and reported, never written.
@@ -611,9 +618,9 @@ the next switch's last line); it changes nothing.
 not-synced lines.
 
 **Reset steps** (a seat's sidebar got corrupted, or you want it to start clean): quit the app, then
-`py -3 -I windows\sidebar-sync.py --forget <seat>` (invalidates that seat's baseline and drops its pending departure; its next departure
+`py -3 -I windows\sidebar-sync.py --forget <seat>` (drops that seat's baseline and its departure marker; its next departure
 contributes nothing and its pins sync again after the next switch in). To forget everything, delete `.sidebar-sync-state.json`: the next
-switch rebuilds it from every readable seat (a pin on any seat wins).
+stage starts again from the entered seat's own pins and each seat's edits are merged as you leave it.
 
 Tests: `py -3 -I windows\test-sidebar-sync.py` (engine), `windows\test-app-relaunch.ps1` (the rotator's part, with a stub for python),
 `windows\test-sidebar-sync-sandbox.py` (on copies of the real seats, in `C:\Dev\Temp\sidebar-sync-sandbox`), and the owner-run

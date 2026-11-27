@@ -438,7 +438,7 @@ function Invoke-SwitchRelaunch([string]$label) {
         $ok = (-not $owner) -or ((Get-AppAccountUuid) -eq $owner)
         $r = if ($ok) { Open-ClaudeAppLocked } else { 'failed' }
         if ($r -eq 'deferred') {
-          Write-Host (Format-LastLine "Switched to seat $(Resolve-Label $label); reopening deferred: history sync busy; open the app from the Start menu once it has finished.") -ForegroundColor Red
+          Write-Host (Format-LastLine "Switched to seat $(Resolve-Label $label); reopening deferred: history sync busy, open the app yourself.") -ForegroundColor Red
           exit 3
         }
         if ($r -eq 'up') { $publishAfter = $true; Write-Host (Format-LastLine "Relaunched the Claude app on seat $(Resolve-Label $label).") -ForegroundColor Green }
