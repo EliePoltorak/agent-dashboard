@@ -564,7 +564,7 @@ written once, after the install) and `sidebar-departure.json` (ONE marker per se
 pin made on a seat reaches the others one switch at a time. Nothing scans every seat up front.
 **First-visit prerequisite.** A seat's edits are read at its departure against the baseline written when it was entered, and a seat that has never been
 entered through a switch has no baseline, so its first departure reads nothing. On a fresh setup, switch to another seat and back once before relying on
-(or testing) a pin made on the first one; `windows	est-sidebar-sync-journey.ps1` does this itself (its step 0) and checks the baseline before it asks you
+(or testing) a pin made on the first one; `windows\test-sidebar-sync-journey.ps1` does this itself (its step 0) and checks the baseline before it asks you
 to pin anything.
 
 **The stash pair comes first.** The stage's very first step writes the stash pair's own baseline, its config outcome (`config-stash.json`) and
@@ -578,7 +578,7 @@ The stage merges a marker once, by its `dep`, and the state records that; the st
 BEFORE any staged copy is built, so a stage that is killed afterwards cannot make the next stage merge the same marker again. A marker whose baseline is
 not the lineage already merged is checked against its own pins; an invalid one (databases recreated, no baseline, config refused at entry) is dismissed and reported.
 If the dismissed marker cannot be written, the seat is not mirrored at all: its stash and its old marker stay as they were, and the line says
-`edits on <seat> not synced`. Pending markers are applied in the order of `at`, not seat name. The rotator publishes and deletes nothing: a refused or failed switch leaves the markers as they are.
+`edits on <seat> not synced`. Pending markers are applied in the order of `at`, not seat name. The rotator publishes no state and deletes nothing, but it writes the departing seat's marker (dismissed first, full after the re-capture) before anything is moved, so a refused or failed switch still leaves that marker in place; the seat's next departure replaces it.
 
 **Known limits** (what the marker design does not close; each fails closed or is reported, none is silent):
 - *Two visits, one delta.* A seat left, entered again on its own stash, and left again before a stage merged the first departure has one marker, the
@@ -589,6 +589,11 @@ If the dismissed marker cannot be written, the seat is not mirrored at all: its 
 - *A kill between the rename and the baseline write* (inside one switch) loses the edits of that one activation.
 - *An unmerged marker, the same seat entered again, then an invalid departure* loses the edits of the first activation. It takes two failed stages around one
   seat plus an invalid departure.
+- *A drop the check never saw.* The check that takes an app-dropped pin out of the baseline only helps when it completed for that activation. If it did not (the
+  app was opened more than 30 minutes after a plain `--switch`, the seat was left within about 75 s, python was missing, the snapshot was unreadable, or the seat lock
+  was busy for 30 s), a pin the app dropped still counts as your unpin at the next departure.
+- *An unpin made within about 75 s of launch* is taken as an app drop: it is not spread, the pin comes back at the seat's next entry, and the check reports it
+  (`missing after launch, not treated as unpins`).
 
 **Whole-or-nothing install.** Each sidebar database dir (staged or the seat's own) is mirrored into an empty `<dir>.new` sibling, its file set is checked
 against the source exactly, and only then renamed into place; a staged file cannot survive a fallback to the stash, and the baseline is valid only after
@@ -611,16 +616,20 @@ box heartbeat is started after the app is up and the lock is released, off the c
 exists, else the publisher detached with its output in `.app-seat-publish.out`. A plain `--switch` publishes synchronously, as before.
 
 **The check after launch.** After every switch that wrote a baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
-waits 75 s, and compares the three pin stores with the pins it installed. It only reports (`verify.txt`, and `last check: N differences` on
-the next switch's last line); it changes nothing.
+waits 75 s, and compares the three pin stores with the pins it installed. It reports (`verify.txt`, and `last check: N differences` on
+the next switch's last line). Its one write: when an installed pin is missing from Local Storage or IndexedDB (the app dropped it at launch), it takes that pin
+out of the seat's baseline (`pins`, and `dropped` records it), under the seat lock and only while this install is still the live one, so the next departure does
+not read the drop as your unpin (the departure merge subtracts `dropped` from what it compares against); it names the pin in `verify.txt` and `report.txt`
+as `missing after launch, not treated as unpins`. It never creates a baseline, and when the lock is busy or the install was superseded it writes nothing and says `not narrowed`.
 It compares against the install record `<gen>\install.json` (this switch's gen, the installed pair's pins, the databases' creation times), not the baseline, whose gen and
 pins can belong to an older lineage that a stash-pair install continued; it is superseded only when the app is no longer on the seat's login or a later install rewrote the baseline.
 
 **Limits you can run into.**
 - *Reach.* A pin can only go on a session the entered seat already has a record for. The report names the rest (`no copy on <seat>`: pinned once
   this seat has a copy); the history sync runs after the stage, so a session started since its last run arrives a switch later.
-- *Revert risk.* If the app drops a pin at launch (the check shows `DIFFERS`), the drop is read at the next departure as an unpin and spreads.
-  Pins survived a relaunch in the 2026-11-24 test; a pin made within 75 s of launch can show up as a difference too.
+- *Revert risk.* If the app drops a pin at launch (the check shows `DIFFERS`), the check keeps the drop out of the baseline, so it is not read as an unpin
+  and does not spread (see Known limits for when the check does not complete). Pins survived a relaunch in the 2026-11-24 test; a pin made within 75 s of
+  launch can show up as a difference too.
 - *Edits that cannot be trusted are not synced.* A seat whose sidebar databases were recreated (or whose baseline is missing)
   contributes nothing; the report says `edits made on D were not synced: redo them`. Nothing is ever invented from an old stash, so an old
   stash cannot resurrect a pin you removed.
@@ -636,11 +645,13 @@ not-synced lines.
 
 **Reset steps** (a seat's sidebar got corrupted, or you want it to start clean): quit the app, then
 `py -3 -I windows\sidebar-sync.py --forget <seat>` (drops that seat's baseline and its departure marker; its next departure
-contributes nothing and its pins sync again after the next switch in). To forget everything, delete `.sidebar-sync-state.json`: the next
-stage starts again from the entered seat's own pins and each seat's edits are merged as you leave it.
+contributes nothing and its pins sync again after the next switch in). To forget everything, run `py -3 -I windows\sidebar-sync.py --reset` (app closed; it refuses
+while a switch, capture or keep-alive holds the seat lock): it deletes every seat's baseline and departure marker, and the global state file last. The next
+stage starts again from the entered seat's own pins and each seat's edits are merged as you leave it. Do not delete `.sidebar-sync-state.json` by hand: with the markers
+left in place, every old departure is merged again.
 
 Tests: `py -3 -I windows\test-sidebar-sync.py` (engine), `windows\test-app-relaunch.ps1` (the rotator's part, with a stub for python),
-`windows\test-sidebar-sync-sandbox.py` (on copies of the real seats, in `C:\Dev\Temp\sidebar-sync-sandbox`), and the owner-run
+`windows\test-sidebar-sync-sandbox.py` (on synthetic seats built with the engine's own writer, nothing real is read, in a fresh directory under `C:\Dev\Temp\sidebar-sync-sandbox`), and the owner-run
 `windows\test-sidebar-sync-journey.ps1` (closes and reopens the app; run it from a plain terminal).
 
 ## Desktop app session history (`claude-sync-history`)
