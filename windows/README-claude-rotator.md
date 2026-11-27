@@ -562,6 +562,10 @@ written once, after the install) and `sidebar-departure.json` (ONE marker per se
 
 **No first-switch scan.** Pins spread as each seat is entered: the first stage that reads a seat merges that seat's edits into the global intent, so a
 pin made on a seat reaches the others one switch at a time. Nothing scans every seat up front.
+**First-visit prerequisite.** A seat's edits are read at its departure against the baseline written when it was entered, and a seat that has never been
+entered through a switch has no baseline, so its first departure reads nothing. On a fresh setup, switch to another seat and back once before relying on
+(or testing) a pin made on the first one; `windows	est-sidebar-sync-journey.ps1` does this itself (its step 0) and checks the baseline before it asks you
+to pin anything.
 
 **The stash pair comes first.** The stage's very first step writes the stash pair's own baseline, its config outcome (`config-stash.json`) and
 `stash-result.json`, before anything that can wait, skip or run long. A stage that is skipped, times out or is killed still leaves the entered seat
@@ -573,11 +577,22 @@ the creation time of the live databases. (Before the mirror the marker is writte
 The stage merges a marker once, by its `dep`, and the state records that; the state is written by Python in one atomic replace after the decision and
 BEFORE any staged copy is built, so a stage that is killed afterwards cannot make the next stage merge the same marker again. A marker whose baseline is
 not the lineage already merged is checked against its own pins; an invalid one (databases recreated, no baseline, config refused at entry) is dismissed and reported.
-Pending markers are applied in the order of `at`, not seat name. The rotator publishes and deletes nothing: a refused or failed switch leaves the markers as they are.
+If the dismissed marker cannot be written, the seat is not mirrored at all: its stash and its old marker stay as they were, and the line says
+`edits on <seat> not synced`. Pending markers are applied in the order of `at`, not seat name. The rotator publishes and deletes nothing: a refused or failed switch leaves the markers as they are.
+
+**Known limits** (what the marker design does not close; each fails closed or is reported, none is silent):
+- *Two visits, one delta.* A seat left, entered again on its own stash, and left again before a stage merged the first departure has one marker, the
+  newer; the two visits are merged as one delta at the later timestamp. The rotator says so on the last line (`edits on <seat> from two visits merged; check
+  its pins`). Keeping every visit apart would need per-visit records, which the design rules out.
+- *An invalid departure is not synced.* A departure whose databases were recreated, with no baseline, or whose config was refused at entry, contributes nothing and
+  is reported (unchanged policy).
+- *A kill between the rename and the baseline write* (inside one switch) loses the edits of that one activation.
+- *An unmerged marker, the same seat entered again, then an invalid departure* loses the edits of the first activation. It takes two failed stages around one
+  seat plus an invalid departure.
 
 **Whole-or-nothing install.** Each sidebar database dir (staged or the seat's own) is mirrored into an empty `<dir>.new` sibling, its file set is checked
 against the source exactly, and only then renamed into place; a staged file cannot survive a fallback to the stash, and the baseline is valid only after
-that check passed; the baseline is written only after it. After the install, a seat that has an owner must be that account's login, or the switch fails
+that check passed; the baseline is written only after it. Before anything is moved, a target that has an owner must show a readable `config.json` with that account's uuid, or the switch is refused. After the install, the live login must be that account's, or the switch fails
 (the previous login is in `.swap-backups\<gen>`). The login files (`config.json` and friends) are copied with errors stopping the switch. The stage and verify children are started at Idle priority; the app itself is launched as before. A refused switch reopens the old login
 through the same history-locked launch as a successful one.
 
@@ -596,8 +611,10 @@ box heartbeat is started after the app is up and the lock is released, off the c
 exists, else the publisher detached with its output in `.app-seat-publish.out`. A plain `--switch` publishes synchronously, as before.
 
 **The check after launch.** After every switch that wrote a baseline a detached `sidebar-sync.py --verify` waits for the app to start (up to 30 min),
-waits 75 s, and compares the three pin stores with the baseline. It only reports (`verify.txt`, and `last check: N differences` on
+waits 75 s, and compares the three pin stores with the pins it installed. It only reports (`verify.txt`, and `last check: N differences` on
 the next switch's last line); it changes nothing.
+It compares against the install record `<gen>\install.json` (this switch's gen, the installed pair's pins, the databases' creation times), not the baseline, whose gen and
+pins can belong to an older lineage that a stash-pair install continued; it is superseded only when the app is no longer on the seat's login or a later install rewrote the baseline.
 
 **Limits you can run into.**
 - *Reach.* A pin can only go on a session the entered seat already has a record for. The report names the rest (`no copy on <seat>`: pinned once
