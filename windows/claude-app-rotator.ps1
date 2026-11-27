@@ -23,7 +23,8 @@ USAGE  (run in normal PowerShell, app CLOSED for capture/switch/rotate)
   claude-app-rotator.ps1 --switch <label>    # back up current login, load profile <label>
   claude-app-rotator.ps1 --switch <label> --relaunch
                                              # close the running app first (gracefully; aborts if it
-                                             # is still running after 30 s), switch, reopen the app;
+                                             # is still running 90 s after it was asked to quit;
+                                             # each app window first gets up to 5 s to answer), switch, reopen the app;
                                              # exit 3 if the switch stood but the app could not be reopened
   claude-app-rotator.ps1 --rotate [label]    # cycle to the next profile (or switch to <label>)
   claude-app-rotator.ps1 --capture <label>   # save the CURRENT login as profile <label>
@@ -147,13 +148,14 @@ public static class RotatorEndSession {
   delegate bool EnumProc(IntPtr h, IntPtr l);
   [DllImport("user32.dll")] static extern bool EnumWindows(EnumProc cb, IntPtr l);
   [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll")] static extern bool IsWindow(IntPtr h);
   [DllImport("user32.dll")] static extern IntPtr SendMessageTimeout(IntPtr h, uint m, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr r);
   public static bool Send(int[] ids) {
     var want = new HashSet<uint>(); foreach (var i in ids) want.Add((uint)i);
     var hs = new List<IntPtr>();
     EnumWindows((h, l) => { uint pid; GetWindowThreadProcessId(h, out pid); if (want.Contains(pid)) hs.Add(h); return true; }, IntPtr.Zero);
     bool ok = true; IntPtr r;
-    foreach (var h in hs) if (SendMessageTimeout(h, 0x11, IntPtr.Zero, (IntPtr)1, 2, 5000, out r) != IntPtr.Zero && r == IntPtr.Zero) ok = false;
+    foreach (var h in hs) if (SendMessageTimeout(h, 0x11, IntPtr.Zero, (IntPtr)1, 2, 5000, out r) == IntPtr.Zero ? IsWindow(h) : r == IntPtr.Zero) ok = false;   // no answer from a live window is a refusal, not consent
     foreach (var h in hs) SendMessageTimeout(h, 0x16, (IntPtr)(ok ? 1 : 0), (IntPtr)1, 2, 5000, out r);
     return ok;
   }
