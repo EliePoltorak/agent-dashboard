@@ -264,35 +264,11 @@ function Get-LiveCreation {
   }
   $o
 }
-function Get-CreatedKey($baseline) {
-  # "<ls>/<idb>" creation times of the install a baseline belongs to, or $null (invalid or older baseline)
-  if ($baseline -and $baseline.ContainsKey('created') -and $baseline['created']) { '{0}/{1}' -f $baseline['created']['ls'], $baseline['created']['idb'] } else { $null }
-}
-function Write-DepartureCheckpoint([string]$seat, $created) {
-  # <seat>\sidebar-departure.json = {entries: [{baseline, created}, ...]}, oldest first, written after a good re-capture: ONE ENTRY PER ACTIVATION. An entry
-  # carries the baseline of its own install (with that install's creation time) and the creation time seen at its departure, so each is checked against
-  # itself. A seat that ran on its stash pair again before a stage was published adds an entry; nothing is ever re-paired with a later activation's times
-  # (that rejected and consumed the older edits). An entry for the same activation is refreshed; consecutive invalid ones collapse into one.
-  $d = Join-Path $SeatRoot $seat; $cp = Join-Path $d 'sidebar-departure.json'
-  $entries = New-Object System.Collections.ArrayList
-  if (Test-Path -LiteralPath $cp) {
-    $old = Read-JsonFile $cp
-    if ($old -and $old.ContainsKey('entries')) { foreach ($e in @($old['entries'])) { [void]$entries.Add($e) } }
-    elseif ($old -and $old.ContainsKey('baseline')) { [void]$entries.Add($old) }
-    else { [void]$entries.Add(@{ baseline = @{ valid = $false }; created = $null }) }
-  }
-  $cur = Read-JsonFile (Join-Path $d 'sidebar-baseline.json')
-  if ($null -eq $cur) { $cur = @{ valid = $false } }
-  $entry = @{ baseline = $cur; created = $created }
-  $key = Get-CreatedKey $cur
-  $at = -1
-  for ($i = 0; $i -lt $entries.Count; $i++) {
-    $k = Get-CreatedKey $entries[$i]['baseline']
-    if ($key) { if ($k -eq $key) { $at = $i } }
-    elseif (-not $k -and $entries[$i]['baseline']['valid'] -ne $true -and $i -eq $entries.Count - 1) { $at = $i }      # only an INVALID previous entry collapses; older edits stay in their own entry
-  }
-  if ($at -ge 0) { $entries[$at] = $entry } else { [void]$entries.Add($entry) }
-  Write-JsonAtomic $cp @{ entries = @($entries) }
+function Write-DepartureMarker([string]$seat, $marker) {
+  # <seat>\sidebar-departure.json: ONE object per seat, REPLACED at every departure, never appended. Dismissed form {dep}: the departure is under way (the
+  # mirror below has not finished); full form {dep, at, baseline, created}: the baseline file of that seat verbatim (or null) and the creation times of the
+  # live sidebar databases at the departure. The stage merges a marker once, by its `dep`, and records that in the state file.
+  Write-JsonAtomic (Join-Path (Join-Path $SeatRoot $seat) 'sidebar-departure.json') $marker
 }
 function Get-SidebarSyncCommand {
   # @{ file; args } for sidebar-sync.py (the real python.exe, not the py launcher, so stopping the PID stops the work), or $null.
@@ -341,25 +317,6 @@ function Add-NotSynced([string]$note, $res) {
   $ns = if ($res -and $res['not_synced']) { @($res['not_synced']) } else { @() }
   if ($ns.Count -eq 0) { return $note }
   $note -replace '^Sidebar: ', "Sidebar: edits on $($ns -join ', ') not synced; "
-}
-function Publish-SidebarState([string]$gdir) {
-  # Only after a stage that exited 0 in time, under the seat lock: the proposed global state replaces the published one (atomic), and each
-  # checkpoint the stage read is deleted if it is still the one it hashed. A stage that never finished publishes and consumes nothing.
-  $st = Join-Path $gdir 'state.json'
-  if (Test-Path -LiteralPath $st) {
-    $live = Join-Path $SeatRoot '.sidebar-sync-state.json'
-    Copy-Item -LiteralPath $st -Destination "$live.tmp" -Force
-    [IO.File]::Move("$live.tmp", $live, $true)
-  }
-  $cf = Join-Path $gdir 'consumed.txt'
-  if (Test-Path -LiteralPath $cf) {
-    foreach ($line in @(Get-Content -LiteralPath $cf)) {
-      $s, $h = $line -split "`t"
-      if (-not $s -or $s -notmatch '^[^\\/.][^\\/]*$') { continue }
-      $cp = Join-Path (Join-Path $SeatRoot $s) 'sidebar-departure.json'
-      if ((Test-Path -LiteralPath $cp) -and ((Get-FileHash -LiteralPath $cp -Algorithm SHA256).Hash -ieq $h)) { Remove-Item -LiteralPath $cp -Force }
-    }
-  }
 }
 function Commit-SidebarConfig([string]$cf, [string]$pair, [string]$gen) {
   # The shared claude_desktop_config.json carries a third copy of the pin list. Called only after the target's baseline was SAVED, and only when
@@ -425,8 +382,9 @@ function Set-SidebarNote([string]$text, [string]$gdir, [string]$reportLine) {
       if (-not (Test-Path -LiteralPath $r)) { Set-Content -LiteralPath $r -Value $reportLine -Encoding UTF8 }
     } catch {}
   }
-  $script:SidebarNote = $text
   $script:SidebarWarn = ($text -notmatch '^Sidebar: (synced \d+ pins\.|nothing to sync\.)$')
+  if ($text.Length -gt 80) { $text = $text.Substring(0, 77) + '...' }          # the full reason is in report.txt; the last line must leave room for what to do next
+  $script:SidebarNote = $text
   if ($script:SidebarWarn -and $gdir) { Write-Host "  sidebar report: $(Join-Path $gdir 'report.txt')" -ForegroundColor DarkGray }
 }
 function Format-LastLine([string]$msg) {
@@ -615,23 +573,30 @@ function Invoke-Switch([string]$label) {
       $gdir = Join-Path $SidebarWork $gen
       Write-Host "  sidebar gen: $gen" -ForegroundColor DarkGray
       if ($prev) {
-        $created = Get-LiveCreation      # before the re-capture: the departure checkpoint compares it with what was installed
+        $created = Get-LiveCreation      # before the re-capture
         $pdst = Join-Path $SeatRoot $prev
+        # 1) the departure marker in its DISMISSED form before anything is mirrored: a crash during the mirror leaves "no merge", never a half-valid marker
+        try { Write-DepartureMarker $prev @{ dep = $gen } } catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+        # the login file is copied FIRST and must succeed: a failed copy here followed by the /MIR below would overwrite the stash of $prev with another login
+        foreach ($f in $LoginFiles) {
+          if (Test-Path "$AppDir\$f") {
+            try { Copy-Item "$AppDir\$f" "$pdst\$f" -Force -ErrorAction Stop }
+            catch { Write-Host "REFUSED: could not save the current login's $f into seat '$prev' ($($_.Exception.Message)). Nothing was switched." -ForegroundColor Red; exit 1 }
+          }
+        }
         $recapOk = $true
-        foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$pdst\$f" -Force } }
         foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Mirror-Dir "$AppDir\$d" "$pdst\$d"; if ($script:RobocopyRc -ge 8) { $recapOk = $false } } }
         "captured=$stamp account=$(Get-ProfileEmail $prev) uuid=$liveUuid label=$prev" | Set-Content "$pdst\meta.txt" -Encoding UTF8
         Write-Host "Re-captured '$prev' (kept its login fresh -- no re-sign-in when you switch back)." -ForegroundColor DarkGray
         if ($recapOk -and $created.ls -and $created.idb) {
-          try { Write-DepartureCheckpoint $prev $created } catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+          # the FULL marker, only after a good mirror: the baseline file of $prev verbatim (it is checked against `created` at the next stage)
+          try { Write-DepartureMarker $prev @{ dep = $gen; at = [DateTime]::UtcNow.ToFileTimeUtc(); baseline = (Read-JsonFile (Join-Path $pdst 'sidebar-baseline.json')); created = $created } }
+          catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
         }
       } else {
         Write-Host "Live login (uuid $liveUuid) doesn't match any captured seat -- NOT re-capturing." -ForegroundColor DarkYellow
         Write-Host "If you logged in manually and want this login saved, quit and run --capture <label> first." -ForegroundColor DarkYellow
       }
-      # The target's baseline is invalid until its install succeeds (so any interruption below leaves it invalid). A departure is read against its
-      # own checkpoint, never this file, so this loses no pending edit.
-      try { Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') @{ valid = $false } } catch {}
       if (-not $prev) { Set-SidebarNote "Sidebar: skipped (the live login is no captured seat)" $gdir 'skipped: the live login is no captured seat' }
       elseif (-not $owner -or $snapUuid -ne $owner) { Set-SidebarNote "Sidebar: skipped (seat $label has no verified login to read)" $gdir "skipped: the stash of $label holds no login that matches its owner-uuid.txt" }
       else {
@@ -641,11 +606,11 @@ function Invoke-Switch([string]$label) {
         $stage.stashRes = Read-StageFile $gdir 'stash-result.json' $label $gen
         $stage.result = $null
         if ($stage.ran) {
-          # the result must name THIS switch's target and generation; anything else is not ours: nothing is published, installed or consumed.
+          # the result must name THIS switch's target and generation; anything else is not ours: its staged pair is not installed.
           # It is validated ONCE here and kept in memory: nothing below re-reads it.
           $res0 = Read-StageFile $gdir 'result.json' $label $gen
           if (-not $res0) { $stage.ran = $false; $stage.reason = 'the stage result does not belong to this switch' }
-          else { $stage.result = $res0; $stage.pair = $res0['pair'] }          # NOT published yet: the install below must be verified first
+          else { $stage.result = $res0; $stage.pair = $res0['pair'] }          # the stage already COMMITTED the state itself: nothing to publish, nothing to delete
         }
       }
       $bk = Join-Path $SeatRoot ".swap-backups\$gen"
@@ -653,7 +618,12 @@ function Invoke-Switch([string]$label) {
       # 1) back up current login (files copied, dirs MOVED aside = reversible, nothing deleted). Every dir that existed must end up gone from the
       # live path and present in the backup; otherwise what was moved goes back, and the switch stops (S62, S75).
       Assert-Closed
-      foreach ($f in $LoginFiles) { if (Test-Path "$AppDir\$f") { Copy-Item "$AppDir\$f" "$bk\$f" -Force } }
+      foreach ($f in $LoginFiles) {
+        if (Test-Path "$AppDir\$f") {
+          try { Copy-Item "$AppDir\$f" "$bk\$f" -Force -ErrorAction Stop }
+          catch { Write-Host "REFUSED: could not back up the current login's $f ($($_.Exception.Message)). Nothing was switched." -ForegroundColor Red; exit 1 }
+        }
+      }
       $moved = New-Object System.Collections.Generic.List[string]; $failed = $null
       foreach ($d in @($LoginDirs | Where-Object { Test-Path -LiteralPath "$AppDir\$_" })) {
         try { Move-Item -LiteralPath "$AppDir\$d" -Destination "$bk\$d" -Force -ErrorAction Stop } catch { $failed = $d; break }
@@ -674,7 +644,16 @@ function Invoke-Switch([string]$label) {
       }
       # 2) apply the chosen profile. The two sidebar dirs come from the staging gen when it built them, else from the stash; if either staged copy
       # fails both are removed (this copy created them in now-empty paths) and the stash pair goes in (S51, S63); if that fails too, stop (no relaunch).
-      foreach ($f in $LoginFiles) { if (Test-Path "$src\$f") { Copy-Item "$src\$f" "$AppDir\$f" -Force } }
+      foreach ($f in $LoginFiles) {
+        if (Test-Path "$src\$f") {
+          try { Copy-Item "$src\$f" "$AppDir\$f" -Force -ErrorAction Stop }
+          catch {
+            $script:ProfileIntact = $false
+            Write-Host "FAILED: could not copy the login file $f of seat '$label' in ($($_.Exception.Message)). The previous login is in $bk -- restore it into $AppDir. The app was not reopened." -ForegroundColor Red
+            exit 1
+          }
+        }
+      }
       foreach ($d in @($LoginDirs | Where-Object { $SidebarDirs -notcontains $_ })) { if (Test-Path "$src\$d") { Copy-Dir "$src\$d" "$AppDir\$d" } }
       $stagedAvail = [bool]($stage -and $stage.ran -and $stage.pair -eq 'staged' -and (Test-Path -LiteralPath "$gdir\Local Storage") -and (Test-Path -LiteralPath "$gdir\IndexedDB") -and (Test-Path -LiteralPath "$gdir\baseline.json"))
       $installVerified = $false
@@ -689,28 +668,40 @@ function Invoke-Switch([string]$label) {
           exit 1
         }
       }
+      # a seat that has an owner must now be THAT account's login; anything else is a failed install, like a failed sidebar install
+      if ($owner -and (Get-AppAccountUuid) -ne $owner) {
+        $script:ProfileIntact = $false
+        Write-Host "FAILED: after the install the app's login is not the account of seat '$label' (expected $owner, found $(Get-AppAccountUuid)). The previous login is in $bk -- restore it into $AppDir. The app was not reopened." -ForegroundColor Red
+        exit 1
+      }
       $label | Set-Content "$SeatRoot\.active" -Encoding UTF8
       Write-Host "Switched the Claude app login to profile '$label' ($(Get-ProfileEmail $label))." -ForegroundColor Green
-      # 3) record the target's baseline and the shared config. The candidate baseline is written FIRST with valid:false (and the creation time of the
-      # live databases just installed, which a departure later compares), so an interruption anywhere below leaves it invalid (S66); the config
-      # outcome for the INSTALLED pair, an explicit one from the stage's own validated files and never a default, is then settled (match, prepared ->
-      # commit, or refused); and only when it is match or committed is the candidate rewritten with valid:true. A refused or failed config leaves the
-      # stores disagreeing: the baseline stays invalid, so whatever the app reconciles at launch is never read as a user edit at the next departure,
-      # and the note says partial. The stash pair has its own files and outcome (stash-result.json, baseline-stash.json, config-stash.json).
+      # 3) the target's baseline and the shared config. The config outcome for the INSTALLED pair (an explicit one from the stage's own validated files, never a
+      # default) is settled first (match, prepared -> commit, or refused); the baseline is then written ONCE, atomically, only when that outcome is match or
+      # committed. A refused or failed config leaves the stores disagreeing: the old baseline stays, its `created` no longer matches the new databases, so
+      # whatever the app reconciles at launch is never read as a user edit at the next departure, and the note says partial. The stash pair has its own
+      # files and outcome (stash-result.json, baseline-stash.json, config-stash.json).
       if ($pair -eq 'staged') { $sres = $stage.result; $bsrc = "$gdir\baseline.json"; $cfgFile = "$gdir\config.json" }
       else { $sres = $stage.stashRes; $bsrc = "$gdir\baseline-stash.json"; $cfgFile = "$gdir\config-stash.json" }
       $candidate = $null
       try {
         $created2 = Get-LiveCreation
-        $b0 = if ($sres -and (Test-Path -LiteralPath $bsrc)) { Read-JsonFile $bsrc } else { $null }
-        if ($b0 -and $b0['valid'] -eq $true -and $created2.ls -and $created2.idb) {
-          $b0['created'] = $created2
-          $b0['valid'] = $false
-          Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') $b0
-          $b0['valid'] = $true
-          $candidate = $b0
+        $b0 = $null
+        if ($sres) {
+          if ($pair -eq 'staged') { if (Test-Path -LiteralPath $bsrc) { $b0 = Read-JsonFile $bsrc } }
+          else {
+            # the stash pair: when the target's pending marker belongs to the baseline now on disk, the lineage continues (same gen, pins, manifest; the next
+            # delta then covers both activations); otherwise the stage's own baseline-stash.json; otherwise no baseline is written at all
+            $tm = Read-JsonFile (Join-Path $src 'sidebar-departure.json'); $cur = Read-JsonFile (Join-Path $src 'sidebar-baseline.json')
+            $tmb = if ($tm) { $tm['baseline'] } else { $null }
+            if ($tmb -and $cur -and $tmb['gen'] -eq $cur['gen'] -and $tmb['created'] -and $tm['created'] -and $tm['created']['ls'] -eq $tmb['created']['ls'] -and $tm['created']['idb'] -eq $tmb['created']['idb']) {
+              $b0 = @{ gen = $cur['gen']; pins = $cur['pins']; manifest = $cur['manifest'] }
+            }
+            elseif (Test-Path -LiteralPath $bsrc) { $b0 = Read-JsonFile $bsrc }
+          }
         }
-      } catch { Write-Host "  (sidebar: baseline not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow; $candidate = $null }
+        if ($b0 -and $b0.ContainsKey('pins') -and $created2.ls -and $created2.idb) { $b0.Remove('valid'); $b0['created'] = $created2; $candidate = $b0 }
+      } catch { Write-Host "  (sidebar: baseline not prepared: $($_.Exception.Message))" -ForegroundColor DarkYellow; $candidate = $null }
       $cfg = @{ state = 'none'; why = '' }; $partial = $null
       if ($sres -and $candidate) {
         $co = [string]$sres['config']; $cpair = [string]$sres['config_pair']
@@ -720,21 +711,15 @@ function Invoke-Switch([string]$label) {
         elseif ($co -eq 'prepared') { $cfg = Commit-SidebarConfig $cfgFile $pair $gen; if ($cfg.state -ne 'committed') { $cfg.state = 'failed' } }
         else { $cfg = @{ state = 'failed'; why = $(if ($co) { "config not changed ($co)" } else { 'config not changed: the stage reported no config outcome' }) } }
       } elseif ($sres -and $sres['config'] -eq 'prepared') {
-        $cfg = @{ state = 'failed'; why = 'config not changed: the baseline was not saved' }
+        $cfg = @{ state = 'failed'; why = 'config not changed: there was no baseline to write' }
       }
       if ($cfg.why) { try { Add-Content -LiteralPath (Join-Path $gdir 'report.txt') -Value $cfg.why } catch {} }
       if ($cfg.state -eq 'failed') { $partial = $cfg.why }
       if ($candidate -and $cfg.state -in @('match', 'committed')) {
         try { Write-JsonAtomic (Join-Path $src 'sidebar-baseline.json') $candidate; $baselineOk = $true }
-        catch { Write-Host "  (sidebar: baseline not validated: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+        catch { Write-Host "  (sidebar: baseline not written: $($_.Exception.Message))" -ForegroundColor DarkYellow }
       }
       if ($stage -and $stage.ran -and $pair -eq 'staged' -and -not $baselineOk -and -not $partial) { $partial = 'the baseline could not be saved' }
-      # Only now, with the install verified, does the candidate state become the published one and the consumed checkpoints go (state first, atomically: it
-      # carries the acknowledgement, so a crash before the deletions cannot apply a checkpoint twice). A refused or failed switch exits above and
-      # promotes nothing: the checkpoints stay and the next stage reads them again.
-      if ($installVerified -and $stage -and $stage.ran -and $stage.result) {
-        try { Publish-SidebarState $stage.gdir } catch { Write-Host "  (sidebar: state not published: $($_.Exception.Message))" -ForegroundColor DarkYellow }
-      }
       # the line the dashboard shows
       if (-not $script:SidebarNote) {
         $res = if ($stage -and $stage.ran) { $stage.result } else { $null }
