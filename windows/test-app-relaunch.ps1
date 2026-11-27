@@ -55,6 +55,54 @@ try {
   Check 'stuck app: nothing force-killed' ($script:killed.Count -eq 0)
   Check 'stuck app: waited about CloseWaitSec' (((Get-Date) - $t0).TotalSeconds -ge 0.9)
 
+  # an app that refuses the quit: abort at once, not after the full wait
+  function Send-AppEndSession([int[]]$Ids) { $false }
+  $script:CloseWaitSec = 30; $t0 = Get-Date
+  Check 'refusing app: Close-AppGracefully returns $false without waiting' ((Close-AppGracefully) -eq $false -and ((Get-Date) - $t0).TotalSeconds -lt 10)
+  function Send-AppEndSession([int[]]$Ids) { $script:closed += $Ids; $true }
+  $script:CloseWaitSec = 1
+
+  # the real window messages, against a hidden test window that answers the quit query with 1 or 0
+  $qf = Join-Path $root 'qform.ps1'
+  @'
+param([int]$Answer, [string]$Log)
+Add-Type -AssemblyName System.Windows.Forms
+$refs = [System.Windows.Forms.Form], [System.Windows.Forms.Message], [System.ComponentModel.Component], [System.Drawing.Size], [object], [System.IO.File], [System.ComponentModel.IComponent] | ForEach-Object { $_.Assembly.Location } | Select-Object -Unique
+Add-Type -ReferencedAssemblies $refs @"
+using System.Windows.Forms;
+public class QForm : Form {
+  public int Answer; public string Log;
+  protected override void WndProc(ref Message m) {
+    if (m.Msg == 0x11) { m.Result = (System.IntPtr)Answer; return; }
+    if (m.Msg == 0x16) { System.IO.File.WriteAllText(Log, m.WParam.ToString()); Application.ExitThread(); return; }
+    base.WndProc(ref m);
+  }
+}
+"@
+$f = [QForm]::new(); $f.Answer = $Answer; $f.Log = $Log; $null = $f.Handle
+Set-Content "$Log.ready" 1
+[System.Windows.Forms.Application]::Run()
+'@ | Set-Content $qf
+  $child = @"
+. '$script_'
+[void](Send-AppEndSession @())
+foreach (`$a in 1, 0) {
+  `$log = Join-Path '$root' "qform`$a.txt"
+  `$c = Start-Process pwsh -ArgumentList '-NoProfile', '-File', '$qf', `$a, `$log -PassThru -WindowStyle Hidden
+  `$t = Get-Date; while (-not (Test-Path "`$log.ready") -and ((Get-Date) - `$t).TotalSeconds -lt 120) { Start-Sleep 1 }
+  `$sent = [RotatorEndSession]::Send(@(`$c.Id))
+  `$t = Get-Date; while (-not `$c.HasExited -and ((Get-Date) - `$t).TotalSeconds -lt 30) { Start-Sleep 1 }
+  `$wp = if (Test-Path `$log) { (Get-Content `$log -Raw).Trim() } else { 'none' }
+  "R `$a `$sent `$wp"
+  if (-not `$c.HasExited) { Stop-Process -Id `$c.Id }
+}
+"R nowin `$([RotatorEndSession]::Send(@(3)))"
+"@
+  $out = & pwsh -NoProfile -Command $child 2>&1 | Out-String
+  Check 'real messages, window answers 1: Send returns True, WM_ENDSESSION carries 1' ($out -match 'R 1 True 1') $out
+  Check 'real messages, window answers 0: Send returns False, WM_ENDSESSION carries 0' ($out -match 'R 0 False 0') $out
+  Check 'real messages: no window at all is a refusal' ($out -match 'R nowin False') $out
+
   # the whole --relaunch path with a stuck app, in a child pwsh: ABORTED, exit 1, nothing switched, nothing launched
   $seat = Join-Path $root '.claude-app-seats\B'
   New-Item -ItemType Directory -Path $seat -Force | Out-Null

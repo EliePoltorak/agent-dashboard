@@ -140,7 +140,9 @@ function Send-AppEndSession([int[]]$Ids) {
   # Asks the app to quit the way Windows does at log-off: WM_QUERYENDSESSION, then WM_ENDSESSION (ENDSESSION_CLOSEAPP, as the
   # Restart Manager sends it) to every top-level window of those PIDs, hidden ones included. A plain window close only hides
   # the app to the tray, and a tray-hidden app has no MainWindowHandle at all (verified on a second app instance, 2026-11-27).
-  # The app quits through its own shutdown path, as at every restart; nothing is force-killed. -> $false if a window refused.
+  # The app exits as at every Windows restart; nothing is force-killed. Like a restart, that does NOT flush cookies set in the
+  # last ~30 s (measured 2026-11-27), so a login refreshed just before the quit can reach the seat's stash as the older copy.
+  # -> $false, and the quit is cancelled, if a window refused or did not answer, or there was no app window to ask.
   if (-not ('RotatorEndSession' -as [type])) {
     Add-Type @'
 using System; using System.Collections.Generic; using System.Runtime.InteropServices;
@@ -154,6 +156,7 @@ public static class RotatorEndSession {
     var want = new HashSet<uint>(); foreach (var i in ids) want.Add((uint)i);
     var hs = new List<IntPtr>();
     EnumWindows((h, l) => { uint pid; GetWindowThreadProcessId(h, out pid); if (want.Contains(pid)) hs.Add(h); return true; }, IntPtr.Zero);
+    if (hs.Count == 0) return false;
     bool ok = true; IntPtr r;
     foreach (var h in hs) if (SendMessageTimeout(h, 0x11, IntPtr.Zero, (IntPtr)1, 2, 5000, out r) == IntPtr.Zero ? IsWindow(h) : r == IntPtr.Zero) ok = false;   // no answer from a live window is a refusal, not consent
     foreach (var h in hs) SendMessageTimeout(h, 0x16, (IntPtr)(ok ? 1 : 0), (IntPtr)1, 2, 5000, out r);
@@ -162,6 +165,8 @@ public static class RotatorEndSession {
 }
 '@
   }
+  # Get-AppProcs can take minutes on a loaded machine: drop any PID that has since become something other than the app.
+  $Ids = @(if ($Ids) { Get-Process -Id $Ids -ErrorAction SilentlyContinue | Where-Object ProcessName -eq 'claude' | ForEach-Object Id })
   [RotatorEndSession]::Send($Ids)
 }
 function Close-AppGracefully {
@@ -170,10 +175,12 @@ function Close-AppGracefully {
   $p = @(Get-AppProcs)
   if ($p.Count -eq 0) { return $true }
   Write-Host "Closing the Claude app (PIDs $($p.Id -join ', '))..." -ForegroundColor DarkGray
-  [void](Send-AppEndSession @($p.Id))
+  if (-not (Send-AppEndSession @($p.Id))) { Write-Host 'The app refused or did not answer the request to quit (or had no window to ask).' -ForegroundColor Red; return $false }
   $deadline = (Get-Date).AddSeconds($script:CloseWaitSec)
   while ((Get-Date) -lt $deadline -and @(Get-AppProcs).Count) { Start-Sleep -Milliseconds 500 }
-  return (@(Get-AppProcs).Count -eq 0)
+  $left = @(Get-AppProcs)
+  if ($left.Count) { Write-Host "Still running $($script:CloseWaitSec) s after it was asked to quit: PIDs $($left.Id -join ', ')." -ForegroundColor Red; return $false }
+  $true
 }
 function Find-AppLauncher {
   # The installed app's launcher, as {file; args}: the Squirrel stub the Start-menu shortcut runs (it starts the newest
@@ -210,7 +217,7 @@ function Invoke-SwitchRelaunch([string]$label) {
   # Exit 3: switched, but the app could not be reopened.
   $wasRunning = @(Get-AppProcs).Count -gt 0
   if (-not (Close-AppGracefully)) {
-    Write-Host "ABORTED: the Claude app was still running $($script:CloseWaitSec) s after it was asked to close (if it lives in the system tray, quit it from the tray icon and run this again). Nothing was switched; it was not force-closed (that can tear the login storage)." -ForegroundColor Red
+    Write-Host "ABORTED: the Claude app did not quit (see above). If it lives in the system tray, quit it from the tray icon and run this again. Nothing was switched; it was not force-closed (that can tear the login storage)." -ForegroundColor Red
     exit 1
   }
   $script:SwitchDone = $false
