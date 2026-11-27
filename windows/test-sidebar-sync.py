@@ -263,19 +263,28 @@ class World:
     def drop_rec(self, acct, sid, org=ORG):
         os.unlink(os.path.join(self.app, 'claude-code-sessions', acct, org, sid + '.json'))
 
-    def baseline(self, name, pins, manifest=(1, 1), valid=True, gen='g0', created=True):
-        b = {'valid': True, 'gen': gen, 'pins': pins, 'manifest': {'ls': manifest[0], 'idb': manifest[1]}} if valid else {'valid': False}
-        if valid and created:
-            b['created'] = {'ls': 111, 'idb': 222}          # CreationTime of the live databases right after the install (written by the rotator)
-        json.dump(b, open(os.path.join(self.seats, name, SS.BASELINE), 'w'))
+    def baseline(self, name, pins, manifest=(1, 1), gen='b1', created=(111, 222), write=True):
+        """A seat's baseline: what was installed (gen, pins, manifest) and the creation times of the live databases right after that install."""
+        b = {'gen': gen, 'pins': pins, 'manifest': {'ls': manifest[0], 'idb': manifest[1]}}
+        if created:
+            b['created'] = {'ls': created[0], 'idb': created[1]}
+        if write:
+            json.dump(b, open(os.path.join(self.seats, name, SS.BASELINE), 'w'))
         return b
 
-    def checkpoint(self, name, baseline, created=None):
-        c = {'baseline': baseline, 'created': created or {'ls': 111, 'idb': 222}}
-        json.dump(c, open(os.path.join(self.seats, name, SS.DEPARTURE), 'w'))
+    def marker(self, name, baseline, dep='d1', at=1, created=(111, 222)):
+        """A seat's ONE departure marker (what the rotator writes after a good re-capture): the baseline verbatim, the creation times seen at departure."""
+        m = {'dep': dep, 'at': at, 'baseline': baseline, 'created': {'ls': created[0], 'idb': created[1]}}
+        json.dump(m, open(os.path.join(self.seats, name, SS.DEPARTURE), 'w'))
+        return m
 
-    def state(self, pins):
-        json.dump({'version': 1, 'gen': 'g0', 'pins': pins}, open(os.path.join(self.seats, SS.STATE), 'w'))
+    def state(self, pins, seats=None):
+        json.dump({'version': 2, 'gen': 'g0', 'pins': pins, 'seats': seats or {}}, open(os.path.join(self.seats, SS.STATE), 'w'))
+
+    def committed(self):
+        """The state file Python committed (None when there is none)."""
+        p = os.path.join(self.seats, SS.STATE)
+        return json.load(open(p)) if os.path.exists(p) else None
 
     def stage(self, leaving, target, gen='g1'):
         out = io.StringIO()
@@ -284,26 +293,20 @@ class World:
         g = os.path.join(self.seats, SS.WORK, gen)
         return Gen(g, rc, out.getvalue())
 
-    def install(self, gen, target, delete=True):
-        """What the rotator does after a good stage: the staged pair (if any) replaces the seat's dirs, the baseline and state are published,
-        consumed checkpoints removed."""
+    def install(self, gen, target):
+        """What the rotator does after a good stage: the staged pair (if any) replaces the seat's dirs and the baseline is written ONCE, with the creation
+        times of the new live databases (the state was already committed by the stage)."""
         g = gen.dir
         d = os.path.join(self.seats, target)
         if os.path.isdir(os.path.join(g, 'Local Storage')):
             for rel in ('Local Storage', 'IndexedDB'):
                 shutil.rmtree(os.path.join(d, rel))
                 shutil.copytree(os.path.join(g, rel), os.path.join(d, rel))
-            shutil.copy(os.path.join(g, 'baseline.json'), os.path.join(d, SS.BASELINE))
+            b = json.load(open(os.path.join(g, 'baseline.json')))
         else:
-            shutil.copy(os.path.join(g, 'baseline-stash.json'), os.path.join(d, SS.BASELINE))
-        if os.path.exists(os.path.join(g, 'state.json')):
-            shutil.copy(os.path.join(g, 'state.json'), os.path.join(self.seats, SS.STATE))
-        if delete and os.path.exists(os.path.join(g, 'consumed.txt')):
-            for line in open(os.path.join(g, 'consumed.txt')).read().splitlines():
-                s, h = line.split('\t')
-                p = os.path.join(self.seats, s, SS.DEPARTURE)
-                if os.path.exists(p) and SS.sha256_file(p) == h:
-                    os.unlink(p)
+            b = json.load(open(os.path.join(g, 'baseline-stash.json')))
+        b['created'] = {'ls': 111, 'idb': 222}
+        json.dump(b, open(os.path.join(d, SS.BASELINE), 'w'))
 
 
 IDB_KEY = b'\x00\x05\x01\x01\x01\x23' + 'store:pin-state:dframe-starred-code'.encode('utf-16-be')
@@ -370,55 +373,182 @@ def test_logic(tmp):
         n[0] += 1
         return os.path.join(tmp, 'w%d' % n[0])
 
-    # departure pin reaches the target, in both stores
+    def clean(st):
+        return {k: v for k, v in st.items() if k != 'gen'}
+
+    # ---- a departure pin reaches the target, in both stores; the state is COMMITTED by the stage itself
     w = two(fresh())
     w.state({'cli1': False})
     b = w.baseline('C', [])
     w.set_pins('C', ['local_c1'])
-    w.checkpoint('C', b)
+    w.marker('C', b)
     g = w.stage('C', 'D')
+    st = w.committed()
     check('departure pin reaches the target (staged, both stores agree)', g.rc == 0 and g.staged and g.pins() == ['local_d1'] and g.result['status'] == 'synced' and g.result['n'] == 1 and 'Sidebar: synced 1 pins.' in g.out, g.out + str(g.result))
-    check('stage: state publishes the pin, baseline carries the gen and the new list', g.f('state.json')['pins'] == {'cli1': True} and g.f('baseline.json')['pins'] == ['local_d1'] and g.f('baseline.json')['gen'] == 'g1')
-    check('stage: the stash is untouched (byte for byte)', seat_pins(w, 'D') == [])
-    check('stage: consumed lists the checkpoint with its hash', g.f('consumed.txt').split('\t')[0] == 'C')
-    # repeat idempotent
+    check('the state is committed by the stage: the pin, and the departure merged (dep, base, observed)', st['version'] == 2 and st['pins'] == {'cli1': True} and st['seats']['C'] == {'dep': 'd1', 'base': 'b1', 'observed': ['local_c1']}, str(st))
+    check('stage: baseline carries the gen and the new list (the rotator adds created); no valid flag; the stash is untouched', g.f('baseline.json')['pins'] == ['local_d1'] and g.f('baseline.json')['gen'] == 'g1'
+          and 'valid' not in g.f('baseline.json') and seat_pins(w, 'D') == [])
+    check('stage: there is no consumed.txt and no candidate state file in the gen dir', g.f('consumed.txt') is None and g.f('state.json') is None)
     w.install(g, 'D')
     w.set_pins('C', ['local_c1'])
     g2 = w.stage('C', 'D', 'g2')
-    check('a second identical stage stages no databases', g2.rc == 0 and not g2.staged and g2.result['status'] == 'nothing' and 'nothing to sync' in g2.out, g2.out)
-    check('the checkpoint was consumed by the install, a repeat reads none', not os.path.exists(os.path.join(w.seats, 'C', SS.DEPARTURE)))
+    check('a second stage over the same marker stages no databases and leaves the committed state unchanged (apart from its gen)', g2.rc == 0 and not g2.staged and g2.result['status'] == 'nothing' and clean(w.committed()) == clean(st), g2.out)
 
-    # unpin reaches the target; the last remaining pin can be unpinned
+    # ---- spec test 1, REPLAY: a marker read twice (or again after a later stage) is never applied twice
+    w = World(fresh())
+    w.seat('B', 'ab', [])
+    w.seat('C', 'ac', [])
+    w.seat('D', 'ad', [])
+    for ac, nm in (('ab', 'b'), ('ac', 'c'), ('ad', 'd')):
+        w.rec(ac, 'local_%s1' % nm, 'cliX')
+    w.state({'cliX': False})
+    bc = w.baseline('C', [])
+    w.set_pins('C', ['local_c1'])                                            # C pins X
+    w.marker('C', bc, dep='dC', at=10)
+    w.stage('C', 'D', 'rp1')
+    check('replay setup: X is pinned after the first merge', w.committed()['pins'] == {'cliX': True})
+    bb = w.baseline('B', ['local_b1'])
+    w.set_pins('B', [])                                                      # B unpins X later
+    w.marker('B', bb, dep='dB', at=20)
+    w.stage('B', 'D', 'rp2')
+    check('replay setup: the later unpin on B wins', w.committed()['pins'] == {'cliX': False})
+    w.stage('B', 'D', 'rp3')                                                 # C's marker is still on disk, unchanged
+    check('REPLAY: C\'s old marker is never applied again: X stays unpinned, and the target gets no pin added back', w.committed()['pins'] == {'cliX': False} and seat_pins(w, 'D') == [], str(w.committed()))
+
+    # ---- spec test 2, WRONG ACTIVATION: a valid pending marker, then an invalid departure: nothing is merged, the seat is reported
+    w = two(fresh())
+    w.state({'cli1': False})
+    w.set_pins('C', ['local_c1'])
+    w.marker('C', w.baseline('C', [], created=(111, 222)), dep='dBad', created=(999, 999))      # the databases were recreated between install and departure
+    g = w.stage('C', 'D')
+    check('an invalid departure (the databases were recreated): nothing merged, no pin invented, the seat is reported not synced',
+          w.committed()['pins'] == {'cli1': False} and g.result['not_synced'] == ['C'] and 'recreated' in g.f('report.txt') and w.committed()['seats']['C'] == {'dep': 'dBad'}, g.f('report.txt'))
+    for name, bk, mk in (('no baseline at all, seat known to the state', None, {}), ('baseline without created', dict(created=None), {}), ('manifest lower than at install', dict(manifest=(5, 5)), {})):
+        w = two(fresh())
+        w.state({'cli1': False}, seats={'C': {'dep': 'old'}})
+        w.set_pins('C', ['local_c1'])
+        base = None if bk is None else w.baseline('C', [], write=False, **bk)
+        w.marker('C', base, dep='dX', **mk)
+        g = w.stage('C', 'D')
+        check('%s: the seat contributes nothing and is reported' % name, w.committed()['pins'] == {'cli1': False} and g.result['not_synced'] == ['C'], g.f('report.txt'))
+    w = two(fresh())
+    w.state({'cli1': False})
+    w.set_pins('C', ['local_c1'])
+    w.marker('C', None, dep='dFirst')
+    g = w.stage('C', 'D')
+    check('the FIRST departure of a seat the state has never seen, with no baseline yet: nothing to compare, not a warning', g.result['not_synced'] == [] and 'first departure of C' in g.f('report.txt') and w.committed()['pins'] == {'cli1': False}, g.f('report.txt'))
+    w = two(fresh())
+    w.state({'cli1': False})
+    open(os.path.join(w.seats, 'C', SS.DEPARTURE), 'w').write('{"dep"')
+    g = w.stage('C', 'D')
+    m_ = w.committed()['seats']['C']['dep']
+    check('an unreadable marker is dismissed once (keyed by its content) and reported; it is not reported again', g.result['not_synced'] == ['C'] and m_.startswith('unreadable:') and w.stage('C', 'D', 'g2').result['not_synced'] == [])
+
+    # ---- spec test 3: a pending marker, the stash re-installed, a second departure: the edits of BOTH activations merge once
+    w = World(fresh())
+    w.seat('A', 'aa', [])
+    w.seat('B', 'ab', [])
+    for nm, ac in (('a', 'aa'), ('b', 'ab')):
+        w.rec(ac, 'local_%s1' % nm, 'cli1')
+        w.rec(ac, 'local_%s2' % nm, 'cli2')
+    w.state({'cli1': False, 'cli2': False})
+    w.set_pins('A', ['local_a1', 'local_a2'])                                # cli1 pinned in activation 1, cli2 in activation 2
+    lineage = w.baseline('A', [], gen='b1', created=(333, 444), write=False)  # the stash re-install kept the old gen/pins/manifest, refreshed `created`
+    w.marker('A', lineage, dep='d2', created=(333, 444))
+    g = w.stage('A', 'B')
+    check('pending marker + stash re-install + second departure: both activations\' edits merged, once', w.committed()['pins'] == {'cli1': True, 'cli2': True} and g.result['not_synced'] == [], str(w.committed()))
+
+    # ---- spec test 4: a refused switch after the commit, more edits on the departed seat: only the NEW edits apply
+    w = two(fresh())
+    w.state({'cli1': False, 'cli2': False})
+    w.rec('ac', 'local_c2', 'cli2')
+    w.rec('ad', 'local_d2', 'cli2')
+    bc = w.baseline('C', [])
+    w.set_pins('C', ['local_c1'])
+    w.marker('C', bc, dep='d1', at=1)
+    w.stage('C', 'D', 'rf1')                                                 # committed; then the switch is REFUSED and C stays live
+    check('refused-switch setup: cli1 merged as pinned', w.committed()['pins'] == {'cli1': True, 'cli2': False})
+    w.set_pins('C', ['local_c2'])                                            # more edits on C: cli1 unpinned, cli2 pinned
+    w.marker('C', bc, dep='d2', at=2)                                        # C departs again; its baseline file is still the same install
+    w.stage('C', 'D', 'rf2')
+    check('only the new edits apply: the unpin of cli1 (seen against the last merged observation, not the install baseline) and the pin of cli2', w.committed()['pins'] == {'cli1': False, 'cli2': True}, str(w.committed()))
+
+    # ---- spec test 6: a stage killed after the commit: the next stage does not replay
+    w = two(fresh())
+    w.state({'cli1': False})
+    w.set_pins('C', ['local_c1'])
+    w.marker('C', w.baseline('C', []), dep='dK')
+    real_sd = SS.stage_databases
+
+    def killed(*a, **k):
+        raise KeyboardInterrupt('killed at the deadline')
+    SS.stage_databases = killed
+    try:
+        try:
+            w.stage('C', 'D', 'k1')
+        except KeyboardInterrupt:
+            pass
+    finally:
+        SS.stage_databases = real_sd
+    st1 = w.committed()
+    check('killed after the commit: the departure is already merged; no result.json exists for that gen (the rotator installs the stash pair)', st1['pins'] == {'cli1': True} and st1['seats']['C']['dep'] == 'dK'
+          and not os.path.exists(os.path.join(w.seats, SS.WORK, 'k1', 'result.json')) and os.path.exists(os.path.join(w.seats, SS.WORK, 'k1', 'baseline-stash.json')))
+    w.set_pins('C', [])                                                      # the departed seat edits again... and then the next stage runs for another seat
+    g = w.stage('C', 'D', 'k2')
+    check('the next stage does not replay the merged marker', clean(w.committed()) == clean(st1) and g.result['status'] in ('nothing', 'synced'), str(w.committed()))
+
+    # ---- spec test 7: two pending markers apply in `at` order, not seat-name order
+    w = World(fresh())
+    for nm in 'ABC':
+        w.seat(nm, 'a' + nm.lower(), [])
+        w.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
+    w.state({'cli1': False})
+    ba = w.baseline('A', ['local_a1'])
+    w.set_pins('A', [])                                                      # A unpins (the NEWER departure, at=20)
+    w.marker('A', ba, dep='dA', at=20)
+    bb = w.baseline('B', [])
+    w.set_pins('B', ['local_b1'])                                            # B pins (the OLDER departure, at=10)
+    w.marker('B', bb, dep='dB', at=10)
+    g = w.stage('A', 'C')
+    check('pending markers apply oldest `at` first: the newer unpin on A wins over the older pin on B (name order would give the opposite)', w.committed()['pins'] == {'cli1': False}, str(w.committed()))
+
+    # ---- a failed commit is a Skip: no staged copy is built
+    w = two(fresh())
+    w.state({'cli1': False})
+    w.set_pins('C', ['local_c1'])
+    w.marker('C', w.baseline('C', []), dep='dF')
+    real_replace = os.replace
+
+    def failing_replace(src, dst, *a, **k):
+        if os.path.basename(str(dst)) == SS.STATE:
+            raise OSError('disk full')
+        return real_replace(src, dst, *a, **k)
+    os.replace = failing_replace
+    try:
+        g = w.stage('C', 'D', 'fc1')
+    finally:
+        os.replace = real_replace
+    check('the state could not be committed: the stage is skipped with that reason, nothing is staged, the old state stays, the stash pair\'s files are there', g.result['status'] == 'skipped' and 'could not be written' in g.result['reason']
+          and not g.staged and w.committed()['seats'] == {} and g.f('baseline-stash.json') is not None and g.f('stash-result.json') is not None, str(g.result))
+
+    # ---- unpin reaches the target; the last remaining pin can be unpinned
     w = two(fresh())
     w.set_pins('D', ['local_d1', 'local_foreign'])
     w.state({'cli1': True})
     b = w.baseline('C', ['local_c1'])
     w.set_pins('C', [])
-    w.checkpoint('C', b)
+    w.marker('C', b)
     g = w.stage('C', 'D')
-    check('departure unpin (the last remaining pin) reaches the target; an unmapped foreign pin is kept in both stores', g.staged and g.pins() == ['local_foreign'] and g.f('state.json')['pins'] == {'cli1': False}, str(g.pins()) + g.out)
+    check('departure unpin (the last remaining pin) reaches the target; an unmapped foreign pin is kept in both stores', g.staged and g.pins() == ['local_foreign'] and w.committed()['pins'] == {'cli1': False}, str(g.pins()) + g.out)
 
-    # invalid / missing / recreated baseline contribute nothing; no resurrection from an old stash
-    cases = [('invalid baseline', dict(valid=False), {}), ('baseline without the install\'s creation time', dict(created=False), {}),
-             ('created differs (S78: same manifest number)', {}, dict(created={'ls': 111, 'idb': 999})),
-             ('manifest lower than at activation', dict(manifest=(5, 5)), {})]
-    for name, bk, ck in cases:
-        w = two(fresh())
-        w.state({'cli1': False})
-        b = w.baseline('C', [], **bk)
-        w.set_pins('C', ['local_c1'])       # the old stash still holds a pin
-        w.checkpoint('C', b, **ck)
-        g = w.stage('C', 'D')
-        check('%s: the seat contributes nothing, reported, no pin invented' % name, g.result['status'] == 'nothing' and g.f('state.json')['pins'] == {'cli1': False}
-              and 'edits made on C were not synced' in g.f('report.txt'), g.f('report.txt'))
-        check('%s: the checkpoint is still consumed' % name, g.f('consumed.txt').startswith('C\t'))
+    # ---- no marker at all: nothing observed
     w = two(fresh())
     w.state({'cli1': False})
-    w.set_pins('C', ['local_c1'])           # no checkpoint at all: nothing observed
+    w.set_pins('C', ['local_c1'])
     g = w.stage('C', 'D')
-    check('no checkpoint: nothing observed, nothing staged', g.result['status'] == 'nothing' and g.f('consumed.txt') == '')
+    check('no marker: nothing observed, nothing staged', g.result['status'] == 'nothing' and w.committed()['pins'] == {'cli1': False})
 
-    # a vanished record and a replacement copy are no removal
+    # ---- a vanished record and a replacement copy are no removal
     w = two(fresh())
     w.set_pins('D', ['local_d1'])
     w.state({'cli1': True})
@@ -426,22 +556,22 @@ def test_logic(tmp):
     w.set_pins('C', [])
     w.drop_rec('ac', 'local_c1')            # the pinned copy vanished
     w.rec('ac', 'local_c2', 'cli1')         # a replacement copy, not in the baseline
-    w.checkpoint('C', b)
+    w.marker('C', b)
     g = w.stage('C', 'D')
-    check('vanished record + unpinned replacement copy: no removal', g.result['status'] == 'nothing' and g.f('state.json')['pins'] == {'cli1': True}, g.out)
+    check('vanished record + unpinned replacement copy: no removal', g.result['status'] == 'nothing' and w.committed()['pins'] == {'cli1': True}, g.out)
 
-    # S77: a cli with one copy unpinned and another pinned stays pinned; pin intent per cli across copies in two org folders
+    # ---- S77: a cli with one copy unpinned and another pinned stays pinned
     w = two(fresh())
     w.rec('ac', 'local_c2', 'cli1', org='org2')
     w.set_pins('D', [])
     w.state({'cli1': True})
     b = w.baseline('C', ['local_c1'])
     w.set_pins('C', ['local_c2'])           # copy 1 unpinned, copy 2 (other org folder) pinned
-    w.checkpoint('C', b)
+    w.marker('C', b)
     g = w.stage('C', 'D')
-    check('S77: one copy unpinned and another pinned stays pinned, per cli across two org folders', g.f('state.json')['pins'] == {'cli1': True} and g.pins() == ['local_d1'], g.out)
+    check('S77: one copy unpinned and another pinned stays pinned, per cli across two org folders', w.committed()['pins'] == {'cli1': True} and g.pins() == ['local_d1'], g.out)
 
-    # per cli on the TARGET: two copies, one already pinned keeps; unpin removes every copy; the preferred copy is the unarchived newest
+    # ---- per cli on the TARGET
     w = two(fresh())
     w.rec('ad', 'local_d2', 'cli1', archived=True, last=99)
     w.rec('ad', 'local_d3', 'cli1', last=5)
@@ -457,14 +587,14 @@ def test_logic(tmp):
     g = w.stage('C', 'D', 'g3')
     check('desired unpinned removes every copy, keeps the unmapped entry', g.pins() == ['local_foreign'], str(g.pins()))
 
-    # no copy on the target is counted, not added
+    # ---- no copy on the target is counted and named, not added
     w = two(fresh())
-    w.rec('ac', 'local_c9', 'cli9')
+    w.rec('ac', 'local_c9', 'cli9', title='Only on C')
     w.state({'cli1': False, 'cli9': True})
     g = w.stage('C', 'D')
-    check('a pinned session the target has no record for is counted, nothing added', g.result['status'] == 'nothing' and 'no copy on D' in g.f('report.txt') and ': 1' in g.f('report.txt').split('no copy on D')[1].splitlines()[0])
+    check('a pinned session the target has no record for is counted and named, nothing added', g.result['status'] == 'nothing' and 'no copy: Only on C (cli9)' in g.f('report.txt') and ': 1' in g.f('report.txt').split('no copy on D')[1].splitlines()[0], g.f('report.txt'))
 
-    # an id in no record, or a record without cliSessionId, is never added or removed
+    # ---- an id in no record, or a record without cliSessionId, is never added or removed
     w = two(fresh())
     w.set_pins('D', ['local_orphan'])
     w.rec('ad', 'local_nocli', 'x')
@@ -476,31 +606,18 @@ def test_logic(tmp):
     g = w.stage('C', 'D')
     check('unmapped entries kept; the record without a cliSessionId is ignored', g.pins() == ['local_orphan', 'local_d1'], str(g.pins()))
 
-    # bootstrap: disagreeing seats -> pinned; unreadable seat contributes nothing, its pin is unknown, recorded at its activation
-    w = World(fresh())
-    w.seat('C', 'ac', ['local_c1'])
-    w.seat('D', 'ad', [])
-    w.seat('E', 'ae', ['local_e2'], idb_key=False)
-    w.set_pins('E', ['local_e2'], idb_key=False)          # E's IndexedDB has no pin state: unreadable
-    for acct, sid, cli in (('ac', 'local_c1', 'cli1'), ('ad', 'local_d1', 'cli1'), ('ae', 'local_e1', 'cli1'), ('ae', 'local_e2', 'cli2'), ('ad', 'local_d2', 'cli2')):
-        w.rec(acct, sid, cli)
+    # ---- no state yet: the target's own pins are adopted as it is entered (there is no first-switch scan of the other seats)
+    w = two(fresh())
+    w.set_pins('D', ['local_d1'])
     g = w.stage('C', 'D')
-    check('bootstrap: pinned on C, unpinned on D -> becomes pinned on D; the unreadable seat is reported and contributes nothing',
-          g.pins() == ['local_d1'] and g.f('state.json')['pins'] == {'cli1': True} and 'E is unreadable' in g.f('report.txt'), g.out + g.f('report.txt'))
-    w.install(g, 'D')
-    w.set_pins('E', ['local_e2'])                           # E becomes readable (it is entered)
-    g = w.stage('D', 'E', 'g2')
-    check('bootstrap: the unreadable seat\'s pin is unknown, so E keeps its own value and records it as observed intent (S65)',
-          g.f('state.json')['pins'] == {'cli1': True, 'cli2': True} and g.pins() == ['local_e2', 'local_e1'] and g.result['n'] == 1, str(g.f('state.json')) + str(g.pins()))
-
-    # unknown clis on the target keep the target's own value and are recorded
+    check('no state file yet: nothing is read from the other seats; the target keeps its pin and it is recorded as observed intent', g.result['status'] == 'nothing' and w.committed()['pins'] == {'cli1': True} and w.committed()['seats'] == {}, str(w.committed()))
     w = two(fresh())
     w.set_pins('D', ['local_d1'])
     w.state({})
     g = w.stage('C', 'D')
-    check('unknown cli: the target keeps its pin and it is recorded as observed intent', g.result['status'] == 'nothing' and g.f('state.json')['pins'] == {'cli1': True})
+    check('unknown cli: the target keeps its pin and it is recorded as observed intent', g.result['status'] == 'nothing' and w.committed()['pins'] == {'cli1': True})
 
-    # F1a: the stash pair's baseline + config outcome are produced first and kept when the stage is Skipped
+    # ---- F1a: the stash pair's baseline + config outcome are produced first and kept when the stage is Skipped
     w = two(fresh())
     w.set_pins('D', ['local_d1'])
     open(os.path.join(w.seats, SS.STATE), 'w').write('{broken')
@@ -508,22 +625,25 @@ def test_logic(tmp):
     open(cfgp, 'wb').write(json.dumps({'preferences': {'epitaxyPrefs': {'starred-local-code-sessions': ['stale']}}}, indent=2, ensure_ascii=False).encode('utf-8'))
     g = w.stage('C', 'D', 'gs1')
     sr = g.f('stash-result.json')
-    check('a Skipped stage still leaves the stash pair\'s baseline (valid, the target\'s own pins), its config outcome and stash-result.json', g.result['status'] == 'skipped' and g.f('baseline-stash.json')['valid'] is True
-          and g.f('baseline-stash.json')['pins'] == ['local_d1'] and sr['target'] == 'D' and sr['gen'] == 'gs1' and sr['config'] == 'prepared' and g.f('config-stash.json')['pair'] == 'stash'
-          and g.result['config'] == 'prepared' and g.result['config_pair'] == 'stash' and g.f('state.json') is None and g.f('consumed.txt') is None, str(g.result) + str(sr))
-
-    # F1c: a departure that could not be read is on the line the dashboard shows
+    check('a Skipped stage (unreadable state) still leaves the stash pair\'s baseline (the target\'s own pins), its config outcome and stash-result.json', g.result['status'] == 'skipped' and g.f('baseline-stash.json')['pins'] == ['local_d1']
+          and 'valid' not in g.f('baseline-stash.json') and sr['target'] == 'D' and sr['gen'] == 'gs1' and sr['config'] == 'prepared' and g.f('config-stash.json')['pair'] == 'stash'
+          and g.result['config'] == 'prepared' and g.result['config_pair'] == 'stash', str(g.result) + str(sr))
+    check('unreadable state file: no staging, reported on the Sidebar line, the file itself untouched', g.rc == 0 and not g.staged and 'Sidebar: skipped (' in g.out and open(os.path.join(w.seats, SS.STATE)).read() == '{broken', g.out)
     w = two(fresh())
-    w.state({'cli1': False})
+    json.dump({'version': 1, 'gen': 'x', 'pins': {}}, open(os.path.join(w.seats, SS.STATE), 'w'))
+    check('a state of another version is not read: skipped, not migrated', w.stage('C', 'D').result['status'] == 'skipped')
+
+    # ---- F1c: a departure that could not be read is on the line the dashboard shows
+    w = two(fresh())
+    w.state({'cli1': False}, seats={'C': {'dep': 'old'}})
     w.set_pins('C', ['local_c1'])
-    w.checkpoint('C', w.baseline('C', [], valid=False))
+    w.marker('C', w.baseline('C', [], created=None), dep='dN')
     g = w.stage('C', 'D', 'gn1')
     check('a departure that was not synced is on the Sidebar line, not only in report.txt', g.result['not_synced'] == ['C'] and 'Sidebar: nothing to sync; edits on C not synced - see ' in g.out and g.out.strip().endswith('report.txt'), g.out)
-    w.state({'cli1': False})
     check('summary line forms', SS.summary_line({'status': 'synced', 'n': 2, 'not_synced': ['C', 'E']}, 'R') == 'Sidebar: synced 2 pins; edits on C, E not synced - see R'
           and SS.summary_line({'status': 'synced', 'n': 1}, 'R') == 'Sidebar: synced 1 pins.')
 
-    # F1b: the target's stash is read ONCE per stage (staging reuses it)
+    # ---- F1b: the target's stash is read ONCE per stage (staging reuses it)
     w = two(fresh())
     w.state({'cli1': True})
     reads = []
@@ -540,63 +660,16 @@ def test_logic(tmp):
     stash_reads = [r for r in reads if SS.WORK not in r and os.sep + 'D' + os.sep in r]
     check('the target stash is read once in a staging stage (the staged copy is verified separately)', g.staged and len(stash_reads) == 1, str(reads))
 
-    # unreadable state file -> no staging, reported, nothing consumed
-    w = two(fresh())
-    open(os.path.join(w.seats, SS.STATE), 'w').write('{broken')
-    g = w.stage('C', 'D')
-    check('unreadable state file: no staging, nothing published or consumed, reported', g.rc == 0 and not g.staged and g.f('state.json') is None and g.f('consumed.txt') is None and g.result['status'] == 'skipped' and 'Sidebar: skipped (' in g.out and 'report.txt' in g.out, g.out)
-
-    # S72: a pending departure from A survives a timed-out A->B stage and is applied at B->A
-    w = World(fresh())
-    w.seat('A', 'aa', [])
-    w.seat('B', 'ab', [])
-    w.rec('aa', 'local_a1', 'cli1')
-    w.rec('ab', 'local_b1', 'cli1')
-    w.state({'cli1': False})
-    ba = w.baseline('A', [])
-    w.set_pins('A', ['local_a1'])
-    w.checkpoint('A', ba)                                   # A->B: checkpoint written, then the stage "timed out": nothing published, nothing consumed
-    bb = w.baseline('B', [])
-    w.checkpoint('B', bb)                                   # B->A: B's own checkpoint (B changed nothing)
-    g = w.stage('B', 'A')
-    check('S72: the pending departure from A is applied at the B->A stage and consumed', g.f('state.json')['pins'] == {'cli1': True} and {x.split('\t')[0] for x in g.f('consumed.txt').splitlines()} == {'A', 'B'}, g.f('consumed.txt'))
-
-    # the leaving seat is applied last: A pins, B (leaving) unpins -> unpinned
-    w = World(fresh())
-    w.seat('A', 'aa', [])
-    w.seat('B', 'ab', [])
-    w.seat('C', 'ac', [])
-    for acct, sid in (('aa', 'local_a1'), ('ab', 'local_b1'), ('ac', 'local_c1')):
-        w.rec(acct, sid, 'cli1')
-    w.state({'cli1': False})
-    w.checkpoint('A', w.baseline('A', []))
-    w.set_pins('A', ['local_a1'])
-    w.checkpoint('B', w.baseline('B', ['local_b1']))
-    g = w.stage('B', 'C')
-    check('the leaving seat is applied last', g.f('state.json')['pins'] == {'cli1': False}, str(g.f('state.json')))
-
-    # an unchanged pin is no evidence: a stale seat cannot undo another seat's unpin
-    w = World(fresh())
-    w.seat('A', 'aa', ['local_a1'])
-    w.seat('B', 'ab', [])
-    w.seat('C', 'ac', [])
-    for acct, sid in (('aa', 'local_a1'), ('ab', 'local_b1'), ('ac', 'local_c1')):
-        w.rec(acct, sid, 'cli1')
-    w.state({'cli1': False})                                # someone unpinned it earlier
-    w.checkpoint('A', w.baseline('A', ['local_a1']))        # A still pins it, unchanged since its baseline
-    g = w.stage('B', 'C')
-    check('an unchanged pinned copy does not resurrect a pin another seat removed', g.f('state.json')['pins'] == {'cli1': False}, str(g.f('state.json')))
-
-    # refusals: the writer cannot stage (two recovery logs) -> skipped, state still published, baseline-stash valid, no staged dirs
+    # ---- refusals: the writer cannot stage (two recovery logs) -> skipped, the state still committed, baseline-stash there, no staged dirs
     w = two(fresh())
     w.state({'cli1': True})
     ld = os.path.join(w.seats, 'D', 'Local Storage', 'leveldb')
     open(os.path.join(ld, '000004.log'), 'wb').write(frame([batch(9, [(b'q', b'q')])]))
     g = w.stage('C', 'D')
-    check('writer refusal: skipped with the reason, no staged dirs, stash baseline valid, state still published',
-          g.result['status'] == 'skipped' and not g.staged and 'staging refused' in g.result['reason'] and g.f('baseline-stash.json')['valid'] and g.f('state.json') is not None and 'Sidebar: skipped (staging refused' in g.out, g.out)
+    check('writer refusal: skipped with the reason, no staged dirs, the stash baseline is there, the state was committed before', g.result['status'] == 'skipped' and not g.staged and 'staging refused' in g.result['reason']
+          and g.f('baseline-stash.json') is not None and w.committed()['pins'] == {'cli1': True} and 'Sidebar: skipped (staging refused' in g.out, g.out)
 
-    # config: written to the gen only when the list differs, with the shared config's other keys untouched
+    # ---- config: written to the gen only when the list differs, with the shared config's other keys untouched
     w = two(fresh())
     w.state({'cli1': True})
     cfg = {'preferences': {'epitaxyPrefs': {'starred-local-code-sessions': ['local_x'], 'other': {'k': 1}}}, 'top': True}
@@ -626,168 +699,12 @@ def test_logic(tmp):
     g = w.stage('C', 'D', 'g5')
     check('an unreadable (missing) config is a refusal too', g.result['config'].startswith('refused:'), str(g.result))
 
-    # --forget
+    # ---- --forget removes the baseline and the marker, under the seat lock
     w = two(fresh())
-    w.baseline('C', ['x'])
-    w.checkpoint('C', w.baseline('C', ['x']))
+    w.marker('C', w.baseline('C', ['x']))
     with contextlib.redirect_stdout(io.StringIO()):
         rc = SS.main(['--forget', 'C', '--seats', w.seats, '--app', w.app])
-    check('--forget invalidates the baseline and drops the pending departure', rc == 0 and json.load(open(os.path.join(w.seats, 'C', SS.BASELINE))) == {'valid': False} and not os.path.exists(os.path.join(w.seats, 'C', SS.DEPARTURE)))
-
-    # result.json names target, generation and pair; a generation is used once; the no-copy session is named in the report
-    w = two(fresh())
-    w.state({'cli1': True})
-    w.rec('ac', 'local_c9', 'cli9', title='Only on C')
-    w.state({'cli1': True, 'cli9': True})
-    g = w.stage('C', 'D', 'gen-a')
-    check('result.json names the target, the generation and the pair that exists', g.result['target'] == 'D' and g.result['gen'] == 'gen-a' and g.result['pair'] == 'staged' and g.staged, str(g.result))
-    check('the report names the session the target has no copy of', 'no copy: Only on C (cli9)' in g.f('report.txt'), g.f('report.txt'))
-    again = w.stage('C', 'D', 'gen-a')
-    check('a generation that already has a result is refused (exit 1), its files are not touched', again.rc == 1 and g.f('result.json')['gen'] == 'gen-a')
-    w.install(g, 'D')
-    g2 = w.stage('C', 'D', 'gen-b')
-    check('a stage with nothing to stage says pair stash', g2.result['pair'] == 'stash' and g2.result['gen'] == 'gen-b' and not g2.staged)
-
-    # bootstrap is resumable per seat: a killed stage keeps the seats it finished, the next run reads only the rest, and only a complete scan proposes state
-    w = World(fresh())
-    for nm in 'ABCD':
-        w.seat(nm, 'a' + nm.lower(), [])
-        w.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
-    w.set_pins('A', ['local_a1'])
-    reads = []
-    real_read, boom = SS.read_pins, [True]
-
-    def counting(ls, idb):
-        reads.append(ls)
-        if boom[0] and len(reads) == 4:          # the target's own read comes first, then A, B, and the kill lands on C
-            raise KeyboardInterrupt('killed at the deadline')
-        return real_read(ls, idb)
-    SS.read_pins = counting
-    try:
-        try:
-            w.stage('B', 'D', 'gb1')
-        except KeyboardInterrupt:
-            pass
-        gdir = os.path.join(w.seats, SS.WORK, 'gb1')
-        boot = json.load(open(os.path.join(w.seats, SS.BOOT)))
-        check('killed bootstrap: no state proposed, no result; the seats it finished are cached (pins and records), the stash baseline was already written', not os.path.exists(os.path.join(gdir, 'state.json')) and not os.path.exists(os.path.join(gdir, 'result.json'))
-              and sorted(boot['seats']) == ['A', 'B', 'D'] and all('pins' in v for v in boot['seats'].values()) and os.path.exists(os.path.join(gdir, 'baseline-stash.json')), str(boot['seats'].keys()))
-        boom[0] = False
-        del reads[:]
-        g = w.stage('B', 'D', 'gb2')
-        check('the next run reads only the seats that were not finished (the target comes from the cache too)', len([r for r in reads if SS.WORK not in r]) == 1 and g.rc == 0 and g.f('state.json')['pins'] == {'cli1': True} and g.pins() == ['local_d1'], str(len(reads)) + g.out)
-        w.install(g, 'D')
-        w.set_pins('A', [])                      # a seat's databases changed: its cache entry no longer matches (fingerprint), it is re-read
-        os.unlink(os.path.join(w.seats, SS.STATE))
-        del reads[:]
-        w.stage('B', 'D', 'gb3')
-        rs_ = sorted(os.path.basename(os.path.dirname(os.path.dirname(r))) for r in reads if SS.WORK not in r)
-        check('a seat whose databases changed is re-read (A edited, D reinstalled); unchanged ones come from the cache', rs_ == ['A', 'D'], str(rs_))
-    finally:
-        SS.read_pins = real_read
-    # equal-length replacement: a seat's databases rewritten with other pin ids of the SAME length (names and sizes unchanged) must not hit the cache
-    w.stage('B', 'D', 'gb5')                                         # a full scan caches every seat
-    w.set_pins('A', ['local_z1'])                                    # ['local_a1'] -> ['local_z1']: same length
-    SS.read_pins = counting
-    try:
-        del reads[:]
-        w.stage('B', 'D', 'gb6')
-        check('equal-length replacement of a seat\'s pins is a cache MISS (content fingerprint), the fresh pins are used',
-              any(os.sep + 'A' + os.sep in r for r in reads if SS.WORK not in r), str(reads))
-        check('the fresh pins, not the stale cached ones, reach the proposed state',
-              json.load(open(os.path.join(w.seats, SS.WORK, 'gb6', 'state.json')))['pins'] == {'cli1': True} and True)
-    finally:
-        SS.read_pins = real_read
-    # a failed read is never cached
-    w2 = World(fresh())
-    for nm in 'ABC':
-        w2.seat(nm, 'a' + nm.lower(), [])
-        w2.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
-    w2.set_pins('A', ['local_a1'], idb_key=False)                    # A's IndexedDB has no pin state: unreadable
-    w2.stage('B', 'C', 'gc1')
-    boot2 = json.load(open(os.path.join(w2.seats, SS.BOOT)))
-    check('a failed read is not cached (only successful reads are); records are cached, content-keyed', 'pins' not in boot2['seats']['A'] and 'pins' in boot2['seats']['B'] and 'view' in boot2['seats']['A'], str(boot2['seats'].keys()))
-    w.state({'cli1': True})
-    w.stage('B', 'D', 'gb4')
-    check('once a state exists the bootstrap cache is dropped', not os.path.exists(os.path.join(w.seats, SS.BOOT)))
-
-    # ---- r4: departure evidence by activation; consumption acknowledged inside the state; no stale pin after a refused switch
-    w = two(fresh())
-    w.state({'cli1': False})
-    b = w.baseline('C', [])
-    w.set_pins('C', ['local_c1'])
-    w.checkpoint('C', b)
-    g = w.stage('C', 'D', 'ga1')                       # the switch is then REFUSED: nothing is promoted, the checkpoint stays
-    check('a stage proposes the state only as a candidate in its gen dir: the published state and the checkpoint are untouched',
-          g.f('state.json')['pins'] == {'cli1': True} and json.load(open(os.path.join(w.seats, SS.STATE)))['pins'] == {'cli1': False} and os.path.exists(os.path.join(w.seats, 'C', SS.DEPARTURE)))
-    w.set_pins('C', [])                                # the user unpins it again on the original seat
-    w.checkpoint('C', b)
-    g = w.stage('C', 'D', 'ga2')                       # the retry
-    check('refused switch, then the unpin on the original seat, then the retry: no stale pin', g.f('state.json')['pins'] == {'cli1': False} and g.result['status'] == 'nothing', str(g.f('state.json')))
-
-    # the acknowledgement lives in the state: a checkpoint file left behind after a verified promotion is not applied again
-    w = two(fresh())
-    w.state({'cli1': False})
-    w.checkpoint('C', w.baseline('C', []))
-    w.set_pins('C', ['local_c1'])
-    g = w.stage('C', 'D', 'gk1')
-    ack = g.f('state.json')['consumed']
-    check('the candidate state acknowledges exactly the checkpoint it consumed (by content hash)', list(ack) == ['C'] and ack['C'] == SS.sha256_file(os.path.join(w.seats, 'C', SS.DEPARTURE)), str(ack))
-    w.install(g, 'D', delete=False)                    # promoted, but the file deletion did not happen (a crash between the two steps)
-    w.set_pins('C', [])
-    g = w.stage('C', 'D', 'gk2')
-    check('a consumed checkpoint that is still on disk is not read again (no double application)', g.f('consumed.txt') == '' and g.f('state.json')['pins'] == {'cli1': True}, g.f('consumed.txt') + str(g.f('state.json')))
-
-    # two consecutive staging failures, then back: the older activation's edits are not lost
-    w = World(fresh())
-    w.seat('A', 'aa', [])
-    w.seat('B', 'ab', [])
-    for nm, ac in (('a', 'aa'), ('b', 'ab')):
-        w.rec(ac, 'local_%s1' % nm, 'cli1')
-        w.rec(ac, 'local_%s2' % nm, 'cli2')
-    w.state({'cli1': False, 'cli2': False})
-    b1 = w.baseline('A', [])                                              # activation 1 of A (created 111/222)
-    b2 = dict(w.baseline('A', ['local_a1'], gen='g2'), created={'ls': 333, 'idb': 444})   # activation 2: the stash pair re-installed, with its own install time
-    w.set_pins('A', ['local_a1', 'local_a2'])                             # cli1 pinned during activation 1, cli2 during activation 2
-    e1 = {'baseline': b1, 'created': {'ls': 111, 'idb': 222}}
-    e2 = {'baseline': b2, 'created': {'ls': 333, 'idb': 444}}
-    json.dump({'entries': [e1, e2]}, open(os.path.join(w.seats, 'A', SS.DEPARTURE), 'w'))
-    g = w.stage('A', 'B', 'gt1')
-    check('two activations without a published stage: BOTH entries are read, each against its own baseline and install time; no edit is lost or rejected',
-          g.f('state.json')['pins'] == {'cli1': True, 'cli2': True} and not g.f('report.txt').count('not synced'), str(g.f('state.json')) + g.f('report.txt'))
-    old_form = {'baseline': b2, 'created': {'ls': 111, 'idb': 222}}       # the old refresh: the old baseline with the NEW install time was rejected
-    json.dump(old_form, open(os.path.join(w.seats, 'A', SS.DEPARTURE), 'w'))
-    g = w.stage('A', 'B', 'gt2')
-    check('an entry whose own install time does not match its baseline is reported not synced', 'not synced' in g.f('report.txt') and g.result['not_synced'] == ['A'], g.f('report.txt'))
-
-    # item 3: a stage that dies after the target was read still recorded the target in the progress file
-    w = World(fresh())
-    for nm in 'ABCD':
-        w.seat(nm, 'a' + nm.lower(), [])
-        w.rec('a' + nm.lower(), 'local_%s1' % nm.lower(), 'cli1')
-    reads3, real3, die = [], SS.read_pins, [True]
-
-    def dying(ls, idb):
-        reads3.append(ls)
-        if die[0] and len(reads3) == 2:
-            raise KeyboardInterrupt('killed at the deadline')
-        return real3(ls, idb)
-    SS.read_pins = dying
-    try:
-        try:
-            w.stage('A', 'D', 'gp1')
-        except KeyboardInterrupt:
-            pass
-        boot3 = json.load(open(os.path.join(w.seats, SS.BOOT)))
-        check('a stage killed right after the target: the target is already in the progress file (decoded pins)', 'D' in boot3['seats'] and 'pins' in boot3['seats']['D'], str(boot3['seats'].keys()))
-        die[0] = False
-        del reads3[:]
-        w.stage('A', 'D', 'gp2')
-        check('the next attempt does not read the target again (it comes from the cache)', not any(os.sep + 'D' + os.sep in r for r in reads3 if SS.WORK not in r), str(reads3))
-    finally:
-        SS.read_pins = real3
-
-    # item 4: --forget takes the seat lock and refuses when it is held
+    check('--forget drops the baseline and the departure marker', rc == 0 and not os.path.exists(os.path.join(w.seats, 'C', SS.BASELINE)) and not os.path.exists(os.path.join(w.seats, 'C', SS.DEPARTURE)))
     w = two(fresh())
     w.baseline('C', ['x'])
     lk = os.open(os.path.join(w.seats, '.seat-write.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
@@ -795,7 +712,7 @@ def test_logic(tmp):
     try:
         with contextlib.redirect_stdout(out):
             rc = SS.main(['--forget', 'C', '--seats', w.seats, '--app', w.app])
-        check('--forget refuses while a switch holds the seat lock and changes nothing', rc == 1 and 'refused' in out.getvalue() and json.load(open(os.path.join(w.seats, 'C', SS.BASELINE)))['valid'] is True, out.getvalue())
+        check('--forget refuses while a switch holds the seat lock and changes nothing', rc == 1 and 'refused' in out.getvalue() and os.path.exists(os.path.join(w.seats, 'C', SS.BASELINE)), out.getvalue())
     finally:
         os.close(lk)
         os.unlink(os.path.join(w.seats, '.seat-write.lock'))
@@ -803,7 +720,18 @@ def test_logic(tmp):
         rc = SS.main(['--forget', 'C', '--seats', w.seats, '--app', w.app])
     check('--forget works when the lock is free and releases it', rc == 0 and not os.path.exists(os.path.join(w.seats, '.seat-write.lock')))
 
-    # dry run writes nothing and reports
+    # ---- result.json names target, generation and pair; a generation is used once
+    w = two(fresh())
+    w.state({'cli1': True})
+    g = w.stage('C', 'D', 'gen-a')
+    check('result.json names the target, the generation and the pair that exists', g.result['target'] == 'D' and g.result['gen'] == 'gen-a' and g.result['pair'] == 'staged' and g.staged, str(g.result))
+    again = w.stage('C', 'D', 'gen-a')
+    check('a generation that already has a result is refused (exit 1), its files are not touched', again.rc == 1 and g.f('result.json')['gen'] == 'gen-a')
+    w.install(g, 'D')
+    g2 = w.stage('C', 'D', 'gen-b')
+    check('a stage with nothing to stage says pair stash', g2.result['pair'] == 'stash' and g2.result['gen'] == 'gen-b' and not g2.staged)
+
+    # ---- dry run writes nothing and reports
     w = two(fresh())
     w.state({'cli1': True})
     before = sorted(os.listdir(w.seats)) + ['.sync-history.lock']
@@ -812,7 +740,7 @@ def test_logic(tmp):
         rc = SS.main(['--dry-run', '--target', 'D', '--leaving', 'C', '--leaving-stash', '--seats', w.seats, '--app', w.app])
     check('dry run: lists the pin with its title, writes nothing', rc == 0 and 'pin t-local_d1' in out.getvalue() and sorted(set(os.listdir(w.seats)) | {'.sync-history.lock'}) == sorted(before) and not os.path.exists(os.path.join(w.seats, SS.WORK)), out.getvalue())
 
-    # verify
+    # ---- verify
     w = two(fresh())
     w.state({'cli1': True})
     g = w.stage('C', 'D', 'g7')
