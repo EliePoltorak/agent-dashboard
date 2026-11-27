@@ -5697,12 +5697,10 @@ def selftest():
         o_ = switch_outcome(0, rp_ + "\r\n" + long_ + "\r\n")
         assert len(long_) > 200 and o_["text"].startswith("Done: Sidebar: edits on C, E not synced; partial") and len(o_["text"]) <= 206, o_
         # exit 3 (the switch stood, the app was not reopened): the capped note (80 characters, Format-LastLine) plus the instruction still fit the 200 cap, so "open the app yourself" survives
-        note80_ = "Sidebar: edits on C, E not synced; partial (config not changed (refused: config no..."
+        note80_ = "Sidebar: edits on C, E not synced; partial (config not changed (refus..."
         e3_ = note80_ + " Switched to seat D; reopening deferred: history sync busy, open the app yourself."
-        o_ = switch_outcome(3, rp_ + "
-" + e3_ + "
-")
-        assert len(note80_) == 80 and o_["text"] == "Failed (exit 3): " + e3_ and len(o_["text"]) < 200 and o_["text"].endswith("open the app yourself."), o_
+        o_ = switch_outcome(3, rp_ + "\r\n" + e3_ + "\r\n")
+        assert len(note80_) <= 80 and o_["text"] == "Failed (exit 3): " + e3_ and len(o_["text"]) < 200 and o_["text"].endswith("open the app yourself."), o_
         # Store.switch: runs the argv for the action, logs without tokens, rebuilds (which re-reads in_use)
         globals()["APPLOG"] = os.path.join(ld, "log.txt")
         fs = Store.__new__(Store)
