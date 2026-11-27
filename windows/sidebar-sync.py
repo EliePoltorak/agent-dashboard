@@ -4,16 +4,19 @@ Called by claude-app-rotator.ps1 (which holds the seat lock with the app closed 
 
   --stage   --leaving <seat> --target <seat> --gen <gen>   read the seats, work out the pins the target should have, and build the
                                                           staging copy under <seats>\\.sidebar-sync-work\\<gen>\\ (READ-ONLY elsewhere)
-  --verify  --gen <gen> --target <seat>                   after the app starts: compare the three pin stores with the baseline; report only
+  --verify  --gen <gen> --target <seat>                   after the app starts: compare the three pin stores with the installed pins; report, and take a pin the app
+                                                          dropped at launch out of the seat's baseline (`pins`, `dropped`) so it is not later read as an unpin
   --dry-run --target <seat>                               print what a switch to <seat> would change; writes nothing, works with the app open
   --forget  <seat>                                        drop a seat's baseline and its departure marker (README reset steps)
+  --reset                                                 drop EVERY seat's baseline and marker, then the state file (last), under the seat lock
 
 The pin list lives in THREE places the app reads: IndexedDB `store:pin-state:dframe-starred-code` (`starredIds`), Local Storage
 `LSS-persisted.starred-local-code-sessions` and claude_desktop_config.json `preferences.epitaxyPrefs.starred-local-code-sessions`. Session
 ids differ per seat, so pins are mapped through `cliSessionId`. The design is in the plan (wiki handoffs, sidebar-sync-issue10-plan).
 
-Python's own writes: the global state file (ONE atomic replace, committed after the decision and BEFORE any staged copy is built) and <gen>\\ only.
-Every profile, baseline, marker and config write is the rotator's. Stdlib only. Run as `py -3 -I sidebar-sync.py ...`.
+Python's own writes: the global state file (ONE atomic replace, committed after the decision and BEFORE any staged copy is built), <gen>\\, and the one narrowing
+of a seat's baseline by --verify (under the seat lock, temp + replace, never creating the file); --forget and --reset delete files. Every profile, marker and config
+write is the rotator's. Stdlib only. Run as `py -3 -I sidebar-sync.py ...`.
 
 Departure evidence: each seat has ONE marker `sidebar-departure.json` = {dep, at, baseline, created}, replaced at every departure (never appended). The
 state file records, per seat, the last departure merged or dismissed {dep, base, observed}; a marker is merged once (its `dep` is then in the state), against
@@ -311,6 +314,8 @@ def compute(seats, views, state, markers, stash_pins, target, gen):
         base = m['baseline']
         prev = merged.get(s, {})
         base_pins = set(prev['observed']) if prev.get('base') == base['gen'] and isinstance(prev.get('observed'), list) else set(base['pins'])
+        if _str_list(base.get('dropped')):
+            base_pins -= set(base['dropped'])         # pins the app dropped at launch (written by the verifier) are no evidence of an unpin, on either path
         ch = departure_changes(views[s], base_pins, set(sp.pins), pins)
         pins.update(ch)
         merged[s] = {'dep': m['dep'], 'base': base['gen'], 'observed': list(sp.pins)}
@@ -740,6 +745,33 @@ def _still_installed(a, seats, inst):
     return same and live_account(a.app) == seats.get(a.target)
 
 
+NARROW_WAIT = 30
+
+
+def narrow_baseline(a, seats, inst, dropped):
+    '''The pins the app dropped at launch leave the seat's baseline (pins -= dropped, dropped |= dropped), so the next departure does not read them as unpins.
+    Under the seat lock, re-checking that this install is still the live one; an absent baseline is never created. -> the line for verify.txt.'''
+    ids = ', '.join(sorted(dropped))
+    try:
+        with Lock(os.path.join(a.seats, '.seat-write.lock'), wait=NARROW_WAIT, why='a seat switch, capture or keep-alive holds the seat lock'):
+            if not _still_installed(a, seats, inst):
+                return 'missing after launch: %s (not narrowed: this install is no longer the live one)' % ids
+            bp = os.path.join(a.seats, a.target, BASELINE)
+            b = jread(bp)
+            if not isinstance(b, dict) or not _str_list(b.get('pins')):
+                return 'missing after launch: %s (not narrowed: the baseline is unreadable)' % ids
+            old = b.get('dropped') if _str_list(b.get('dropped')) else []
+            b['pins'] = [x for x in b['pins'] if x not in dropped]
+            b['dropped'] = sorted(set(old) | dropped)
+            write_text(bp + '.tmp', jdump(b))
+            os.replace(bp + '.tmp', bp)
+    except Skip as e:
+        return 'missing after launch: %s (not narrowed: %s)' % (ids, e)
+    except (OSError, ValueError) as e:
+        return 'missing after launch: %s (not narrowed: %s)' % (ids, e)
+    return 'missing after launch, not treated as unpins: %s' % ids
+
+
 def run_verify(a, pids=app_pids, sleep=time.sleep):
     gdir = os.path.join(a.seats, WORK, a.gen)
     out = os.path.join(gdir, 'verify.txt')
@@ -772,7 +804,7 @@ def run_verify(a, pids=app_pids, sleep=time.sleep):
         if not _still_installed(a, seats, inst):
             return done(['superseded: the app is no longer on this seat\'s login from this switch'])
         base = set(inst['pins'])
-        lines, diffs = [], 0
+        lines, diffs, reads = [], 0, {}
         for name, fn in (('Local Storage', lambda: read_ls_pins(ls)[0]['value']), ('IndexedDB', lambda: read_idb_pins(idb)[0]['state']['starredIds']),
                          ('config', lambda: jread(os.path.join(a.app, 'claude_desktop_config.json'))['preferences']['epitaxyPrefs'][CFG_PIN])):
             try:
@@ -780,9 +812,17 @@ def run_verify(a, pids=app_pids, sleep=time.sleep):
                 ok = got == base
             except (L.LdbError, OSError, ValueError, KeyError, TypeError):
                 ok, got = False, None
+            reads[name] = got
             if not ok:
                 diffs += 1
             lines.append('%s: %s' % (name, 'OK' if ok else 'DIFFERS (app revert or an edit within %d s)' % a.settle))
+        # a pin the app dropped at launch (in the install, missing from Local Storage or IndexedDB) must not be read at the next departure as the user's unpin
+        dropped = set()
+        for name in ('Local Storage', 'IndexedDB'):
+            if reads.get(name) is not None:
+                dropped |= base - reads[name]
+        if dropped:
+            lines.append(narrow_baseline(a, seats, inst, dropped))
         return done(lines, diffs)
     except (OSError, ValueError, KeyError, L.LdbError, shutil.Error) as e:
         return done(['could not check (%s)' % e])
@@ -809,6 +849,35 @@ def run_forget(a):
         print('forget refused: %s; try again when it has finished' % e)
         return 1
     print('forgot the sidebar baseline and departure marker of seat %s (its next departure has nothing to compare and contributes nothing; its pins sync again after the next switch in)' % a.forget)
+    return 0
+
+
+def run_reset(a):
+    '''--reset: every seat's baseline and departure marker go, then the state file and its .tmp LAST (a state file deleted alone replays every old marker). Under the
+    seat lock (wait 0); every non-dot seat directory counts, not only those list_seats knows (legacy seats captured without owner-uuid.txt also get markers).'''
+    try:
+        with Lock(os.path.join(a.seats, '.seat-write.lock'), wait=0, why='a seat switch, capture or keep-alive holds the seat lock'):
+            for name in sorted(os.listdir(a.seats)):
+                d = os.path.join(a.seats, name)
+                if name.startswith('.') or not os.path.isdir(d):
+                    continue
+                for f in (BASELINE, DEPARTURE):
+                    try:
+                        os.unlink(os.path.join(d, f))
+                    except FileNotFoundError:
+                        pass
+            for f in (STATE, STATE + '.tmp'):
+                try:
+                    os.unlink(os.path.join(a.seats, f))
+                except FileNotFoundError:
+                    pass
+    except Skip as e:
+        print('reset refused: %s; try again when it has finished' % e)
+        return 1
+    except OSError as e:
+        print('reset stopped (%s); run it again' % e)
+        return 1
+    print("reset: every seat's sidebar baseline and departure marker and the global state are gone; the next stage starts from the entered seat's own pins")
     return 0
 
 
@@ -865,6 +934,7 @@ def main(argv=None):
     g.add_argument('--verify', action='store_true')
     g.add_argument('--dry-run', action='store_true')
     g.add_argument('--forget', metavar='SEAT')
+    g.add_argument('--reset', action='store_true', help="drop every seat's baseline and marker, then the global state")
     g.add_argument('--journey', choices=('pick', 'stores'), help='read-only helpers for test-sidebar-sync-journey.ps1')
     p.add_argument('--leaving', default='')
     p.add_argument('--target', default='')
@@ -901,6 +971,8 @@ def main(argv=None):
             return run_dry(a)
         if a.journey:
             return run_journey(a)
+        if a.reset:
+            return run_reset(a)
         return run_forget(a)
     except Exception as e:  # shortcut: the rotator treats any nonzero exit as "ran without a result"; the cause goes to stderr
         sys.stderr.write('sidebar-sync: %s: %s\n' % (type(e).__name__, e))

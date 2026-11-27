@@ -781,6 +781,105 @@ def test_logic(tmp):
     SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
     check('verify: no install record for the generation -> could not check', 'could not check' in open(os.path.join(w.seats, SS.WORK, 'other', 'verify.txt')).read())
 
+    # ---- design review 3, A: a pin the app drops at launch is taken out of the baseline (pins, dropped) and is never read as the user's unpin
+    def vworld(live_pins, lineage=False):
+        """D installed (pins ['local_d1']); the app is live on D's login with `live_pins` in Local Storage and IndexedDB. -> (world, ns)."""
+        w = two(fresh())
+        w.state({'cli1': True}, seats={'D': {'dep': 'd0', 'base': 'b1', 'observed': ['local_d1']}} if lineage else None)
+        w.baseline('D', ['local_d1'], gen='b1')
+        os.makedirs(os.path.join(w.seats, SS.WORK, 'v2'))
+        json.dump({'gen': 'v2', 'target': 'D', 'pair': 'stash', 'pins': ['local_d1'], 'created': {'ls': 111, 'idb': 222}}, open(os.path.join(w.seats, SS.WORK, 'v2', SS.INSTALL), 'w'))
+        w.set_pins('D', live_pins)
+        shutil.copytree(os.path.join(w.seats, 'D', 'Local Storage'), os.path.join(w.app, 'Local Storage'))
+        shutil.copytree(os.path.join(w.seats, 'D', 'IndexedDB'), os.path.join(w.app, 'IndexedDB'))
+        w.set_pins('D', [])                                                      # the stash D will be left with
+        json.dump({'lastKnownAccountUuid': 'ad'}, open(os.path.join(w.app, 'config.json'), 'w'))
+        json.dump({'preferences': {'epitaxyPrefs': {'starred-local-code-sessions': live_pins}}}, open(os.path.join(w.app, 'claude_desktop_config.json'), 'w'))
+        return w, SS.argparse.Namespace(seats=w.seats, app=w.app, gen='v2', target='D', wait=5, settle=0)
+
+    def verify_text(w):
+        return open(os.path.join(w.seats, SS.WORK, 'v2', 'verify.txt')).read()
+
+    def depart_D(w, pins_now):
+        """D departs: its marker carries the baseline file verbatim, its stash holds `pins_now`; the stage merges it against the target C."""
+        w.set_pins('D', pins_now)
+        w.marker('D', json.load(open(os.path.join(w.seats, 'D', SS.BASELINE))), dep='dd', at=5)
+        w.stage('D', 'C', 'dep1')
+        return w.committed()['pins']
+
+    w, ns = vworld([])
+    SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    b = json.load(open(os.path.join(w.seats, 'D', SS.BASELINE)))
+    check('A: a pin the app dropped at launch leaves the baseline (pins, dropped) and verify.txt names it', b['pins'] == [] and b['dropped'] == ['local_d1'] and 'missing after launch, not treated as unpins: local_d1' in verify_text(w), verify_text(w))
+    check('A: the departure that follows (nothing touched since) is no unpin: the pin stays', depart_D(w, []) == {'cli1': True})
+
+    w, ns = vworld([], lineage=True)
+    SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    check('A: a drop on a CONTINUED lineage (the observed path, gen b1 kept) is no unpin either', depart_D(w, []) == {'cli1': True})
+
+    w, ns = vworld(['local_d1'])
+    before = open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read()
+    SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    check('A: nothing dropped: the baseline is untouched', open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read() == before and 'differences=0' in verify_text(w))
+    check('A: an unpin made AFTER a clean check still propagates', depart_D(w, []) == {'cli1': False})
+
+    w, ns = vworld(['local_d1', 'local_other'])
+    before = open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read()
+    SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    check('A: an EXTRA pin (nothing missing) leaves the baseline untouched', open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read() == before and 'not treated as unpins' not in verify_text(w))
+
+    w, ns = vworld([])
+    before = open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read()
+    SS.NARROW_WAIT = 0
+    lk = os.open(os.path.join(w.seats, '.seat-write.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    try:
+        SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    finally:
+        os.close(lk)
+        os.unlink(os.path.join(w.seats, '.seat-write.lock'))
+    check('A: the seat lock is held: nothing is written, the line says not narrowed', open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read() == before and 'not narrowed' in verify_text(w), verify_text(w))
+    line = SS.narrow_baseline(ns, SS.list_seats(w.seats), {'created': {'ls': 9, 'idb': 9}}, {'local_d1'})
+    check('A: an install that is no longer the live one (checked under the lock): nothing is written', open(os.path.join(w.seats, 'D', SS.BASELINE), 'rb').read() == before and 'not narrowed' in line, line)
+    os.unlink(os.path.join(w.seats, 'D', SS.BASELINE))
+    line = SS.narrow_baseline(ns, SS.list_seats(w.seats), {'created': {'ls': 111, 'idb': 222}}, {'local_d1'})
+    check('A: an absent baseline is never created', not os.path.exists(os.path.join(w.seats, 'D', SS.BASELINE)) and 'not narrowed' in line, line)
+    SS.NARROW_WAIT = 30
+
+    # ---- design review 3, B: --reset removes every baseline and marker (legacy seats too), the state file LAST; a held lock changes nothing
+    def reset_world():
+        w = two(fresh())
+        w.state({'cli1': True})
+        w.set_pins('D', ['local_d1'])
+        w.set_pins('C', [])
+        w.marker('C', w.baseline('C', ['local_c1']), dep='stale', at=10)         # a stale marker: C unpinned it long ago; the state that knew about it is gone
+        os.unlink(os.path.join(w.seats, SS.STATE))                               # deleted by hand
+        legacy = os.path.join(w.seats, 'L')                                      # a legacy seat: no owner-uuid.txt, only meta.txt, with a marker
+        os.makedirs(legacy)
+        open(os.path.join(legacy, 'meta.txt'), 'w').write('captured')
+        json.dump({'dep': 'x'}, open(os.path.join(legacy, SS.DEPARTURE), 'w'))
+        return w
+    w = reset_world()
+    g = w.stage('C', 'D', 'ctl')
+    check('B setup (control): with the state deleted by hand the stale marker REPLAYS and takes the pin off D', g.staged and g.pins() == [], str(g.pins()) + g.out)
+    w = reset_world()
+    with contextlib.redirect_stdout(io.StringIO()):
+        rc = SS.main(['--reset', '--seats', w.seats, '--app', w.app])
+    gone = not any(os.path.exists(os.path.join(w.seats, x)) for x in ('C/' + SS.BASELINE, 'C/' + SS.DEPARTURE, 'L/' + SS.DEPARTURE, SS.STATE, SS.STATE + '.tmp'))
+    check('B: --reset removes every seat\'s baseline and marker (the legacy seat too) and the state file', rc == 0 and gone)
+    g = w.stage('C', 'D', 'aft')
+    check('B: after --reset nothing replays: the pin stays on D', seat_pins(w, 'D') == ['local_d1'] and g.result['status'] in ('nothing', 'synced') and not (g.staged and g.pins() == []), g.out + str(g.result))
+    w = reset_world()
+    lk = os.open(os.path.join(w.seats, '.seat-write.lock'), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    out = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out):
+            rc = SS.main(['--reset', '--seats', w.seats, '--app', w.app])
+    finally:
+        os.close(lk)
+        os.unlink(os.path.join(w.seats, '.seat-write.lock'))
+    kept = all(os.path.exists(os.path.join(w.seats, *x)) for x in (('C', SS.BASELINE), ('C', SS.DEPARTURE), ('L', SS.DEPARTURE)))
+    check('B: --reset under a held seat lock refuses and changes nothing', rc == 1 and 'refused' in out.getvalue() and kept, out.getvalue())
+
 
 def idle_priority():
     """Owner rule 10e: the test and every child it starts run at IDLE priority."""
