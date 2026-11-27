@@ -77,17 +77,6 @@ Say "Journey: pins must follow you from seat $From to seat $To and back. Seats c
 Say 'Make sure nothing in the app is mid-task: it will be closed and reopened several times.' 'Yellow'
 if (-not (Ask 'Start?')) { return }
 
-# ---- step 0a: with no state file yet, the first switch is a BOOTSTRAP that changes pins on every seat
-$stateFile = Join-Path $seats '.sidebar-sync-state.json'
-if (-not (Test-Path $stateFile)) {
-  Say 'There is no .sidebar-sync-state.json yet, so the FIRST switch of this journey is a bootstrap: it unions the pins of every readable seat' 'Yellow'
-  Say "and pins them on the seat it enters ($To). This is what it would do right now (read-only dry run):" 'Yellow'
-  Say (Invoke-Sync @('--dry-run', '--target', $To)) 'White'
-  Say 'So step 2 proves the bootstrap path (the departure path is first exercised by the unpin in step 3), and the restore in step 5 covers ONLY the test session:' 'Yellow'
-  Say 'the sessions the bootstrap pins on your seats stay pinned. Unpin them by hand if you do not want them.' 'Yellow'
-  if (-not (Ask 'Continue with that understanding?')) { return }
-}
-
 # ---- step 0: both seats must be reachable; the app must be on -From
 $info = (Invoke-Sync @('--journey', 'pick', '--leaving', $From, '--target', $To)) | ConvertFrom-Json
 if (-not $info.pick) { Say 'No session has a copy on both seats and is unpinned on both; unpin one in the app and run again.' 'Red'; return }

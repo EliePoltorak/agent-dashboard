@@ -2,10 +2,10 @@
 
   py -3 -I windows/test-sidebar-sync-sandbox.py [--dest DIR] [--keep] [--launch-app]
 
-Builds four seats under <dest>\\<stamp>\\ (default C:\\Dev\\Temp\\sidebar-sync-sandbox) with sidebar_ldb's own writer: only the pin keys, the session-record
+Builds four seats in a fresh directory <dest>\\<stamp>-<random> made with tempfile.mkdtemp (default C:\\Dev\\Temp\\sidebar-sync-sandbox) with sidebar_ldb's own writer: only the pin keys, the session-record
 fields and the config structure the engine needs, with made-up ids and titles (seat A's IndexedDB uses V8 wire version 0x0f, the others 0x10, as on the
-real machine). Then: --dry-run, --stage (bootstrap), a second --stage with a departure checkpoint, the staged stores re-read against baseline.json, and
-every stash checked byte-identical afterwards. The sandbox is deleted when the test passes (--keep keeps it).
+real machine). Then: --dry-run, --stage with a departure marker of the live seat, a second --stage over the same marker (no replay), the staged stores re-read against
+baseline.json, and every stash checked byte-identical afterwards. The sandbox is deleted when the test passes (--keep keeps it); only that directory is ever removed.
 
 --launch-app (OFF by default; needs the app installed) also opens the staged Local Storage in a second, OFFLINE app instance on a throwaway profile for 30 s
 and closes it by its own PID; it is opt-in because it starts the real app binary. Never run --stage against the real seat root; this script only ever
@@ -20,6 +20,7 @@ import random
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -79,7 +80,7 @@ def build(root):
     org = uid(rnd)
     clis = ['cli-' + uid(rnd) for _ in range(14)]
     wire = {'A': 0x0f, 'B': 0x10, 'C': 0x10, 'D': 0x10}
-    pins = {}
+    pins, recs_by_seat = {}, {}
     for i, n in enumerate(names):
         recs = []
         for k, cli in enumerate(clis):
@@ -90,6 +91,7 @@ def build(root):
             d = os.path.join(app, 'claude-code-sessions', accts[n], org)
             os.makedirs(d, exist_ok=True)
             json.dump({'sessionId': sid, 'cliSessionId': cli, 'isArchived': False, 'lastActivityAt': 1700000000000 + k, 'title': 'Synthetic session %d (%s)' % (k, n)}, open(os.path.join(d, sid + '.json'), 'w'))
+        recs_by_seat[n] = recs
         pins[n] = [sid for sid, cli, k in recs if k in (0, 1) or (n == 'C' and k in (4, 5))][:4] + ['local_' + uid(rnd)]       # + one foreign pin
         sd = os.path.join(seats, n)
         os.makedirs(sd, exist_ok=True)
@@ -100,7 +102,7 @@ def build(root):
     json.dump({'lastKnownAccountUuid': accts[live]}, open(os.path.join(app, 'config.json'), 'w'))
     cfg = {'preferences': {'epitaxyPrefs': {'starred-local-code-sessions': pins[live], 'unrelated': {'k': 1}}}}
     open(os.path.join(app, 'claude_desktop_config.json'), 'wb').write(json.dumps(cfg, indent=2, ensure_ascii=False).encode('utf-8'))
-    return accts, live, pins
+    return accts, live, pins, recs_by_seat
 
 
 def main():
@@ -110,20 +112,37 @@ def main():
     ap.add_argument('--keep', action='store_true')
     ap.add_argument('--launch-app', action='store_true')
     a = ap.parse_args()
-    root = os.path.join(a.dest, time.strftime('%Y%m%d-%H%M%S'))
+    os.makedirs(a.dest, exist_ok=True)
+    root = tempfile.mkdtemp(prefix=time.strftime('%Y%m%d-%H%M%S-'), dir=a.dest)          # a fresh, empty directory that nothing else uses
     seats, app = os.path.join(root, 'seats'), os.path.join(root, 'app')
     print('sandbox (synthetic): ' + root)
-    accts, leaving, pins = build(root)
+    accts, leaving, pins, recs = build(root)
     names = sorted(accts)
     readable = {s: SS.read_pins(*SS.seat_dirs(os.path.join(seats, s))) for s in names}
     check('every synthetic seat is readable, including seat A at V8 wire version 0x0f', all(r.ok for r in readable.values()), {s: r.why for s, r in readable.items()})
     target = 'D'
-    before = {s: tree_hash(os.path.join(seats, s)) for s in names}
     tool = os.path.join(HERE, 'sidebar-sync.py')
+    ldir = os.path.join(seats, leaving)
 
-    r = subprocess.run([sys.executable, '-I', tool, '--dry-run', '--target', target, '--root', root], capture_output=True, text=True, encoding='utf-8', errors='replace')
-    check('--dry-run runs and prints a report', r.returncode == 0 and 'pin changes for %s' % target in r.stdout, r.stdout + r.stderr)
+    # the live seat's departure: its baseline is what was installed; then the user pinned one more session (cli k=2), which the target has a copy of too
+    extra_sid = next(sid for sid, cli, k in recs[leaving] if k == 2)
+    base_pins = list(pins[leaving])
+    live_pins = base_pins + [extra_sid]
+    for dst in (app, ldir):
+        for rel in (SS.LS_DIR, SS.IDB_DIR):
+            shutil.rmtree(os.path.join(dst, *rel))
+        write_pin_dbs(os.path.join(dst, *SS.LS_DIR), os.path.join(dst, *SS.IDB_DIR), live_pins, 0x10)
+    cr = SS.live_created(app)
+    man = SS.read_pins(*SS.seat_dirs(ldir)).manifest
+    baseline = {'gen': 'b-sandbox', 'pins': base_pins, 'manifest': man, 'created': cr}
+    json.dump(baseline, open(os.path.join(ldir, SS.BASELINE), 'w'))
+    json.dump({'dep': 'dep-1', 'at': 1700000000000, 'baseline': baseline, 'created': cr}, open(os.path.join(ldir, SS.DEPARTURE), 'w'))
+    before = {s: tree_hash(os.path.join(seats, s)) for s in names}
+
+    r = subprocess.run([sys.executable, '-I', tool, '--dry-run', '--target', target, '--root', root, '--leaving-stash'], capture_output=True, text=True, encoding='utf-8', errors='replace')
+    check('--dry-run runs, reads the pending departure and reports the pin it would add on the target', r.returncode == 0 and 'pin changes for %s: 1 add' % target in r.stdout, r.stdout + r.stderr)
     print(r.stdout)
+    check('--dry-run writes no state file', not os.path.exists(os.path.join(seats, SS.STATE)))
 
     def stage(gen):
         return subprocess.run([sys.executable, '-I', tool, '--stage', '--leaving', leaving, '--target', target, '--gen', gen, '--root', root], capture_output=True, text=True, encoding='utf-8', errors='replace')
@@ -131,33 +150,22 @@ def main():
     r = stage('g1')
     g = os.path.join(seats, SS.WORK, 'g1')
     res = json.load(open(os.path.join(g, 'result.json')))
-    check('--stage (bootstrap) exits 0, reads every seat (A included) and stages', r.returncode == 0 and res['status'] == 'synced' and res['pair'] == 'staged' and res['not_synced'] == [], r.stdout + r.stderr + str(res))
+    st1 = json.load(open(os.path.join(seats, SS.STATE)))
+    check('--stage exits 0, merges the departure, stages the pin on the target', r.returncode == 0 and res['status'] == 'synced' and res['n'] == 1 and res['pair'] == 'staged' and res['not_synced'] == [], r.stdout + r.stderr + str(res))
+    check('the state was committed by the stage: version 2, the departure recorded (dep, base, observed)', st1['version'] == 2 and st1['seats'][leaving]['dep'] == 'dep-1' and st1['seats'][leaving]['base'] == 'b-sandbox'
+          and sorted(st1['seats'][leaving]['observed']) == sorted(live_pins), str(st1['seats']))
     print(r.stdout.strip())
     back = SS.read_pins(os.path.join(g, *SS.LS_DIR), os.path.join(g, *SS.IDB_DIR))
     base = json.load(open(os.path.join(g, 'baseline.json')))
     check('staged stores re-read: both agree and equal baseline.json', back.ok and back.pins == base['pins'] and base['gen'] == 'g1', back.why)
-    check('every pin the target had is still there (nothing dropped), and seat A\'s pins reached it through the bootstrap union',
-          set(readable[target].pins) <= set(back.pins) and len(back.pins) > len(readable[target].pins), str(back.pins))
-    shutil.copy(os.path.join(g, 'state.json'), os.path.join(seats, SS.STATE))       # what the rotator publishes after a verified install
+    check('every pin the target had is still there (nothing dropped) and exactly one was added', set(readable[target].pins) < set(back.pins) and len(back.pins) == len(readable[target].pins) + 1, str(back.pins))
 
-    lpins = SS.read_pins(os.path.join(app, *SS.LS_DIR), os.path.join(app, *SS.IDB_DIR))
-    ldir = os.path.join(seats, leaving)
-    for rel in (SS.LS_DIR, SS.IDB_DIR):        # the leaving seat's stash = the live copy (what the re-capture does)
-        shutil.rmtree(os.path.join(ldir, *rel))
-        shutil.copytree(os.path.join(app, *rel), os.path.join(ldir, *rel))
-    cr = SS.live_created(app)
-    man = SS.read_pins(*SS.seat_dirs(ldir)).manifest
-    json.dump({'entries': [{'baseline': {'valid': True, 'gen': 'g0', 'pins': lpins.pins[1:], 'manifest': man, 'created': cr}, 'created': cr}]}, open(os.path.join(ldir, SS.DEPARTURE), 'w'))
-    before[leaving] = tree_hash(ldir)
-    r = stage('g2')
+    r = stage('g2')                                                       # the same marker again: it was merged once, never again
     g2 = os.path.join(seats, SS.WORK, 'g2')
     res2 = json.load(open(os.path.join(g2, 'result.json')))
-    check('--stage with a departure checkpoint exits 0 and acknowledges it in the candidate state',
-          r.returncode == 0 and res2['not_synced'] == [] and leaving in json.load(open(os.path.join(g2, 'state.json')))['consumed'], r.stdout + r.stderr + str(res2))
-    print(r.stdout.strip(), res2)
-    if os.path.isdir(os.path.join(g2, 'Local Storage')):
-        back = SS.read_pins(os.path.join(g2, *SS.LS_DIR), os.path.join(g2, *SS.IDB_DIR))
-        check('second stage: staged stores agree', back.ok and back.pins == json.load(open(os.path.join(g2, 'baseline.json')))['pins'], back.why)
+    st2 = json.load(open(os.path.join(seats, SS.STATE)))
+    check('a second --stage over the same marker does not replay it: the state is unchanged apart from its gen', r.returncode == 0 and res2['not_synced'] == []
+          and {k: v for k, v in st2.items() if k != 'gen'} == {k: v for k, v in st1.items() if k != 'gen'}, r.stdout + r.stderr + str(res2))
     check('stashes are byte-identical after staging (only the gen dirs and the state file are written)', all(tree_hash(os.path.join(seats, s)) == before[s] for s in names), '')
 
     if a.launch_app:
