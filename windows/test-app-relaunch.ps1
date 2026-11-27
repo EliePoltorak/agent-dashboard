@@ -242,6 +242,7 @@ $ns = if ($env:STUB_NOTSYNCED) { ',"not_synced":["' + $env:STUB_NOTSYNCED + '"]'
 if (-not `$env:REAL_GEN) { function New-SwitchGen { `$g = '$gen'; `$null = New-Item -ItemType Directory -Path (Join-Path `$SidebarWork `$g) -Force; `$g } }
 function Invoke-AppHistorySync {}
 function Invoke-AppSeatPublish {}
+function Send-AppEndSession { `$true }
 if (-not `$env:REAL_VERIFY) { function Start-SidebarVerify { param(`$l, `$g) Write-Host "VERIFY `$l `$g" } }
 function Find-AppLauncher { @{ file = 'fake-claude.exe'; args = @() } }
 function Start-Process {
