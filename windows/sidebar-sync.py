@@ -717,13 +717,27 @@ def app_pids():
     return out
 
 
-def _owner_and_gen(a, seats):
+INSTALL = 'install.json'
+
+
+def read_install(a):
+    '''<gen>/install.json, written by the rotator after the install: {gen, target, pair, pins, created}. It is the identity and the expected pins of THIS
+    install, separate from the baseline (whose gen and pins can belong to an older lineage that a stash-pair install continued). None if absent or not ours.'''
+    try:
+        j = jread(os.path.join(a.seats, WORK, a.gen, INSTALL))
+    except (OSError, ValueError):
+        return None
+    return j if isinstance(j, dict) and j.get('gen') == a.gen and j.get('target') == a.target and isinstance(j.get('pins'), list) else None
+
+
+def _still_installed(a, seats, inst):
+    '''The app is on the target's login AND the baseline on disk is still the one written for this install (a later install rewrites it).'''
     try:
         b = jread(os.path.join(a.seats, a.target, BASELINE))
-        g = b.get('gen') if isinstance(b, dict) else None
+        same = isinstance(b, dict) and b.get('created') == inst.get('created')
     except (OSError, ValueError):
-        g = None
-    return live_account(a.app) == seats.get(a.target) and g == a.gen
+        same = False
+    return same and live_account(a.app) == seats.get(a.target)
 
 
 def run_verify(a, pids=app_pids, sleep=time.sleep):
@@ -746,15 +760,18 @@ def run_verify(a, pids=app_pids, sleep=time.sleep):
         if time.time() >= end:
             return done(['the app did not start within %d s' % a.wait])
         sleep(5)
+    inst = read_install(a)
+    if not inst:
+        return done(['could not check (no install record for this switch)'])
     sleep(a.settle)
-    if not _owner_and_gen(a, seats):
+    if not _still_installed(a, seats, inst):
         return done(['superseded: the app is no longer on this seat\'s login from this switch'])
     tmp = tempfile.mkdtemp(prefix='sidebar-verify-')
     try:
         ls, idb = snapshot_live(a.app, tmp)
-        if not _owner_and_gen(a, seats):
+        if not _still_installed(a, seats, inst):
             return done(['superseded: the app is no longer on this seat\'s login from this switch'])
-        base = set(jread(os.path.join(a.seats, a.target, BASELINE))['pins'])
+        base = set(inst['pins'])
         lines, diffs = [], 0
         for name, fn in (('Local Storage', lambda: read_ls_pins(ls)[0]['value']), ('IndexedDB', lambda: read_idb_pins(idb)[0]['state']['starredIds']),
                          ('config', lambda: jread(os.path.join(a.app, 'claude_desktop_config.json'))['preferences']['epitaxyPrefs'][CFG_PIN])):

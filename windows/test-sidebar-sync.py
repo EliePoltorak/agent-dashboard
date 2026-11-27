@@ -307,6 +307,8 @@ class World:
             b = json.load(open(os.path.join(g, 'baseline-stash.json')))
         b['created'] = {'ls': 111, 'idb': 222}
         json.dump(b, open(os.path.join(d, SS.BASELINE), 'w'))
+        json.dump({'gen': os.path.basename(g), 'target': target, 'pair': 'staged' if os.path.isdir(os.path.join(g, 'Local Storage')) else 'stash',
+                   'pins': b['pins'], 'created': b['created']}, open(os.path.join(g, SS.INSTALL), 'w'))
 
 
 IDB_KEY = b'\x00\x05\x01\x01\x01\x23' + 'store:pin-state:dframe-starred-code'.encode('utf-16-be')
@@ -761,11 +763,23 @@ def test_logic(tmp):
     json.dump({'lastKnownAccountUuid': 'ac'}, open(os.path.join(w.app, 'config.json'), 'w'))
     SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
     check('verify: another login is live -> superseded, nothing compared', 'superseded' in open(os.path.join(w.seats, SS.WORK, 'g7', 'verify.txt')).read())
-    ns.gen = 'other'
     json.dump({'lastKnownAccountUuid': 'ad'}, open(os.path.join(w.app, 'config.json'), 'w'))
+    b_ = json.load(open(os.path.join(w.seats, 'D', SS.BASELINE)))
+    b_['created'] = {'ls': 5, 'idb': 6}
+    json.dump(b_, open(os.path.join(w.seats, 'D', SS.BASELINE), 'w'))
+    SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    check('verify: a later install rewrote the baseline (other created) -> superseded', 'superseded' in open(os.path.join(w.seats, SS.WORK, 'g7', 'verify.txt')).read())
+    # a stash-lineage switch: the baseline keeps an OLDER gen and pins; verification uses this install's own record and is not superseded
+    b_.update({'gen': 'old-lineage', 'pins': ['stale'], 'created': {'ls': 111, 'idb': 222}})
+    json.dump(b_, open(os.path.join(w.seats, 'D', SS.BASELINE), 'w'))
+    json.dump({'preferences': {'epitaxyPrefs': {'starred-local-code-sessions': ['local_d1']}}}, open(os.path.join(w.app, 'claude_desktop_config.json'), 'w'))
+    SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
+    v = open(os.path.join(w.seats, SS.WORK, 'g7', 'verify.txt')).read()
+    check('verify: a stash-lineage switch (baseline gen and pins older than this install) is verified against the install record, not superseded', 'superseded' not in v and 'differences=0' in v, v)
+    ns.gen = 'other'
     os.makedirs(os.path.join(w.seats, SS.WORK, 'other'))
     SS.run_verify(ns, pids=lambda: [1], sleep=lambda s: None)
-    check('verify: the baseline carries a different gen -> superseded', 'superseded' in open(os.path.join(w.seats, SS.WORK, 'other', 'verify.txt')).read())
+    check('verify: no install record for the generation -> could not check', 'could not check' in open(os.path.join(w.seats, SS.WORK, 'other', 'verify.txt')).read())
 
 
 def idle_priority():
