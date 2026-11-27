@@ -177,11 +177,11 @@ function Close-AppGracefully {
   $p = @(Get-AppProcs)
   if ($p.Count -eq 0) { return $true }
   Write-Host "Closing the Claude app (PIDs $($p.Id -join ', '))..." -ForegroundColor DarkGray
-  if (-not (Send-AppEndSession @($p.Id))) { Write-Host 'The app refused or did not answer the request to quit (or had no window to ask).' -ForegroundColor Red; return $false }
+  if (-not (Send-AppEndSession @($p.Id))) { $script:CloseWhy = 'it refused or did not answer the request to quit (or had no window to ask)'; return $false }
   $deadline = (Get-Date).AddSeconds($script:CloseWaitSec)
   while ((Get-Date) -lt $deadline -and @(Get-AppProcs).Count) { Start-Sleep -Milliseconds 500 }
   $left = @(Get-AppProcs)
-  if ($left.Count) { Write-Host "Still running $($script:CloseWaitSec) s after it was asked to quit: PIDs $($left.Id -join ', ')." -ForegroundColor Red; return $false }
+  if ($left.Count) { $script:CloseWhy = "PIDs $($left.Id -join ', ') still running $($script:CloseWaitSec) s after it was asked to quit"; return $false }
   $true
 }
 function Find-AppLauncher {
@@ -469,7 +469,7 @@ function Invoke-SwitchRelaunch([string]$label) {
     $wasRunning = @(Get-AppProcs).Count -gt 0
     $recorded = Get-AppAccountUuid
     if (-not (Close-AppGracefully)) {
-      Write-Host "ABORTED: the Claude app did not quit (see above). If it lives in the system tray, quit it from the tray icon and run this again. Nothing was switched; it was not force-closed (that can tear the login storage)." -ForegroundColor Red
+      Write-Host "ABORTED: the Claude app did not quit: $($script:CloseWhy). If it lives in the system tray, quit it from the tray icon and run this again. Nothing was switched; it was not force-closed (that can tear the login storage)." -ForegroundColor Red
       exit 1
     }
     $script:SwitchDone = $false
