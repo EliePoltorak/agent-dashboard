@@ -617,6 +617,41 @@ function Get-SidebarSyncCommand { @{ file = 'pwsh'; args = @('-NoProfile', '-Fil
   $sc = New-Scenario 'r5h'
   $r = Invoke-Scenario $sc "Set-SidebarNote ('Sidebar: partial (' + ('x' * 200) + ')') `$null ''; Write-Host ('NOTELEN=' + `$script:SidebarNote.Length); Write-Host ('WARN=' + `$script:SidebarWarn)" @{}
   Check 'a long sidebar note is cut to 80 characters (and still counts as a warning)' ($r.out -match 'NOTELEN=80' -and $r.out -match 'WARN=True') $r.out
+  # r6 (1a): the dismissed marker cannot be written -> nothing of the seat is mirrored: its stash and its old marker stay, the line says not synced
+  $sc = New-Scenario 'r6a'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  '{"dep":"old1","at":1,"baseline":{"gen":"b","pins":["p"],"created":{"ls":1,"idb":2}},"created":{"ls":3,"idb":4}}' | Set-Content "$sc\.claude-app-seats\C\sidebar-departure.json"
+  $before = Rdf "$sc\.claude-app-seats\C\sidebar-departure.json"
+  $r = Invoke-Scenario $sc "function Write-DepartureMarker(`$seat, `$m) { throw 'disk full' }`nInvoke-Switch 'D'" @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
+  Check 'a departure marker that cannot be written: the seat is NOT mirrored (stash and old marker untouched), the switch still stands, the line says the edits are not synced' ($r.rc -eq 0 -and (Rdf "$sc\.claude-app-seats\C\$ls") -eq 'C-stash' -and (Rdf "$sc\.claude-app-seats\C\sidebar-departure.json") -eq $before -and $r.out -match 'Sidebar: edits on C not synced' -and (Rdf "$sc\AppData\Claude\$ls") -eq 'D-stash') "rc=$($r.rc) $($r.out)"
+
+  # r6 (1b): replacing a FULL marker the state has not merged folds two visits into one delta: the line warns
+  $sc = New-Scenario 'r6b'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  '{"dep":"old1","at":1,"baseline":{"gen":"b","pins":["p"],"created":{"ls":1,"idb":2}},"created":{"ls":3,"idb":4}}' | Set-Content "$sc\.claude-app-seats\C\sidebar-departure.json"
+  $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
+  Check 'an unmerged marker replaced at the next departure: "edits on C from two visits merged; check its pins" leads the line' ($r.rc -eq 0 -and $r.out -match 'Sidebar: edits on C from two visits merged; check its pins') "rc=$($r.rc) $($r.out)"
+  $sc = New-Scenario 'r6c'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  '{"dep":"old1","at":1,"baseline":{"gen":"b","pins":["p"],"created":{"ls":1,"idb":2}},"created":{"ls":3,"idb":4}}' | Set-Content "$sc\.claude-app-seats\C\sidebar-departure.json"
+  '{"version":2,"gen":"x","pins":[],"seats":{"C":{"dep":"old1"}}}' | Set-Content "$sc\.claude-app-seats\.sidebar-sync-state.json"
+  $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
+  Check 'a marker the state already merged is replaced without the two-visits warning' ($r.rc -eq 0 -and $r.out -notmatch 'two visits') "rc=$($r.rc) $($r.out)"
+
+  # r6 (2): a stash-lineage switch (the baseline keeps an older gen) writes the install record and IS verified
+  $sc = New-Scenario 'r6d'; $env:STUB_LOG = Join-Path $sc 'stub.log'
+  '{"gen":"bX","pins":["old"],"manifest":{"ls":7,"idb":8},"created":{"ls":5,"idb":6}}' | Set-Content "$sc\.claude-app-seats\D\sidebar-baseline.json"
+  '{"dep":"d0","at":1,"baseline":{"gen":"bX","pins":["old"],"manifest":{"ls":7,"idb":8},"created":{"ls":5,"idb":6}},"created":{"ls":5,"idb":6}}' | Set-Content "$sc\.claude-app-seats\D\sidebar-departure.json"
+  $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'stash'; STUB_LOG = $env:STUB_LOG }
+  $bl = Get-Content "$sc\.claude-app-seats\D\sidebar-baseline.json" -Raw | ConvertFrom-Json
+  $ij = Get-Content "$sc\.claude-app-seats\.sidebar-sync-work\$gen\install.json" -Raw | ConvertFrom-Json
+  Check 'stash-lineage switch: the baseline keeps gen bX, the install record carries THIS gen, the installed pair''s pins and the baseline''s created, and the verifier is started for it' ($bl.gen -eq 'bX' -and $ij.gen -eq $gen -and $ij.target -eq 'D' -and $ij.pair -eq 'stash' -and $ij.pins -contains 'stash' -and $ij.created.ls -eq $bl.created.ls -and $r.out -match "VERIFY D $gen") "rc=$($r.rc) $($r.out)"
+
+  # r6 (3): a known-owner target without a readable config.json holding the owner's uuid is refused BEFORE anything moves
+  foreach ($case in @('missing', 'noaccount', 'unreadable')) {
+    $sc = New-Scenario "r6e$case"
+    $cj = "$sc\.claude-app-seats\D\config.json"
+    if ($case -eq 'missing') { Remove-Item -LiteralPath $cj } elseif ($case -eq 'noaccount') { '{"other":1}' | Set-Content $cj } else { 'not json {' | Set-Content $cj }
+    $r = Invoke-Scenario $sc "Invoke-Switch 'D'" @{ STUB_MODE = 'stash' }
+    Check "preflight ($case config.json of a known-owner target): REFUSED before the move, live login and backups untouched" ($r.rc -eq 1 -and $r.out -match 'REFUSED: seat .D. has no readable config.json' -and (Rdf "$sc\AppData\Claude\$ls") -eq 'live-C' -and -not (Test-Path "$sc\.claude-app-seats\.swap-backups\$gen") -and (Rdf "$sc\.claude-app-seats\C\$ls") -eq 'C-stash') "rc=$($r.rc) $($r.out)"
+  }
 } catch { $fail++; Write-Host "  FAIL  the test itself stopped: $_" -ForegroundColor Red } finally {
   foreach ($k in $keep.Keys) { Set-Item "env:$k" $keep[$k] }
   Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue

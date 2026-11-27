@@ -191,6 +191,8 @@ $script:SeatLockHeld    = $null
 $script:LockOwnedByRelaunch = $false   # --relaunch holds ONE lock from before the app is closed to after it is up again; Invoke-Switch then neither takes nor releases it
 $GenPattern = '^\d{8}-\d{6}(-[0-9a-f]{4,12})?$'
 $script:ProfileIntact   = $true      # after a refusal: is the old login verified back in place? (the relaunch reopens the app only if so)
+$script:LostDepartures  = @()         # seats whose departure marker could not be written: nothing of theirs was mirrored, their edits are not synced
+$script:TwoVisits        = @()         # seats whose unmerged marker was replaced: two visits are folded into one delta
 $script:SidebarNote     = ''         # 'Sidebar: ...' on the last line, which the dashboard shows (200 characters): no paths in it
 $script:SidebarWarn     = $false     # a note that needs attention goes FIRST on that line, so a cut keeps it
 $script:RobocopyRc      = 0
@@ -373,6 +375,10 @@ function Remove-OldGens([string]$dir) {
   }
 }
 function Set-SidebarNote([string]$text, [string]$gdir, [string]$reportLine) {
+  $pre = @()
+  if ($script:LostDepartures.Count) { $pre += "edits on $($script:LostDepartures -join ', ') not synced" }
+  if ($script:TwoVisits.Count) { $pre += "edits on $($script:TwoVisits -join ', ') from two visits merged; check its pins" }
+  if ($pre.Count) { $text = $text -replace '^Sidebar: ', ("Sidebar: " + ($pre -join '; ') + '; ') }
   # one line the dashboard shows, without paths; a reason that has no Python report gets a one-line report of its own, and a note that needs attention
   # has its report path on an indented line of its own BEFORE the last line
   if ($reportLine) {
@@ -544,7 +550,7 @@ function Invoke-Switch([string]$label) {
   Assert-Closed
   # --relaunch already holds the lock (taken before the app was closed); otherwise take it here.
   if (-not ($script:LockOwnedByRelaunch -and $script:SeatLockHeld)) { $script:SeatLockHeld = Enter-SeatLock }
-  $script:ProfileIntact = $true; $script:SidebarNote = ''; $script:SidebarWarn = $false
+  $script:ProfileIntact = $true; $script:SidebarNote = ''; $script:SidebarWarn = $false; $script:LostDepartures = @(); $script:TwoVisits = @()
   $bk = $null; $baselineOk = $false
   try {
     # Both checks again UNDER the lock, before anything is re-captured, staged or published: a switch that waited for the lock may now find the app
@@ -560,6 +566,12 @@ function Invoke-Switch([string]$label) {
     $liveUuid = Get-AppAccountUuid
     $prev = Find-SeatByUuid $liveUuid
     $same = [bool]($prev -and $prev -eq $label)
+    # a known-owner target that will be INSTALLED must show a readable config.json with the owner's account uuid, before anything is moved: the check after the
+    # install can only report, with the live profile already moved aside. (A seat with no owner-uuid.txt is the legacy case and is not held to this.)
+    if (-not $same -and $owner -and $snapUuid -ne $owner) {
+      Write-Host "REFUSED: seat '$label' has no readable config.json with the account uuid of its owner ($owner); installing it could not be verified. Nothing was switched." -ForegroundColor Red
+      exit 1
+    }
     $gen = $null; $gdir = $null
     $stage = $null; $pair = $null
     if ($same) {
@@ -575,23 +587,36 @@ function Invoke-Switch([string]$label) {
       if ($prev) {
         $created = Get-LiveCreation      # before the re-capture
         $pdst = Join-Path $SeatRoot $prev
-        # 1) the departure marker in its DISMISSED form before anything is mirrored: a crash during the mirror leaves "no merge", never a half-valid marker
-        try { Write-DepartureMarker $prev @{ dep = $gen } } catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
-        # the login file is copied FIRST and must succeed: a failed copy here followed by the /MIR below would overwrite the stash of $prev with another login
-        foreach ($f in $LoginFiles) {
-          if (Test-Path "$AppDir\$f") {
-            try { Copy-Item "$AppDir\$f" "$pdst\$f" -Force -ErrorAction Stop }
-            catch { Write-Host "REFUSED: could not save the current login's $f into seat '$prev' ($($_.Exception.Message)). Nothing was switched." -ForegroundColor Red; exit 1 }
+        # 1) the departure marker in its DISMISSED form before anything is mirrored: a crash during the mirror leaves "no merge", never a half-valid marker.
+        # If it cannot be written, NOTHING of the seat is mirrored: its stash and its old marker stay as they are (the old marker still describes that stash),
+        # and the edits made since are reported as not synced.
+        $oldM = Read-JsonFile (Join-Path $pdst 'sidebar-departure.json')
+        $markerOk = $true
+        try { Write-DepartureMarker $prev @{ dep = $gen } }
+        catch { $markerOk = $false; $script:LostDepartures += $prev; Write-Host "  (sidebar: departure of '$prev' not recorded, its stash is left as it was: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+        if ($markerOk) {
+          # a FULL marker the state has not merged yet is replaced: the two visits become one delta (per-visit records were ruled out), so say so
+          if ($oldM -and $oldM['baseline']) {
+            $stt = Read-JsonFile (Join-Path $SeatRoot '.sidebar-sync-state.json')
+            $mergedDep = try { $stt['seats'][$prev]['dep'] } catch { $null }
+            if ($mergedDep -ne $oldM['dep']) { $script:TwoVisits += $prev }
           }
-        }
-        $recapOk = $true
-        foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Mirror-Dir "$AppDir\$d" "$pdst\$d"; if ($script:RobocopyRc -ge 8) { $recapOk = $false } } }
-        "captured=$stamp account=$(Get-ProfileEmail $prev) uuid=$liveUuid label=$prev" | Set-Content "$pdst\meta.txt" -Encoding UTF8
-        Write-Host "Re-captured '$prev' (kept its login fresh -- no re-sign-in when you switch back)." -ForegroundColor DarkGray
-        if ($recapOk -and $created.ls -and $created.idb) {
-          # the FULL marker, only after a good mirror: the baseline file of $prev verbatim (it is checked against `created` at the next stage)
-          try { Write-DepartureMarker $prev @{ dep = $gen; at = [DateTime]::UtcNow.ToFileTimeUtc(); baseline = (Read-JsonFile (Join-Path $pdst 'sidebar-baseline.json')); created = $created } }
-          catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+          # the login file is copied FIRST and must succeed: a failed copy here followed by the /MIR below would overwrite the stash of $prev with another login
+          foreach ($f in $LoginFiles) {
+            if (Test-Path "$AppDir\$f") {
+              try { Copy-Item "$AppDir\$f" "$pdst\$f" -Force -ErrorAction Stop }
+              catch { Write-Host "REFUSED: could not save the current login's $f into seat '$prev' ($($_.Exception.Message)). Nothing was switched." -ForegroundColor Red; exit 1 }
+            }
+          }
+          $recapOk = $true
+          foreach ($d in $LoginDirs)  { if (Test-Path "$AppDir\$d") { Mirror-Dir "$AppDir\$d" "$pdst\$d"; if ($script:RobocopyRc -ge 8) { $recapOk = $false } } }
+          "captured=$stamp account=$(Get-ProfileEmail $prev) uuid=$liveUuid label=$prev" | Set-Content "$pdst\meta.txt" -Encoding UTF8
+          Write-Host "Re-captured '$prev' (kept its login fresh -- no re-sign-in when you switch back)." -ForegroundColor DarkGray
+          if ($recapOk -and $created.ls -and $created.idb) {
+            # the FULL marker, only after a good mirror: the baseline file of $prev verbatim (it is checked against `created` at the next stage)
+            try { Write-DepartureMarker $prev @{ dep = $gen; at = [DateTime]::UtcNow.ToFileTimeUtc(); baseline = (Read-JsonFile (Join-Path $pdst 'sidebar-baseline.json')); created = $created } }
+            catch { Write-Host "  (sidebar: departure of '$prev' not recorded: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+          }
         }
       } else {
         Write-Host "Live login (uuid $liveUuid) doesn't match any captured seat -- NOT re-capturing." -ForegroundColor DarkYellow
@@ -683,10 +708,12 @@ function Invoke-Switch([string]$label) {
       # files and outcome (stash-result.json, baseline-stash.json, config-stash.json).
       if ($pair -eq 'staged') { $sres = $stage.result; $bsrc = "$gdir\baseline.json"; $cfgFile = "$gdir\config.json" }
       else { $sres = $stage.stashRes; $bsrc = "$gdir\baseline-stash.json"; $cfgFile = "$gdir\config-stash.json" }
-      $candidate = $null
+      $candidate = $null; $installPins = $null
       try {
         $created2 = Get-LiveCreation
         $b0 = $null
+        # the pins the INSTALLED pair holds, whatever lineage the baseline continues: the verifier's expectation
+        if ($sres -and (Test-Path -LiteralPath $bsrc)) { $bi = Read-JsonFile $bsrc; if ($bi -and $bi.ContainsKey('pins')) { $installPins = @($bi['pins']) } }
         if ($sres) {
           if ($pair -eq 'staged') { if (Test-Path -LiteralPath $bsrc) { $b0 = Read-JsonFile $bsrc } }
           else {
@@ -736,7 +763,11 @@ function Invoke-Switch([string]$label) {
     Release-SwitchLock
     if ($bk) { Write-Host "Previous login backed up at: $bk" -ForegroundColor DarkGray }
   } finally { Release-SwitchLock }
-  if ($baselineOk) { Start-SidebarVerify $label $gen }
+  if ($baselineOk -and $null -ne $installPins) {
+    # the verifier gets this install's own record (gen, expected pins, creation times), separate from the baseline used for departure deltas
+    try { Write-JsonAtomic (Join-Path $gdir 'install.json') @{ gen = $gen; target = $label; pair = $pair; pins = $installPins; created = $candidate['created'] }; Start-SidebarVerify $label $gen }
+    catch { Write-Host "  (sidebar verify not started: $($_.Exception.Message))" -ForegroundColor DarkYellow }
+  }
   # Retention (owner-approved 2026-10-20): keep the newest 10 swap backups. With no limit this folder
   # reached 181 copies / 63 GB and filled C:. Only stamp-named dirs are touched, newest first, so the
   # backup just written above is always kept; a failed delete is reported, never fatal to the switch.
